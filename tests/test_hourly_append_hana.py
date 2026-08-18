@@ -15,9 +15,12 @@ from __future__ import annotations
 
 import sys
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -151,6 +154,97 @@ class TestComputeAppendPlanHana(unittest.TestCase):
             self.db, ["usd-krw", "jpy-krw", "eur-krw"], datetime(2026, 5, 25, 14, 0))
         self.assertEqual(deleted, 3)                                   # usd/jpy/eur old atomic
         self.assertEqual(self.db.query(SourceHourlyRate).count(), 1)   # recent usd만
+
+
+class TestCli(unittest.TestCase):
+    def test_cli_rejects_as_of_write(self):
+        import os
+        import subprocess
+        import tempfile
+        script = str(Path(__file__).resolve().parent.parent / "scripts"
+                     / "hourly_append_hana_source_hourly_rates.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = os.environ.copy()
+            env["DATABASE_URL"] = f"sqlite:///{Path(temp_dir) / 'guard.db'}"
+            r = subprocess.run(
+                [sys.executable, script, "--write", "--allow-production-write",
+                 "--as-of", "2026-08-21T12:00"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--as-of는 PLAN 전용", r.stdout + r.stderr)
+
+    def test_as_of_write_rejected_before_production_guard(self):
+        stdout = StringIO()
+        argv = [
+            "hourly_append_hana_source_hourly_rates.py",
+            "--currency",
+            "all",
+            "--write",
+            "--allow-production-write",
+            "--as-of",
+            "2026-08-21T12:00",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(AH.B, "check_production_write_guard") as production_guard,
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            AH.main()
+        self.assertEqual(raised.exception.code, 2)
+        production_guard.assert_not_called()
+
+    def test_cron_write_without_as_of_reaches_production_guard(self):
+        stdout = StringIO()
+        argv = [
+            "hourly_append_hana_source_hourly_rates.py",
+            "--currency",
+            "all",
+            "--write",
+            "--allow-production-write",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(
+                AH.B,
+                "check_production_write_guard",
+                return_value="test production guard stop",
+            ) as production_guard,
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            AH.main()
+        self.assertEqual(raised.exception.code, 2)
+        production_guard.assert_called_once_with(True)
+        self.assertIn("test production guard stop", stdout.getvalue())
+
+    def test_plan_as_of_reaches_read_path(self):
+        argv = [
+            "hourly_append_hana_source_hourly_rates.py",
+            "--currency",
+            "all",
+            "--as-of",
+            "2026-08-21T12:00",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch("app.database.SessionLocal"),
+            patch.object(
+                AH,
+                "fetch_candidates_hana",
+                side_effect=RuntimeError("read path reached"),
+            ) as fetch_candidates,
+            self.assertRaisesRegex(RuntimeError, "read path reached"),
+        ):
+            AH.main()
+        fetch_candidates.assert_called_once()
+        self.assertEqual(
+            fetch_candidates.call_args.args[1],
+            datetime(2026, 8, 21, 12, 0),
+        )
 
 
 if __name__ == "__main__":

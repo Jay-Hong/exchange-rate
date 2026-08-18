@@ -12,7 +12,10 @@ import ast
 import json
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 import uuid
 from datetime import datetime
@@ -23,6 +26,9 @@ if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
 import repair_krx_hourly_rows as H  # noqa: E402
+from app.krx_hourly_incidents import (  # noqa: E402
+    KRX_HOURLY_INCIDENT_20260814_BUCKETS_KST,
+)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 PG_URL = os.getenv("PG_TEST_URL", "").strip()
@@ -58,6 +64,28 @@ def _delete_kwargs(ad: dict) -> dict:
     return {k: ad[k] for k in H.DELETE_ADAPTER_KEYS}
 
 class TestAllowlist(unittest.TestCase):
+
+    def test_delete_allowlist_uses_shared_incident_policy(self):
+        self.assertEqual(
+            H.DELETE_ALLOWLIST,
+            KRX_HOURLY_INCIDENT_20260814_BUCKETS_KST,
+        )
+
+    def test_help_boots_with_only_the_repair_script_present(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script = pathlib.Path(temp_dir) / "repair_krx_hourly_rows.py"
+            shutil.copy2(REPO_ROOT / "scripts" / script.name, script)
+            env = os.environ.copy()
+            env["PYTHONPATH"] = ""
+            result = subprocess.run(
+                [sys.executable, str(script), "--help"],
+                cwd=temp_dir,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--revert-from", result.stdout)
 
     def test_exactly_four_buckets(self):
         self.assertEqual(len(H.DELETE_ALLOWLIST), 4)

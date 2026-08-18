@@ -1271,14 +1271,65 @@ done
 [ "${HEALTH:-}" = healthy ] || { echo "rollback health 실패"; exit 1; }
 ```
 
-### 2026-08-14 시간봉 오염 재집계 금지
+### 2026-08-14 시간봉 오염 재집계·복구 계약
 
-이번 통합 후보에는 미커밋 `app/krx_hourly_incidents.py`와 append guard가 포함되지 않는다.
-따라서 운영 배포 전후 모두 **유효 집계 창이 2026-08-14 08:00 이상 12:00 미만 KST와
-교차하는 모든 KRX 수동 `--write`**를 금지한다(오염 bucket: 08:00·09:00·10:00·11:00).
-큰 `--window-days`뿐 아니라 작은 창을 `--as-of`로 과거에 이동하는 실행도 같은 금지 대상이다.
-자동 `:11` cron의 현재 기본 창은 별개다. 오염 원시 tick이 retention으로 소멸하거나 incident
-guard가 별도 배포되기 전에는 이 금지를 해제하지 않는다.
+**사실**: 07:00 rollover가 만기 휴장 보정 누락으로 8/17까지 지연된 동안 수집한
+08:00·09:00·10:00·11:00 KST 네 bucket은 만료 월물 A75608 가격이다(2026-08-17 삭제 완료).
+00:00~06:00은 전날 시작 야간장의 정상 A75608이라 보존했고, 12:00~15:00은 A75609 원천 tick이
+없어 합성하지 않는다.
+
+**금지 (배포 전후 공통)**: **유효 집계 창이 2026-08-14 08:00 이상 12:00 미만 KST와 교차하는
+모든 KRX 수동 `--write`**를 금지한다. 큰 `--window-days`뿐 아니라 작은 창을
+`--as-of`로 과거에 이동하는 실행도 같은 금지 대상이다. 자동 `:11` cron의 현재 기본 창(2일)은 8/14를 덮지 않아 별개다.
+
+**배포 전 — 운영 이미지에 incident guard 없음**: 위 금지를 강제하는 코드가 없다. 사람이 지킨다.
+
+**배포 후 — incident guard 포함 이미지**:
+
+- 네 append CLI(Bithumb/Investing/Hana/KRX)의 `--as-of`는 PLAN 전용이다. `--as-of ... --write`는
+  DB 접근 전 exit 2 — 과거 재집계와 미래 cutoff 이동을 모두 막는다. 정상 cron(:05/:07/:09/:11)은
+  `--as-of`를 전달하지 않는다.
+- 오염 candidate는 PLAN에서 `[GUARD PREVIEW]`, WRITE에서 `[GUARD SKIP]`으로 제외한다.
+  clean candidate write와 retention prune은 계속한다.
+- **기존 오염 행은 자동 삭제하지 않는다.** `[GUARD WARNING]`은 성공 증거가 아니라 **DB에 오염 행이
+  존재한다는 발견 신호**다 — 나오면 배포 판정을 차단하고 조사한다(전제: 배포 전 오염행 0 확인).
+- **incident guard 배포만으로는 위 금지를 해제하지 않는다.** guard는 재집계 경로를 막을 뿐
+  이미 존재하는 행을 지우지 않는다. 해제는 아래 **해제 조건**만으로 판정한다.
+
+**배포 후 검증**:
+
+- 편입 확인 — **authoritative 판정은 `krx_deploy_verifier.py collect`의 소스 지문 게이트**다.
+  컨테이너 전체 지문을 `expected_source_sha256`과 비교해 불일치면 FAILED("배포하려던 revision이
+  아니다")를 낸다. 아래는 눈으로 읽는 **보조 확인**이며 값만 출력할 뿐 대조하지 않는다
+  (호스트에는 python/의존성이 없어 컨테이너 안에서 돌린다):
+
+  ```bash
+  docker exec exchange-rate-app ls -l /app/app/krx_hourly_incidents.py
+  docker exec exchange-rate-app sha256sum /app/scripts/hourly_append_krx_source_hourly_rates.py
+  ```
+
+  ⛔ 로그에 GUARD 라인이 없는 것은 **증거가 아니다**(구 코드도 같은 상황에서 침묵한다).
+- 동작 확인(양성 대조) — read-only PLAN을 8/14와 교차시켜 실행한다:
+
+  ```bash
+  docker exec exchange-rate-app \
+    python /app/scripts/hourly_append_krx_source_hourly_rates.py \
+    --window-days 14 --as-of 2026-08-18T16:30
+  ```
+
+  `[GUARD PREVIEW]`에 08:00·09:00·10:00·11:00 네 bucket이 표시되어야 한다(`--write` 없음).
+- 자동 cron 기대값 — 기본 창(2일)이 8/14를 안 덮으므로 `GUARD SKIP`/`GUARD PREVIEW`는 **0건**이 정상이다.
+
+**repair 계약**: `scripts/repair_krx_hourly_rows.py`의 allowlist는 이 사건의 preimage/receipt에
+고정되어 **사후 확장하지 않는다**(확장하면 발행된 영수증의 `--revert-from`이 소급 무효화된다).
+도구는 module-level `app.*` import 없이 단일 파일 import·`--help`·CLI parsing이 가능해야 하고,
+실제 dry-run·write·`--revert-from`은 `app.database`·`app.models`가 있는 앱 이미지에서 실행한다.
+신규 incident 모듈과의 값 정합은 테스트가 잠근다.
+
+**해제 조건**: 날짜 추정이 아니라 실측으로 판정한다. `source_rates` cleanup은 매일 03:31:01 KST에
+`get_utc_now() - 30d` 미만을 지운다. 8/14 오염 tick(마지막 11:30:01 KST)을 제거하는 첫 실행은
+**2026-09-14 03:31:01 KST**다 — 9/13 실행의 cutoff는 8/14 03:31:01 KST라 11:30 tick이 남는다.
+그 cleanup 성공과 해당 오염 raw tick **0건**을 확인한 뒤 해제한다. 확인 전에는 날짜가 지나도 유지한다.
 
 ### live 검증 (배포 다음 KRX 영업일)
 

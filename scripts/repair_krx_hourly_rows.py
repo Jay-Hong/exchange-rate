@@ -15,10 +15,11 @@
 월물을 알 수 없다. 귀속 근거는 **당시 구독 상태**이고, `point_count`가 11시에 급감한
 것(57→269→111→**29**)이 A75608의 최종거래일 11:30 조기 종료와 일치한다.
 
-주의: 원본 `source_rates` tick은 30일간 남고 월물을 저장하지 않는다. 정상 cron의
-기본 2일 재집계 창은 이미 8/14를 벗어났지만, 원본이 소멸하는 2026-09-14 전까지
-`hourly_append_krx_source_hourly_rates.py --window-days 14` 같은 수동 장기 재집계를
-실행하면 이 4버킷이 다시 생길 수 있다. 그 기간에는 해당 창의 수동 재집계를 금지한다.
+주의: 원본 `source_rates` tick은 30일간 남고 월물을 저장하지 않는다. 운영 이미지에
+incident guard가 배포되기 전에는 원본이 소멸하는 2026-09-14 전후까지 8/14를 포함한
+수동 재집계를 금지한다. guard가 포함된 버전은 이 네 candidate만 `[GUARD SKIP]`하고
+나머지 clean candidate와 prune을 계속 처리하며, 기존 오염 행은 경고만 하고 자동
+삭제하지 않는다. 기존 행 정리는 이 도구의 명시적 transaction으로만 수행한다.
 
 ## 왜 기존 helper를 못 쓰는가
 
@@ -49,14 +50,15 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Callable, Optional
 
-# 프로젝트 루트를 sys.path에 추가 — 리포 관용구. 이게 없으면 문서에 적힌 실행
-# 형태가 `ModuleNotFoundError: app`으로 죽는다(일봉 도구에서 실측된 결함).
+# 프로젝트 루트를 sys.path에 추가 — DB adapter를 만드는 실행 경로에서만 app을 import한다.
+# argparse/help와 순수 계약은 사고 대응 시 스크립트 단독으로도 부팅돼야 한다.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 SOURCE = "krx"
 ASSET = "usd-krw-futures"
 
-# 삭제 대상 — naive KST 시 정각. **코드에 고정**되며 CLI로 확장할 수 없다.
+# 삭제 대상 — naive KST 시 정각. **이 사건과 발행된 영수증에 고정**되며 사후
+# 확장하거나 CLI로 바꿀 수 없다. append 정책과의 정합은 테스트에서 비교한다.
 DELETE_ALLOWLIST: tuple[datetime, ...] = (
     datetime(2026, 8, 14, 8, 0, 0),
     datetime(2026, 8, 14, 9, 0, 0),

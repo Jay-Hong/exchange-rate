@@ -24,6 +24,10 @@ source_hourly_rates의 Hana(usd/jpy/eur)를 going-forward로 최신 유지하는
   python scripts/hourly_append_hana_source_hourly_rates.py [--currency all] [--window-days 2] [--as-of 2026-06-08T14:30]
   # write (통화별 upsert+atomic prune — production DB는 --allow-production-write):
   python scripts/hourly_append_hana_source_hourly_rates.py --currency all --write --allow-production-write
+
+안전 제약:
+  - `--as-of`는 PLAN 전용이다. write와 결합하면 과거 bucket 재생성 또는 미래 cutoff 기반
+    대량 prune이 가능하므로 DB 접근 전에 fail-close한다.
 """
 
 # 표준 라이브러리
@@ -183,6 +187,11 @@ def main() -> None:
 
     if args.window_days <= 0:
         print(f"[CONFIG 실패] --window-days는 1 이상이어야 함 (got {args.window_days})")
+        sys.exit(2)
+
+    time_override_error = A.validate_write_time_override(args.write, args.as_of)
+    if time_override_error:
+        print(f"[GUARD 차단] {time_override_error}")
         sys.exit(2)
 
     try:

@@ -20,6 +20,10 @@ default(PLAN)는 read-only: source_rates(rollup) + source_hourly_rates(기존 �
   python scripts/hourly_append_source_hourly_rates.py [--window-days 2] [--as-of 2026-06-08T14:30]
   # write (upsert+prune — production DB는 --allow-production-write):
   python scripts/hourly_append_source_hourly_rates.py --write --allow-production-write
+
+안전 제약:
+  - `--as-of`는 PLAN 전용이다. 과거 시점은 과거 tick을 다시 candidate로 만들고,
+    미래 시점은 retention cutoff를 앞당겨 정상 bucket을 대량 prune할 수 있어 fail-close한다.
 """
 
 # 표준 라이브러리
@@ -60,6 +64,13 @@ def previous_complete_hour(now_kst: datetime) -> datetime:
     """
     current_hour = now_kst.replace(minute=0, second=0, microsecond=0, tzinfo=None)
     return current_hour - timedelta(hours=1)
+
+
+def validate_write_time_override(write: bool, as_of: Optional[str]) -> Optional[str]:
+    """임의 기준시각 write를 차단한다. `--as-of`는 PLAN 조회에만 허용한다."""
+    if write and as_of:
+        return "--as-of는 PLAN 전용이며 --write와 함께 사용할 수 없음"
+    return None
 
 
 @dataclass(frozen=True)
@@ -223,6 +234,11 @@ def main() -> None:
 
     if args.window_days <= 0:
         print(f"[CONFIG 실패] --window-days는 1 이상이어야 함 (got {args.window_days})")
+        sys.exit(2)
+
+    time_override_error = validate_write_time_override(args.write, args.as_of)
+    if time_override_error:
+        print(f"[GUARD 차단] {time_override_error}")
         sys.exit(2)
 
     if args.as_of:

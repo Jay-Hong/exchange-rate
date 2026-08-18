@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import sys
 import unittest
+from contextlib import redirect_stdout
 from datetime import date, datetime
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +43,111 @@ class TestWindow(unittest.TestCase):
         # KST 14:00 = UTC 05:00
         self.assertEqual(K.kst_naive_to_utc_naive(datetime(2026, 6, 10, 14, 0)),
                          datetime(2026, 6, 10, 5, 0))
+
+
+class TestHistoricalWriteGuards(unittest.TestCase):
+    def test_as_of_is_plan_only(self):
+        self.assertIsNone(K.A.validate_write_time_override(False, "2026-08-14T12:00"))
+        self.assertIsNone(K.A.validate_write_time_override(True, None))
+        self.assertIsNotNone(
+            K.A.validate_write_time_override(True, "2026-08-14T12:00")
+        )
+
+    def test_main_rejects_as_of_write_before_database_access(self):
+        stdout = StringIO()
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+            "--as-of",
+            "2026-08-14T12:00",
+        ]
+        with patch.object(sys, "argv", argv), redirect_stdout(stdout):
+            with patch.object(K.B, "check_production_write_guard") as db_guard:
+                with self.assertRaises(SystemExit) as raised:
+                    K.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--as-of는 PLAN 전용", stdout.getvalue())
+        db_guard.assert_not_called()
+
+    def test_cron_write_without_as_of_reaches_production_guard(self):
+        stdout = StringIO()
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(
+                K.B,
+                "check_production_write_guard",
+                return_value="test production guard stop",
+            ) as production_guard,
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            K.main()
+        self.assertEqual(raised.exception.code, 2)
+        production_guard.assert_called_once_with(True)
+        self.assertIn("test production guard stop", stdout.getvalue())
+
+    def test_plan_as_of_reaches_read_path(self):
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--as-of",
+            "2026-08-21T12:00",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch("app.database.SessionLocal"),
+            patch.object(
+                K,
+                "_fetch_candidates",
+                side_effect=RuntimeError("read path reached"),
+            ) as fetch_candidates,
+            self.assertRaisesRegex(RuntimeError, "read path reached"),
+        ):
+            K.main()
+        fetch_candidates.assert_called_once()
+        self.assertEqual(
+            fetch_candidates.call_args.args[1],
+            datetime(2026, 8, 21, 12, 0),
+        )
+
+    def test_exact_contaminated_buckets_are_detected(self):
+        candidates = [
+            {"bucket_ts_kst": datetime(2026, 8, 14, 7, 0)},
+            {"bucket_ts_kst": datetime(2026, 8, 14, 8, 0)},
+            {"bucket_ts_kst": datetime(2026, 8, 14, 11, 0)},
+            {"bucket_ts_kst": datetime(2026, 8, 14, 12, 0)},
+        ]
+        self.assertEqual(
+            K.known_contaminated_bucket_hits(candidates),
+            [datetime(2026, 8, 14, 8, 0), datetime(2026, 8, 14, 11, 0)],
+        )
+
+    def test_only_contaminated_candidates_are_excluded(self):
+        candidates = [
+            {"bucket_ts_kst": datetime(2026, 8, 14, 7, 0)},
+            {"bucket_ts_kst": datetime(2026, 8, 14, 8, 0)},
+            {"bucket_ts_kst": datetime(2026, 8, 14, 11, 0)},
+            {"bucket_ts_kst": datetime(2026, 8, 14, 12, 0)},
+        ]
+        self.assertEqual(
+            K.exclude_known_contaminated_candidates(candidates),
+            [candidates[0], candidates[3]],
+        )
+
+    def test_empty_and_adjacent_candidates_are_allowed(self):
+        self.assertEqual(K.known_contaminated_bucket_hits([]), [])
+        self.assertEqual(
+            K.known_contaminated_bucket_hits([
+                {"bucket_ts_kst": datetime(2026, 8, 14, 7, 0)},
+                {"bucket_ts_kst": datetime(2026, 8, 14, 12, 0)},
+            ]),
+            [],
+        )
 
 
 class TestRollupKrx(unittest.TestCase):
@@ -132,6 +239,211 @@ class _DbCase(unittest.TestCase):
 
 
 class TestComputeAppendPlan(_DbCase):
+    def test_main_skips_contaminated_candidate_but_still_prunes(self):
+        candidate = K.rollup_ticks_to_hourly([
+            (1416.5, datetime(2026, 8, 13, 23, 30)),  # KST 8/14 08:30
+        ])[0]
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+        ]
+        stdout = StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(K.B, "check_production_write_guard", return_value=None),
+            patch.object(K.B, "ensure_source_hourly_rates_table_created"),
+            patch.object(K.B, "write_with_transaction") as writer,
+            patch.object(K, "prune_old_buckets", return_value=0) as pruner,
+            patch.object(
+                K,
+                "_fetch_candidates",
+                return_value=(
+                    datetime(2026, 8, 12, 8, 0),
+                    datetime(2026, 8, 18, 7, 0),
+                    [candidate],
+                ),
+            ),
+            patch("app.database.SessionLocal", self.Session),
+            redirect_stdout(stdout),
+        ):
+            K.main()
+        self.assertIn("[GUARD SKIP]", stdout.getvalue())
+        self.assertIn("오염 버킷 제외 후 clean candidate 0", stdout.getvalue())
+        self.assertNotIn("무세션 구간", stdout.getvalue())
+        writer.assert_not_called()
+        pruner.assert_called_once()
+
+    def test_main_clean_candidate_calls_writer_and_pruner(self):
+        candidate = K.rollup_ticks_to_hourly([
+            (1416.5, datetime(2026, 8, 17, 23, 30)),  # KST 8/18 08:30
+        ])[0]
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+        ]
+        stdout = StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(K.B, "check_production_write_guard", return_value=None),
+            patch.object(K.B, "ensure_source_hourly_rates_table_created"),
+            patch.object(
+                K.B,
+                "write_with_transaction",
+                return_value=(True, [], {"inserted": 1, "updated": 0}),
+            ) as writer,
+            patch.object(K, "prune_old_buckets", return_value=0) as pruner,
+            patch.object(
+                K,
+                "_fetch_candidates",
+                return_value=(
+                    datetime(2026, 8, 16, 9, 0),
+                    datetime(2026, 8, 18, 8, 0),
+                    [candidate],
+                ),
+            ),
+            patch("app.database.SessionLocal", self.Session),
+            redirect_stdout(stdout),
+        ):
+            K.main()
+        writer.assert_called_once()
+        written_candidates = writer.call_args.args[0]
+        self.assertEqual(
+            [row["bucket_ts_kst"] for row in written_candidates],
+            [datetime(2026, 8, 18, 8, 0)],
+        )
+        pruner.assert_called_once()
+        self.assertNotIn("[GUARD SKIP]", stdout.getvalue())
+
+    def test_main_mixed_window_writes_only_clean_candidates(self):
+        contaminated = K.rollup_ticks_to_hourly([
+            (1416.5, datetime(2026, 8, 13, 23, 30)),  # KST 8/14 08:30
+        ])[0]
+        clean = K.rollup_ticks_to_hourly([
+            (1414.3, datetime(2026, 8, 17, 23, 30)),  # KST 8/18 08:30
+        ])[0]
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+            "--window-days",
+            "14",
+        ]
+        stdout = StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(K.B, "check_production_write_guard", return_value=None),
+            patch.object(K.B, "ensure_source_hourly_rates_table_created"),
+            patch.object(
+                K.B,
+                "write_with_transaction",
+                return_value=(True, [], {"inserted": 1, "updated": 0}),
+            ) as writer,
+            patch.object(K, "prune_old_buckets", return_value=0) as pruner,
+            patch.object(
+                K,
+                "_fetch_candidates",
+                return_value=(
+                    datetime(2026, 8, 4, 9, 0),
+                    datetime(2026, 8, 18, 8, 0),
+                    [contaminated, clean],
+                ),
+            ),
+            patch("app.database.SessionLocal", self.Session),
+            redirect_stdout(stdout),
+        ):
+            K.main()
+
+        writer.assert_called_once()
+        written_candidates = writer.call_args.args[0]
+        self.assertEqual(
+            [row["bucket_ts_kst"] for row in written_candidates],
+            [datetime(2026, 8, 18, 8, 0)],
+        )
+        self.assertIs(writer.call_args.kwargs["require_empty"], False)
+        pruner.assert_called_once()
+        self.assertIn("[GUARD SKIP]", stdout.getvalue())
+
+    def test_plan_preview_matches_filtered_write_candidates(self):
+        contaminated = K.rollup_ticks_to_hourly([
+            (1416.5, datetime(2026, 8, 13, 23, 30)),
+        ])[0]
+        clean = K.rollup_ticks_to_hourly([
+            (1414.3, datetime(2026, 8, 17, 23, 30)),
+        ])[0]
+        argv = ["hourly_append_krx_source_hourly_rates.py", "--window-days", "14"]
+        stdout = StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(
+                K,
+                "_fetch_candidates",
+                return_value=(
+                    datetime(2026, 8, 4, 9, 0),
+                    datetime(2026, 8, 18, 8, 0),
+                    [contaminated, clean],
+                ),
+            ),
+            patch("app.database.SessionLocal", self.Session),
+            redirect_stdout(stdout),
+        ):
+            K.main()
+        output = stdout.getvalue()
+        self.assertIn("[GUARD PREVIEW]", output)
+        self.assertIn("candidate bucket: 1", output)
+
+    def test_existing_contaminated_row_warns_without_blocking_clean_write(self):
+        self._bucket(datetime(2026, 8, 14, 8, 0), 1416.5)
+        self.db.commit()
+        clean = K.rollup_ticks_to_hourly([
+            (1414.3, datetime(2026, 8, 17, 23, 30)),
+        ])[0]
+        argv = [
+            "hourly_append_krx_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+        ]
+        stdout = StringIO()
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(K.B, "check_production_write_guard", return_value=None),
+            patch.object(K.B, "ensure_source_hourly_rates_table_created"),
+            patch.object(
+                K.B,
+                "write_with_transaction",
+                return_value=(True, [], {"inserted": 1, "updated": 0}),
+            ) as writer,
+            patch.object(K, "prune_old_buckets", return_value=0),
+            patch.object(
+                K,
+                "_fetch_candidates",
+                return_value=(
+                    datetime(2026, 8, 16, 9, 0),
+                    datetime(2026, 8, 18, 8, 0),
+                    [clean],
+                ),
+            ),
+            patch("app.database.SessionLocal", self.Session),
+            redirect_stdout(stdout),
+        ):
+            K.main()
+        self.assertIn("[GUARD WARNING]", stdout.getvalue())
+        writer.assert_called_once()
+
+    def test_existing_contaminated_query_is_source_and_asset_scoped(self):
+        incident_bucket = datetime(2026, 8, 14, 8, 0)
+        self._bucket(
+            incident_bucket,
+            1416.5,
+            source="bithumb",
+            asset="usdt-krw",
+            close_basis="bithumb_observed_hourly",
+        )
+        self._bucket(incident_bucket, 1416.5, asset="other-krx-asset")
+        self.db.commit()
+        self.assertEqual(K.existing_known_contaminated_buckets(self.db), [])
+
     def test_inserted_and_prune(self):
         now = datetime(2026, 6, 10, 14, 30)  # 직전 완료 13:00
         self._tick(datetime(2026, 6, 10, 4, 30), 1521.0)   # KST 13:30 → bucket 13:00 신규

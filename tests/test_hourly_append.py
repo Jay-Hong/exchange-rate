@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import sys
 import unittest
+from contextlib import redirect_stdout
 from datetime import datetime
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -166,12 +169,111 @@ class TestWriteHelpers(unittest.TestCase):
 
 
 class TestCli(unittest.TestCase):
-    def test_window_days_guard(self):
+    def test_as_of_write_guard_contract(self):
+        self.assertIsNone(A.validate_write_time_override(False, "2026-08-21T12:00"))
+        self.assertIsNone(A.validate_write_time_override(True, None))
+        self.assertIsNotNone(
+            A.validate_write_time_override(True, "2026-08-21T12:00")
+        )
+
+    def test_cli_rejects_as_of_write(self):
+        import os
         import subprocess
+        import tempfile
         script = str(Path(__file__).resolve().parent.parent / "scripts"
                      / "hourly_append_source_hourly_rates.py")
-        r = subprocess.run([sys.executable, script, "--window-days", "0"],
-                           capture_output=True, text=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = os.environ.copy()
+            env["DATABASE_URL"] = f"sqlite:///{Path(temp_dir) / 'guard.db'}"
+            r = subprocess.run(
+                [sys.executable, script, "--write", "--allow-production-write",
+                 "--as-of", "2026-08-21T12:00"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--as-of는 PLAN 전용", r.stdout + r.stderr)
+
+    def test_as_of_write_rejected_before_production_guard(self):
+        stdout = StringIO()
+        argv = [
+            "hourly_append_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+            "--as-of",
+            "2026-08-21T12:00",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(A.B, "check_production_write_guard") as production_guard,
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            A.main()
+        self.assertEqual(raised.exception.code, 2)
+        production_guard.assert_not_called()
+
+    def test_cron_write_without_as_of_reaches_production_guard(self):
+        stdout = StringIO()
+        argv = [
+            "hourly_append_source_hourly_rates.py",
+            "--write",
+            "--allow-production-write",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch.object(
+                A.B,
+                "check_production_write_guard",
+                return_value="test production guard stop",
+            ) as production_guard,
+            redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            A.main()
+        self.assertEqual(raised.exception.code, 2)
+        production_guard.assert_called_once_with(True)
+        self.assertIn("test production guard stop", stdout.getvalue())
+
+    def test_plan_as_of_reaches_read_path(self):
+        argv = [
+            "hourly_append_source_hourly_rates.py",
+            "--as-of",
+            "2026-08-21T12:00",
+        ]
+        with (
+            patch.object(sys, "argv", argv),
+            patch("app.database.SessionLocal"),
+            patch.object(
+                A,
+                "_fetch_candidates",
+                side_effect=RuntimeError("read path reached"),
+            ) as fetch_candidates,
+            self.assertRaisesRegex(RuntimeError, "read path reached"),
+        ):
+            A.main()
+        fetch_candidates.assert_called_once()
+        self.assertEqual(
+            fetch_candidates.call_args.args[1],
+            datetime(2026, 8, 21, 12, 0),
+        )
+
+    def test_window_days_guard(self):
+        import os
+        import subprocess
+        import tempfile
+        script = str(Path(__file__).resolve().parent.parent / "scripts"
+                     / "hourly_append_source_hourly_rates.py")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env = os.environ.copy()
+            env["DATABASE_URL"] = f"sqlite:///{Path(temp_dir) / 'guard.db'}"
+            r = subprocess.run(
+                [sys.executable, script, "--window-days", "0"],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
         self.assertEqual(r.returncode, 2)          # DB 연결 전 fail-close
         self.assertIn("window-days", r.stdout + r.stderr)
 

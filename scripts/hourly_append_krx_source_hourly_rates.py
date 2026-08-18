@@ -38,6 +38,14 @@ blackout·복구일은 정당 DIVERGE — hard gate 금지, 관찰용 진단만.
   python scripts/hourly_append_krx_source_hourly_rates.py --write --window-days 14 --allow-production-write
   # going-forward (cron :11 예정):
   python scripts/hourly_append_krx_source_hourly_rates.py --write --allow-production-write
+
+안전 제약:
+  - `--as-of`는 PLAN 전용이다. 과거 시점은 오염 raw tick을 다시 candidate로 만들고,
+    미래 시점은 retention cutoff를 앞당겨 정상 버킷을 대량 prune할 수 있어 fail-close한다.
+  - 2026-08-14 08:00~11:00 KST 원천 tick은 만료 월물 A75608에서 수집된 값이다.
+    이 guard가 포함된 버전에서는 어떤 window 옵션을 쓰더라도 이 네 candidate만
+    명시적으로 제외하고 나머지 clean candidate와 retention prune은 계속 처리한다.
+    이미 DB에 존재하는 오염 행은 자동 삭제하지 않고 repair 도구 실행을 경고한다.
 """
 
 # 표준 라이브러리
@@ -55,8 +63,12 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 # 로컬 애플리케이션
 import backfill_bithumb_source_hourly_rates as B  # noqa: E402  (공유 write_with_transaction)
+import hourly_append_source_hourly_rates as A  # noqa: E402  (공유 시간 override guard)
 import app.source_hourly_rates as H  # noqa: E402
 from app import config  # noqa: E402
+from app.krx_hourly_incidents import (  # noqa: E402
+    KRX_HOURLY_INCIDENT_20260814_BUCKETS_KST,
+)
 from app.models import SourceHourlyRate, SourceRate  # noqa: E402
 from app.source_hourly_rates import floor_bucket_ts_kst  # noqa: E402
 
@@ -67,6 +79,17 @@ SOURCE_METHOD = "observed_rollup"
 OHLC_QUALITY = "observed_rollup"
 
 _KST_TZ = timezone(timedelta(hours=9))
+
+# 2026-08-14 07:00 KST rollover가 휴장 보정 누락으로 지연되어, 아래 버킷의
+# source_rates는 만료 월물 A75608 가격이다. 시간봉 행은 2026-08-17에 삭제했지만
+# raw tick retention 동안 재집계하면 다시 생길 수 있어 write 후보에서 차단한다.
+# 정상 retention이면 원본은 2026-09-14 전후 소멸한다. 상수는 사건 이력으로 영구
+# 보존하며, 복구된 데이터셋이나 과거 데이터 재주입에서 이 raw tick을 **재집계하는
+# 경로만** 차단한다. 기존 오염 행 정리는 repair_krx_hourly_rows.py의 명시적
+# transaction만 담당한다.
+KNOWN_CONTAMINATED_BUCKETS = frozenset(
+    KRX_HOURLY_INCIDENT_20260814_BUCKETS_KST
+)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -92,6 +115,41 @@ def previous_complete_hour(now_kst: datetime) -> datetime:
 def retention_cutoff_kst(now_kst: datetime, retention_days: int) -> datetime:
     """retention prune 경계 (이 시각 미만 bucket 삭제 대상). now.floor(hour) - retention_days."""
     return now_kst.replace(minute=0, second=0, microsecond=0, tzinfo=None) - timedelta(days=retention_days)
+
+
+def known_contaminated_bucket_hits(candidates: list[dict]) -> list[datetime]:
+    """후보 중 알려진 만료 월물 오염 버킷을 정렬해 반환한다."""
+    return sorted({
+        candidate["bucket_ts_kst"]
+        for candidate in candidates
+        if candidate.get("bucket_ts_kst") in KNOWN_CONTAMINATED_BUCKETS
+    })
+
+
+def exclude_known_contaminated_candidates(candidates: list[dict]) -> list[dict]:
+    """알려진 오염 버킷만 제외하고 clean candidate 순서를 보존한다."""
+    return [
+        candidate
+        for candidate in candidates
+        if candidate.get("bucket_ts_kst") not in KNOWN_CONTAMINATED_BUCKETS
+    ]
+
+
+def existing_known_contaminated_buckets(db) -> list[datetime]:
+    """DB에 이미 존재하는 알려진 오염 시간봉을 조회한다. 자동 삭제하지 않는다."""
+    rows = (
+        db.query(SourceHourlyRate.bucket_ts_kst)
+        .filter(
+            SourceHourlyRate.source == SOURCE,
+            SourceHourlyRate.asset == ASSET,
+            SourceHourlyRate.bucket_ts_kst.in_(
+                KRX_HOURLY_INCIDENT_20260814_BUCKETS_KST
+            ),
+        )
+        .order_by(SourceHourlyRate.bucket_ts_kst.asc())
+        .all()
+    )
+    return [row.bucket_ts_kst for row in rows]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -346,6 +404,11 @@ def main() -> None:
         print(f"[CONFIG 실패] --window-days는 1 이상이어야 함 (got {args.window_days})")
         sys.exit(2)
 
+    time_override_error = A.validate_write_time_override(args.write, args.as_of)
+    if time_override_error:
+        print(f"[GUARD 차단] {time_override_error}")
+        sys.exit(2)
+
     if args.as_of:
         now_kst = datetime.fromisoformat(args.as_of)
         if now_kst.tzinfo is not None:
@@ -369,8 +432,27 @@ def main() -> None:
 
     from app.database import SessionLocal
     db = SessionLocal()
+    contaminated: list[datetime] = []
     try:
         window_start, prev_complete, candidates = _fetch_candidates(db, now_kst, args.window_days)
+        contaminated = known_contaminated_bucket_hits(candidates)
+        if contaminated:
+            rendered = ", ".join(bucket.isoformat() for bucket in contaminated)
+            label = "GUARD SKIP" if args.write else "GUARD PREVIEW"
+            print(
+                f"[{label}] 만료 월물 A75608에서 수집된 2026-08-14 오염 버킷을 "
+                f"write 후보에서 제외: {rendered}"
+            )
+            candidates = exclude_known_contaminated_candidates(candidates)
+
+        existing_contaminated = existing_known_contaminated_buckets(db)
+        if existing_contaminated:
+            rendered = ", ".join(bucket.isoformat() for bucket in existing_contaminated)
+            print(
+                "[GUARD WARNING] DB에 기존 오염 시간봉이 남아 있음. 자동 삭제하지 않음; "
+                f"repair_krx_hourly_rows.py로 검토 필요: {rendered}"
+            )
+
         plan = compute_append_plan_from_candidates(
             db, candidates, window_start, prev_complete, now_kst, retention_days)
         print_plan(plan)
@@ -385,7 +467,10 @@ def main() -> None:
     # candidates 0이 정상. write fail-close(exit 1) 대신 skip(exit 0) + prune만 수행
     # (cron이 매시간 도는 환경에서 무세션 hour를 오류로 만들지 않음).
     if not candidates:
-        print("[WRITE SKIP] candidate 0 bucket — 무세션 구간 (주말/휴장/세션 갭) 정상 skip.")
+        if contaminated:
+            print("[WRITE SKIP] 오염 버킷 제외 후 clean candidate 0 — upsert 없이 prune 계속.")
+        else:
+            print("[WRITE SKIP] candidate 0 bucket — 무세션 구간 (주말/휴장/세션 갭) 정상 skip.")
     else:
         print(f"=== WRITE — upsert {len(candidates)} candidate (require_empty 미사용 — append 갱신 허용) ===")
         success, write_issues, outcome = B.write_with_transaction(

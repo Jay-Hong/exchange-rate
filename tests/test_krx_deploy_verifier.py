@@ -532,10 +532,34 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
     def test_document_matches_usdt_verifier_and_incident_boundary(self):
         self.assertIn("/admin/api/usdt-redis-stats", self.text)
         self.assertNotIn("USDT는 이 도구가 안 덮는다", self.text)
-        self.assertIn("2026-08-14 시간봉 오염 재집계 금지", self.text)
-        self.assertIn("미커밋 `app/krx_hourly_incidents.py`", self.text)
+        self.assertIn("2026-08-14 시간봉 오염 재집계·복구 계약", self.text)
+        # incident guard 가 편입됐다 — "미포함" 서술이 되살아나면 문서가 기전을 부정한다.
+        self.assertNotIn("미커밋 `app/krx_hourly_incidents.py`", self.text)
+        self.assertNotIn("append guard가 포함되지 않는다", self.text)
+        # 배포 전/후 경계가 **둘 다** 남아야 한다. 배포 전 금지를 지우면 배포까지의
+        # 구간이 무방비가 되고, 배포 후 계약을 지우면 기전이 문서에서 사라진다.
         self.assertIn("2026-08-14 08:00 이상 12:00 미만 KST", self.text)
         self.assertIn("`--as-of`로 과거에 이동", self.text)
+        self.assertIn("배포 전 — 운영 이미지에 incident guard 없음", self.text)
+        self.assertIn("배포 후 — incident guard 포함 이미지", self.text)
+        self.assertIn("incident guard 배포만으로는 위 금지를 해제하지 않는다", self.text)
+        # 해제는 날짜 추정이 아니라 cleanup 실측으로 판정한다.
+        self.assertIn("2026-09-14 03:31:01 KST", self.text)
+        self.assertIn("cleanup 성공과 해당 오염 raw tick **0건**을 확인한 뒤 해제한다", self.text)
+        # 검증 명령은 컨테이너 안에서 돌아야 한다 — 호스트에는 python/의존성이 없다.
+        # 느슨한 존재 확인은 문서 내 다른 docker exec 호출로도 만족한다 — 블록 전체를 잠근다.
+        self.assertIn(
+            "docker exec exchange-rate-app \\\n"
+            "    python /app/scripts/hourly_append_krx_source_hourly_rates.py \\\n"
+            "    --window-days 14 --as-of",
+            self.text,
+        )
+        # ls/sha256sum 은 값만 출력한다 — authoritative 는 verifier 지문 게이트다.
+        self.assertIn("보조 확인", self.text)
+        self.assertNotIn("  python scripts/hourly_append_krx_source_hourly_rates.py", self.text)
+        self.assertNotIn("~2026-09-13", self.text)
+        # 로그 부재를 배포 증거로 쓰는 거짓 게이트가 다시 들어오지 않도록.
+        self.assertIn("로그에 GUARD 라인이 없는 것은 **증거가 아니다**", self.text)
         self.assertNotIn("`--window-days 4`\n이상", self.text)
 
 
