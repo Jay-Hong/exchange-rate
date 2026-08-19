@@ -3,6 +3,7 @@
 이 테스트는 자연어 판정이나 저자·검토자 진술이 참임을 증명하지 않는다. 대신 검토한 입력·출력·원장과
 journal이 갈라지는 것을 fail-closed로 막고, 자기검토 edge나 열린 finding을 pass로 기록하지 못하게 한다.
 """
+import copy
 import hashlib
 import importlib.util
 import json
@@ -21,6 +22,16 @@ REQUIRED_SCOPE_FLAGS = {
     "classification_truth_review",
     "citation_support_review",
 }
+SEMANTIC_BINDING_PREFIX = "semantic-input-binding/v1:"
+SEMANTIC_BINDING_GENESIS_SHA256 = (
+    "7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7"
+)
+SEMANTIC_BINDING_RE = re.compile(
+    rf"^{re.escape(SEMANTIC_BINDING_PREFIX)}"
+    r"(?P<sequence>[0-9]{4}):(?P<parent>GENESIS|[0-9a-f]{64}):"
+    r"(?P<fingerprint>[0-9a-f]{64}):author=(?P<author>[^:]+):"
+    r"reviewer=(?P<reviewer>[^:]+)$"
+)
 
 # `status=fixed` / `verdict=pass` 로 닫고도 disposition 또는 residual limit 에
 # 이전 라운드의 보류 문구를 남긴 실수가 두 번 있었다(SEM-020/021). 자연어 전체의
@@ -67,6 +78,155 @@ def _expected_scope(module) -> dict:
         "code_fact_entries": sum(e["classification"] == "code_fact" for e in entries),
         "normative_entries": sum(e["classification"] == "normative" for e in entries),
     }
+
+
+def _without_semantic_binding_markers(data: dict) -> dict:
+    """Remove valid markers only from their four schema-owned scope lists."""
+    canonical = copy.deepcopy(data)
+    process = canonical.get("review_process")
+    if not isinstance(process, dict):
+        return canonical
+    for participant in process.get("participants", []):
+        if not isinstance(participant, dict):
+            continue
+        for field in ("authored_or_modified", "independently_reviewed"):
+            values = participant.get(field)
+            if isinstance(values, list):
+                participant[field] = [
+                    value
+                    for value in values
+                    if not (
+                        isinstance(value, str)
+                        and SEMANTIC_BINDING_RE.fullmatch(value) is not None
+                    )
+                ]
+    for edge in process.get("review_edges", []):
+        if not isinstance(edge, dict) or not isinstance(edge.get("scope"), list):
+            continue
+        edge["scope"] = [
+            value
+            for value in edge["scope"]
+            if not (
+                isinstance(value, str)
+                and SEMANTIC_BINDING_RE.fullmatch(value) is not None
+            )
+        ]
+    return canonical
+
+
+def _semantic_review_fingerprint(data: dict) -> str:
+    """Hash every semantic surface while excluding only the binding markers."""
+    canonical = json.dumps(
+        _without_semantic_binding_markers(data),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _semantic_binding_marker(
+    sequence: int,
+    parent: str,
+    fingerprint: str,
+    author: str,
+    reviewer: str,
+) -> str:
+    return (
+        f"{SEMANTIC_BINDING_PREFIX}{sequence:04d}:{parent}:{fingerprint}:"
+        f"author={author}:reviewer={reviewer}"
+    )
+
+
+def _semantic_binding_errors(data: dict) -> list[str]:
+    """Require an append-only reciprocal chain ending at the current review bytes."""
+    process = data.get("review_process")
+    if not isinstance(process, dict):
+        return []
+    edges = process.get("review_edges")
+    if not isinstance(edges, list):
+        return []
+
+    errors = []
+    chains: dict[tuple[str, str], list[tuple[int, str, str]]] = {}
+    for edge in edges:
+        if not isinstance(edge, dict):
+            continue
+        author = edge.get("author")
+        reviewer = edge.get("reviewer")
+        scope = edge.get("scope")
+        if (
+            not isinstance(author, str)
+            or not isinstance(reviewer, str)
+            or not isinstance(scope, list)
+        ):
+            continue
+        for value in scope:
+            if not isinstance(value, str) or not value.startswith(SEMANTIC_BINDING_PREFIX):
+                continue
+            match = SEMANTIC_BINDING_RE.fullmatch(value)
+            if match is None:
+                errors.append("semantic input binding marker is malformed")
+                continue
+            if match["author"] != author or match["reviewer"] != reviewer:
+                errors.append("semantic input binding direction differs from its review edge")
+                continue
+            chains.setdefault((author, reviewer), []).append(
+                (int(match["sequence"]), match["parent"], match["fingerprint"])
+            )
+
+    if len(chains) != 2:
+        return [*errors, "semantic input binding must have exactly two reciprocal directions"]
+    directions = set(chains)
+    if any((reviewer, author) not in directions for author, reviewer in directions):
+        return [*errors, "semantic input binding directions are not reciprocal"]
+
+    signatures = list(chains.values())
+    if signatures[0] != signatures[1]:
+        errors.append("reciprocal semantic input binding chains differ")
+        return errors
+
+    chain = signatures[0]
+    if not chain:
+        return [*errors, "semantic input binding chain is empty"]
+    if [item[0] for item in chain] != list(range(1, len(chain) + 1)):
+        errors.append("semantic input binding sequence is not contiguous")
+    if chain[0][1] != "GENESIS" or chain[0][2] != SEMANTIC_BINDING_GENESIS_SHA256:
+        errors.append("semantic input binding genesis was replaced")
+    for previous, current in zip(chain, chain[1:]):
+        if current[1] != previous[2]:
+            errors.append("semantic input binding parent chain is broken")
+            break
+    expected = _semantic_review_fingerprint(data)
+    if chain[-1][2] != expected:
+        errors.append("latest reciprocal review epoch does not bind current semantic inputs")
+    return errors
+
+
+def _append_synthetic_binding_epoch(data: dict) -> dict:
+    """Append a valid epoch for validator counterexamples without rewriting genesis."""
+    rebound = copy.deepcopy(data)
+    fingerprint = _semantic_review_fingerprint(rebound)
+    people = {person["name"]: person for person in rebound["review_process"]["participants"]}
+    for edge in rebound["review_process"]["review_edges"]:
+        prior = [
+            SEMANTIC_BINDING_RE.fullmatch(value)
+            for value in edge["scope"]
+            if isinstance(value, str) and value.startswith(SEMANTIC_BINDING_PREFIX)
+        ]
+        prior = [match for match in prior if match is not None]
+        last = prior[-1]
+        marker = _semantic_binding_marker(
+            int(last["sequence"]) + 1,
+            last["fingerprint"],
+            fingerprint,
+            edge["author"],
+            edge["reviewer"],
+        )
+        edge["scope"].append(marker)
+        people[edge["author"]]["authored_or_modified"].append(marker)
+        people[edge["reviewer"]]["independently_reviewed"].append(marker)
+    return rebound
 
 
 def review_errors(data: object) -> list[str]:
@@ -231,6 +391,8 @@ def review_errors(data: object) -> list[str]:
         ):
             errors.append("review_process limitations are missing")
 
+    errors.extend(_semantic_binding_errors(data))
+
     scope = data.get("scope")
     if not isinstance(scope, dict):
         errors.append("scope must be an object")
@@ -325,11 +487,51 @@ def _closed_validator_fixture(data: dict) -> dict:
                     disposition="Synthetic validator fixture: reciprocal review completed.",
                 )
             )
-    return dict(data, findings=findings, verdict="pass")
+    return _append_synthetic_binding_epoch(
+        dict(data, findings=findings, verdict="pass")
+    )
 
 
 def test_semantic_review_is_bound_to_current_outputs_and_closed_findings():
     assert not review_errors(_review())
+
+
+def test_semantic_change_requires_a_new_reciprocal_binding_epoch():
+    base = _review()
+    changed = copy.deepcopy(base)
+    changed["residual_limits"][0] += " Transition-gate counterexample."
+
+    errors = _semantic_binding_errors(changed)
+    assert "latest reciprocal review epoch does not bind current semantic inputs" in errors
+    assert (
+        "latest reciprocal review epoch does not bind current semantic inputs"
+        in review_errors(changed)
+    )
+
+    rebound = _append_synthetic_binding_epoch(changed)
+    assert not _semantic_binding_errors(rebound)
+    assert not review_errors(rebound)
+
+    one_sided = copy.deepcopy(rebound)
+    one_sided["review_process"]["review_edges"][1]["scope"].pop()
+    assert "reciprocal semantic input binding chains differ" in _semantic_binding_errors(
+        one_sided
+    )
+
+
+def test_semantic_binding_genesis_cannot_be_replaced_during_reseal():
+    changed = copy.deepcopy(_review())
+    for edge in changed["review_process"]["review_edges"]:
+        edge["scope"] = [
+            value.replace(
+                SEMANTIC_BINDING_GENESIS_SHA256,
+                "0" * 64,
+            )
+            if isinstance(value, str) and value.startswith(SEMANTIC_BINDING_PREFIX)
+            else value
+            for value in edge["scope"]
+        ]
+    assert "semantic input binding genesis was replaced" in _semantic_binding_errors(changed)
 
 
 def test_synthetic_open_base_actually_opens_the_journal():

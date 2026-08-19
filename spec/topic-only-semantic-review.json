@@ -50,7 +50,8 @@
           "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
           "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
-          "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구."
+          "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구.",
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -83,7 +84,8 @@
           "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정",
           "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
           "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적",
-          "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다."
+          "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다.",
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -123,7 +125,8 @@
           "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정",
           "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
           "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적",
-          "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다."
+          "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다.",
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -165,7 +168,8 @@
           "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
           "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
-          "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구."
+          "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구.",
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -213,7 +217,8 @@
           "C2 re-baseline for S1b-0: 추적 문서 전체를 directory-prefix-independent 로(경로 접두 유무 · :NNN 과 #LNNN 모두) 스캔해 정규화 고유 좌표 50개 중 훅 이후 live 4개만 이동하고 46개가 불변임을 바이트 대조로 확인, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
           "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
-          "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구."
+          "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구.",
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -251,7 +256,8 @@
           "S1b-0 log table completeness: 로그를 남기는 세 rung 이 표에서 빠져 관련 변이가 생존함을 지적하고, 완결성 검사기의 증명 범위를 emitting category 집합으로 정확히 한정",
           "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
           "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적",
-          "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다."
+          "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다.",
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
