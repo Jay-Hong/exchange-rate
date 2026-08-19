@@ -51,7 +51,9 @@
           "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
           "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구.",
-          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex",
+          "genesis 가 승인한 baseline 을 저널에 명시: genesis edge 목록이 지목하는 최신 커밋과, S1b 이후 genesis 까지 이름이 남지 않은 채 land 된 작업들을 이름 기준으로 재측정해 residual limit 으로 기록한다. work unit 그룹화 규칙이 없어 총수는 단정하지 않고 비포괄 목록으로 적었으며, 이번 전이는 marker 만이 아니라 산문 work unit 과 함께 append 해 퇴화형 사용례를 남기지 않는다.",
+          "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -85,7 +87,9 @@
           "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
           "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적",
           "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다.",
-          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code",
+          "LOAD-S5 후속 semantic input binding 게이트 0797c90 검토: marker 를 fingerprint 에서 제외해 순환을 피한 canonical 해시, 4개 스키마 소유 목록으로 좁힌 strip, 방향·연속성·parent chain·genesis 4축 검사와 validator 실배선을 읽고, 산문 1글자 변경 후 기존 epoch 재사용 red · 단방향 append red · 양방향 append green · genesis 교체 red 를 각각 직접 재현. 한계로 marker 가 산문 work unit 을 요구하지 않아 퇴화형 append 가 통과한다는 점을 확인했다.",
+          "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -126,7 +130,9 @@
           "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
           "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적",
           "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다.",
-          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code",
+          "LOAD-S5 후속 semantic input binding 게이트 0797c90 검토: marker 를 fingerprint 에서 제외해 순환을 피한 canonical 해시, 4개 스키마 소유 목록으로 좁힌 strip, 방향·연속성·parent chain·genesis 4축 검사와 validator 실배선을 읽고, 산문 1글자 변경 후 기존 epoch 재사용 red · 단방향 append red · 양방향 append green · genesis 교체 red 를 각각 직접 재현. 한계로 marker 가 산문 work unit 을 요구하지 않아 퇴화형 append 가 통과한다는 점을 확인했다.",
+          "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -169,7 +175,9 @@
           "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
           "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구.",
-          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex",
+          "genesis 가 승인한 baseline 을 저널에 명시: genesis edge 목록이 지목하는 최신 커밋과, S1b 이후 genesis 까지 이름이 남지 않은 채 land 된 작업들을 이름 기준으로 재측정해 residual limit 으로 기록한다. work unit 그룹화 규칙이 없어 총수는 단정하지 않고 비포괄 목록으로 적었으며, 이번 전이는 marker 만이 아니라 산문 work unit 과 함께 append 해 퇴화형 사용례를 남기지 않는다.",
+          "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -218,7 +226,9 @@
           "S1b REST auth lane 격리 at f4e63a1: 21 call site 공용 helper 를 rest-auth named app + 전용 executor 로 이관하고 WS/REST 의 startup·shutdown·metrics·timeout 소유권을 lane 별로 분리한 것, endpoint 테스트가 helper 를 통째 patch 해 비어 있던 배선 계약을 app identity·thread·포화 격리·제출 0 으로 잠근 것, 그리고 감사 workflow 병렬 에이전트가 공유 worktree 를 변이해 25건 red 와 복원 덮임을 낸 사고를 kernel flock·충돌 감지 복원·단일 스냅샷으로 방어한 것",
           "C2 re-baseline for S1b: 세 변경 모듈을 directory-prefix-independent 로 스캔해 고유 좌표 59개 중 live 88 occurrence 를 15 파일에서 이동하고, 구 pin 에서 이미 산문과 어긋난 7 locator 와 .findings[*].issue·disposition 안 좌표는 재봉인 대상에서 분리, pin 전진과 lock·manifest·헤더 6종·이행대장·claim-review·semantic-review 결속 재도출",
           "LOAD-S5 후속 리뷰 표면 축소 수정 검토: R-HAND-4 의 current-state cue 복원과 code_fact 항목 복원, CLAIM_LEDGER_INVENTORY 래칫의 판별력과 완전성 아님·동수 치환 미탐지라는 한계 서술, worker 결속 locator 추가와 그로 인한 인벤토리 연쇄, SEM-040 이 frozen coordinate 를 만들지 않은 판단을 확인하고, 그 finding 이 review edge 없이 reciprocal 을 단정한 모순과 reviewed_at 이 lag 된 채 남는 문제를 지적해 edge 등록과 날짜 전진을 요구.",
-          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=Claude Code:reviewer=OpenAI Codex",
+          "genesis 가 승인한 baseline 을 저널에 명시: genesis edge 목록이 지목하는 최신 커밋과, S1b 이후 genesis 까지 이름이 남지 않은 채 land 된 작업들을 이름 기준으로 재측정해 residual limit 으로 기록한다. work unit 그룹화 규칙이 없어 총수는 단정하지 않고 비포괄 목록으로 적었으며, 이번 전이는 marker 만이 아니라 산문 work unit 과 함께 append 해 퇴화형 사용례를 남기지 않는다.",
+          "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -257,7 +267,9 @@
           "S1b gate: shutdown 로깅 실패가 lane 격리를 다시 깨는 경로, 가드 모듈이 영구 테스트되지 않고 S1a 가 충돌 보존을 쓰지 않던 공백, apply_pairs 의 전체 no-op 미검출, 그리고 원본 이중 읽기로 충돌 감지가 무력화되는 창을 각각 지적",
           "S1b battery scope: helper 배선만 덮던 7 변이에 lane 고유값·scope 조기 종료·named app 결속·shutdown try 제거 9종을 추가하도록 요구하고, 락은 커널 flock 과 worktree git-dir 로 옮겨야 함을 지적",
           "LOAD-S5 C1 d3d29c1 single-flight 검토: 공유 build 가 인가 판정 뒤에만 놓이고 payload 입력이 topic 하나뿐임을 두 호출부와 builder 에서 확인, fork_for_shared_build 의 위상과 waiter 별 독립 deadline, shield 로 leader 취소가 follower 로 전파되지 않고 waiters==0 에서만 shared task 를 취소하는 경계, cache 소유 사본과 caller 별 복제로 aliasing 이 없음, generation 을 subscriber empty 검사보다 먼저 올리는 배치와 TTL<=1s import-time fail-closed 를 각각 코드에서 확인하고, 두 변이 배터리(S0 9/9 · subscribe-load 73+4/77)와 해당 SHA 의 CI 두 워크플로를 재현. C2 7e3e4cc 는 pin 무결성·인용 경로 diff 0·인벤토리 산술·게이트 무약화·의미 교정 4건만 확인했고 13 좌표의 바이트 단위 재도출은 하지 않았다.",
-          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code",
+          "LOAD-S5 후속 semantic input binding 게이트 0797c90 검토: marker 를 fingerprint 에서 제외해 순환을 피한 canonical 해시, 4개 스키마 소유 목록으로 좁힌 strip, 방향·연속성·parent chain·genesis 4축 검사와 validator 실배선을 읽고, 산문 1글자 변경 후 기존 epoch 재사용 red · 단방향 append red · 양방향 append green · genesis 교체 red 를 각각 직접 재현. 한계로 marker 가 산문 work unit 을 요구하지 않아 퇴화형 append 가 통과한다는 점을 확인했다.",
+          "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -831,7 +843,8 @@
     "SEM-024 repairs the three known Markdown-link locator debts outside ADR-041, adds a full-canonical-document #L gate, and validates all baseline backtick locators against the pins. SEM-025 removes the backtick extractor's extension allowlist and checks it against an independently expressed locator-shape oracle. Those checks cannot discover plain prose line numbers without a recognized locator and cannot prove semantic entailment; historical code claims therefore use immutable full-SHA blobs, while target meaning still requires review.",
     "The one-branch-at-a-time audit that measured 32 of 40 errors.append sites as neutralisable (33 before SEM-026) is closed by SEM-029: every site now fails a control that names its own diagnostic, re-measured on this tree as 40 sites, 0 invalid, 40 red, 0 survivors. Coverage is of append sites, not of rule variants — a single site inside a loop serves many participant fields, scope flags and finding keys, and those variants remain unaudited.",
     "Commit messages, annotated tags, deployment reports, terminal transcripts, and agent memory are outside this journal's hash-bound inputs unless a review edge explicitly identifies and preserves the exact artifact. In particular, a562391's unpreserved 46-connection observation is not promoted to activation evidence; 9f0aec9 corrects only its invalid client-absence inference.",
-    "SEM-028 pins the currently reviewed extraction surfaces: seven Markdown-literal test modules, nine semantic-drift inputs, 125 RID backtick locators, and six canonical Markdown-link documents. These inventories prevent silent shrinkage but do not prove that heuristic discovery is complete, that dynamically assembled paths are visible, or that a locator semantically entails its prose; legitimate additions and removals require reviewing and updating the corresponding inventory."
+    "SEM-028 pins the currently reviewed extraction surfaces: seven Markdown-literal test modules, nine semantic-drift inputs, 125 RID backtick locators, and six canonical Markdown-link documents. These inventories prevent silent shrinkage but do not prove that heuristic discovery is complete, that dynamically assembled paths are visible, or that a locator semantically entails its prose; legitimate additions and removals require reviewing and updating the corresponding inventory.",
+    "The semantic input binding chain begins at a genesis fingerprint of this journal as it stood when the binding was introduced. Genesis fixes a baseline; it does not assert that every work unit landed before it passed through a review edge. The edge list at genesis names the LOAD-S5 implementation and its re-baseline, but other work that landed between the S1b REST auth lane isolation and genesis is named nowhere in it — among it the account deletion sweep, the snapshot Redis I/O bounds, the snapshot request deadline with worker checkpoints, the deploy verifier and runbook gates, the KRX expiry holiday correction, the PostgreSQL service and workload profile work, the M0a maintenance installer, and the mutation harness isolation. That enumeration is not exhaustive and no total is asserted, because this journal has no canonical rule for grouping commits into work units. Residual limit one already places whatever is unnamed outside what this pass covers, and the binding constrains transitions after genesis rather than the ones that preceded it. The binding also fixes bytes rather than judgement: an epoch is a reciprocal record, not evidence that a person re-read the work, and nothing requires an epoch to carry a prose work unit beside it."
   ],
   "verdict": "pass"
 }
