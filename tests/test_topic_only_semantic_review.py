@@ -26,6 +26,22 @@ SEMANTIC_BINDING_PREFIX = "semantic-input-binding/v1:"
 SEMANTIC_BINDING_GENESIS_SHA256 = (
     "7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7"
 )
+# Current-state validation cannot distinguish an appended epoch from a rewritten latest epoch.
+# Pin every reviewed signature here so replacement is a loud test-file change. Legitimate epochs
+# append one tuple; existing tuples are never rewritten.
+SEMANTIC_BINDING_HISTORY = (
+    (1, "GENESIS", "7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7"),
+    (
+        2,
+        "7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7",
+        "577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25",
+    ),
+    (
+        3,
+        "577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25",
+        "8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8",
+    ),
+)
 SEMANTIC_BINDING_RE = re.compile(
     rf"^{re.escape(SEMANTIC_BINDING_PREFIX)}"
     r"(?P<sequence>[0-9]{4}):(?P<parent>GENESIS|[0-9a-f]{64}):"
@@ -136,6 +152,38 @@ def _semantic_binding_marker(
         f"{SEMANTIC_BINDING_PREFIX}{sequence:04d}:{parent}:{fingerprint}:"
         f"author={author}:reviewer={reviewer}"
     )
+
+
+def _semantic_binding_histories(data: dict) -> list[tuple[tuple[int, str, str], ...]]:
+    """Return directional chains without interpreting their validity."""
+    process = data.get("review_process")
+    if not isinstance(process, dict) or not isinstance(process.get("review_edges"), list):
+        return []
+    histories = []
+    for edge in process["review_edges"]:
+        if not isinstance(edge, dict) or not isinstance(edge.get("scope"), list):
+            continue
+        chain = []
+        for value in edge["scope"]:
+            if not isinstance(value, str):
+                continue
+            match = SEMANTIC_BINDING_RE.fullmatch(value)
+            if match is not None:
+                chain.append(
+                    (int(match["sequence"]), match["parent"], match["fingerprint"])
+                )
+        if chain:
+            histories.append(tuple(chain))
+    return histories
+
+
+def _semantic_binding_history_errors(data: dict) -> list[str]:
+    """Lock reviewed epoch history; this is a repository inventory, not a general validator."""
+    histories = _semantic_binding_histories(data)
+    expected = [SEMANTIC_BINDING_HISTORY, SEMANTIC_BINDING_HISTORY]
+    if histories != expected:
+        return ["semantic input binding history differs from append-only inventory"]
+    return []
 
 
 def _semantic_binding_errors(data: dict) -> list[str]:
@@ -567,6 +615,51 @@ def _closed_validator_fixture(data: dict) -> dict:
 
 def test_semantic_review_is_bound_to_current_outputs_and_closed_findings():
     assert not review_errors(_review())
+
+
+def test_semantic_binding_history_rejects_latest_epoch_replacement():
+    base = _review()
+    assert not _semantic_binding_history_errors(base)
+
+    changed = copy.deepcopy(base)
+    changed["residual_limits"][0] += " Latest-epoch replacement counterexample."
+    replacement_fingerprint = _semantic_review_fingerprint(changed)
+    people = {
+        participant["name"]: participant
+        for participant in changed["review_process"]["participants"]
+    }
+    for edge in changed["review_process"]["review_edges"]:
+        marker_indexes = [
+            index
+            for index, value in enumerate(edge["scope"])
+            if isinstance(value, str) and SEMANTIC_BINDING_RE.fullmatch(value) is not None
+        ]
+        marker_index = marker_indexes[-1]
+        old_marker = edge["scope"][marker_index]
+        match = SEMANTIC_BINDING_RE.fullmatch(old_marker)
+        assert match is not None
+        new_marker = _semantic_binding_marker(
+            int(match["sequence"]),
+            match["parent"],
+            replacement_fingerprint,
+            edge["author"],
+            edge["reviewer"],
+        )
+        edge["scope"][marker_index] = new_marker
+        for participant in people.values():
+            for field in ("authored_or_modified", "independently_reviewed"):
+                participant[field] = [
+                    new_marker if value == old_marker else value
+                    for value in participant[field]
+                ]
+
+    # The current-state validators cannot distinguish replacement from append-only history.
+    assert not _semantic_binding_errors(changed)
+    assert not _semantic_epoch_work_unit_errors(changed)
+    assert not review_errors(changed)
+    assert _semantic_binding_history_errors(changed) == [
+        "semantic input binding history differs from append-only inventory"
+    ]
 
 
 def test_semantic_change_requires_a_new_reciprocal_binding_epoch():
