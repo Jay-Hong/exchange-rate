@@ -6528,11 +6528,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `32c70e0f055863c836b432ea9636a65cb0966d0b`
+- server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `783fb18f263aea8620481699207a4148daf52046ffe175da3c60b144dc70847e`
-- baseline SHA: `b1de60aa050b64d4f7398883eccebe288aa718c3e13bd8cfee77f2a2ce9bc48e`
+- manifest SHA: `3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87`
+- baseline SHA: `fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6620,7 +6620,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:770-926`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
-코드 기본값은 `compatibility` 다(`app/config.py:770-772`). production 의 실제 값은 아래 표가
+코드 기본값은 `compatibility` 다(`app/config.py:782-784`). production 의 실제 값은 아래 표가
 아니라 운영 직접 측정으로 확정한다.
 
 | stage | 익명 FX | 익명 USDT | 식별 FX/USDT | 식별 KRX |
@@ -6634,13 +6634,13 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe
 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
-근거: `app/config.py:729-772`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
+근거: `app/config.py:741-784`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
-구현 근거: `app/config.py:729-772`(stage) · `app/topic_policy.py:87-93`(정책표) ·
+구현 근거: `app/config.py:741-784`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:770-926`(배선·등록) ·
-`app/main.py:3172-3175`(REST twin).
+`app/main.py:3172-3176`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)

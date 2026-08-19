@@ -3,11 +3,11 @@
 - 책임: 삭제 범위 · 문서 정정 · 테스트 · 순서
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `32c70e0f055863c836b432ea9636a65cb0966d0b`
+- server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `783fb18f263aea8620481699207a4148daf52046ffe175da3c60b144dc70847e`
-- baseline SHA: `b1de60aa050b64d4f7398883eccebe288aa718c3e13bd8cfee77f2a2ce9bc48e`
+- manifest SHA: `3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87`
+- baseline SHA: `fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 문서는 신규 앱이 legacy 소비를 걷어낼 때 **무엇을 지우고 · 무엇을 먼저 고쳐 쓰고 ·

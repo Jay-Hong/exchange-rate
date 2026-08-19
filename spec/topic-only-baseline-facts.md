@@ -54,7 +54,7 @@
 
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
-  stage 정의·엄격 파서·코드 기본값 `app/config.py:729-772` · **정책 정본**
+  stage 정의·엄격 파서·코드 기본값 `app/config.py:741-784` · **정책 정본**
   `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
   `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:620-648` ·
   production 주입 `app/main.py:313-321`.
@@ -73,11 +73,11 @@
      (`app/topic_auth_rollout.py:254-296` · snapshot `app/topic_auth_rollout.py:339-400`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
      (`app/main.py:303-321`).
-- **C2 [코드]** `app/topic_initial_snapshot.py:313` — `per_user_gated_snapshot_topics()`.
+- **C2 [코드]** `app/topic_initial_snapshot.py:354` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
 - **C3 [코드]** `exchange-rate/app/main.py:3131` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3172` `verify_firebase_token(request)` → `app/main.py:3175`
+  `app/main.py:3173` `verify_firebase_token(request)` → `app/main.py:3176`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -99,12 +99,13 @@
   ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
   이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
   그 경로를 같은 함수에 태운다.
-- **D3 [코드]** `app/topic_initial_snapshot.py:923-949` — build deadline·transient 실패는 연결을
+- **D3 [코드]** `app/topic_initial_snapshot.py:1049-1078` — build deadline·transient 실패와 active
+  server cooldown은 연결을
   **1013**, fatal 실패는 **1011**로 닫는다. `None`(미지원/flag off/데이터 없음)은 여전히 조용히 skip한다.
 - **D4 [결정]** `app/topic_dispatcher.py:426` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
-- **D6 [코드]** `app/topic_initial_snapshot.py:962-969` — initial snapshot 도 **전송 직전**에
+- **D6 [코드]** `app/topic_initial_snapshot.py:1080-1098` — initial snapshot 도 **전송 직전**에
   `leased_subscribers(topic)` 멤버십을 다시 본다(`882d92b`). 게이트에 걸리면 **해당 topic skip**
   이고 연결 실패가 아니다.
   **D6-inf [추론]** ⇒ 검사가 build **뒤**여야 하는 이유는 `_build_snapshot_sync` 가 `to_thread`
@@ -124,19 +125,23 @@
   구 상태는 **SQLAlchemy 기본 30초**였다. 즉 최대 5 커넥션이 찬 뒤 대기하던 요청이 이제
   10초에 접힌다(`sqlalchemy.exc.TimeoutError` → 503). 같은 파일 `:118` 의 online
   `statement_timeout = 60초`도 구 상태가 **0(무제한)** 이었다 — 운영 실측 근거는 그 모듈 docstring.
-- **E2 [코드]** `app/topic_initial_snapshot.py:913-925` —
+- **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053` —
   `for topic in topics: ... payload = await build_snapshot_observed(topic, budget=request_budget)`. 그 공유 래퍼가
-  `app/topic_initial_snapshot.py:456-710` 에서 같은 topic generation의 동시 요청을 shared build 하나로
+  `app/topic_initial_snapshot.py:497-838` 에서 같은 topic generation의 동시 요청을 shared build 하나로
   합치고 성공 결과만 최대 1초 cache한다. 새 shared flight는
   `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리며, join/cache hit는
-  slot을 쓰지 않는다. 실제 worker는 `app/topic_initial_snapshot.py:713-769`에서
+  slot을 쓰지 않는다. transient build 실패는 같은 exact key에서 기본 1초 동안 새 build를 억제한다
+  (`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` ·
+  `app/topic_initial_snapshot.py:733-817`). 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서
   독립된 shared 예산으로 `asyncio.to_thread(..., _run_snapshot_worker, topic, request_budget)`를
   감싼다 — **REST twin도 같은 single-flight·worker 래퍼를 쓴다**
   (`app/main.py:3196-3197`).
   **E2-inf [추론]** ⇒ 연결당 topic 순회는 **순차**지만, 같은 key의 요청은 shared task 하나에
-  합류하고 새 shared task의 admission 점유는 기본 4다. 대기 **시간**은 bounded지만 queue 개수 hard
-  cap과 실패 cooldown은 아직 없다. 취소된 sync worker도 다음 협력 checkpoint까지 잠시 남을 수 있어
-  admission 4를 실제 executor thread 점유의 순간 상한으로 읽으면 안 된다.
+  합류하고 새 shared task의 admission 점유는 기본 4다. 서버 transient 실패의 즉시 재진입은
+  cooldown으로 억제되지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 기본 1초는 dormant
+  값이며 클라이언트 jitter·재시도 상한과 다중 클라이언트 리허설 전에는 end-to-end 폭주 완화 완료가
+  아니다. 취소된 sync worker도 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4를 실제
+  executor thread 점유의 순간 상한으로 읽으면 안 된다.
 - **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
   배포 재연결은 평균 유입이 낮아도 **동시 도착** 이라 1초면 빠질 큐를 대량 거절한다."*
   같은 docstring: *"이것은 큐 상한이 아니다"*(`SimpleQueue` 무제한), *"자원 상한 완료 라고 쓰지 말 것"*.

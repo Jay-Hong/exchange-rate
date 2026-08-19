@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `32c70e0f055863c836b432ea9636a65cb0966d0b`
+- server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `783fb18f263aea8620481699207a4148daf52046ffe175da3c60b144dc70847e`
-- baseline SHA: `b1de60aa050b64d4f7398883eccebe288aa718c3e13bd8cfee77f2a2ce9bc48e`
+- manifest SHA: `3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87`
+- baseline SHA: `fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -89,17 +89,22 @@ I/O 상한 · 서버 실패 cooldown).
 **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본
 30초). 아래 "그대로 쌓인다" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤
 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이
-서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:913-925`은 요청 topic을
-순차 순회한다. `app/topic_initial_snapshot.py:456-710`의 LOAD-S5/S6 래퍼는 같은
+서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053`은 요청 topic을
+순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은
 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초
 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는
 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는
-`app/topic_initial_snapshot.py:713-769`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을
-그대로 쓴다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared
-task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 대기 **시간**은 bounded지만 queue
-개수 hard cap과 실패 cooldown은 아직 없으므로, 동시 도착의 메모리 상한·실패 재동기화를 닫으려면
-S7과 별도 admission 결정이 필요하다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수
-있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.
+`app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을
+그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은
+flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` ·
+`app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB
+오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당
+topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의
+admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만
+bounded이고 queue 개수 hard cap은 없다. 또한 기본 1초는 dormant 값이며 클라이언트
+jitter·재시도 상한([R-CLI-24](ios-topic-state-machine.md#r-cli-24))과 LOAD-S4 다중 클라이언트
+리허설이 남아 있으므로 end-to-end 완화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력
+checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.
 <!-- /rid: R-LOAD-3 -->
 
 ---

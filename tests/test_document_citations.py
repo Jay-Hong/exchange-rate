@@ -106,7 +106,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     #                (`_worker_checkpoint`/`_run_snapshot_worker`)으로 입증하는 locator 를
     #                더해 +1 (24 → 25). 기존 두 locator 는 정의와 wrapper 만 보여줬다.
     # 2026-08-20 LOAD-S6 C2: shared task/permit 소유와 실제 worker를 분리 인용해 +1 (25 → 26).
-    "HAND": 26,
+    # 2026-08-20 LOAD-S7 C2: admission/caller 취소가 cooldown을 arm하지 않는 경계를 shared task
+    #                범위에 직접 결속해 +1 (26 → 27).
+    "HAND": 27,
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
@@ -118,7 +120,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-19 LOAD-S5 C2: single-flight/cache wrapper와 실제 S3 worker를 분리 인용해 +1
     #                (11 → 12).
     # 2026-08-20 LOAD-S6 C2: admission 기본값·잔여 한계를 config에 직접 결속해 +1 (12 → 13).
-    "LOAD": 13,
+    # 2026-08-20 LOAD-S7 C2: cooldown 기본값, 상태 arm/prune, shared-task short-circuit를
+    #                분리 인용해 +3 (13 → 16).
+    "LOAD": 16,
 }
 
 
@@ -394,9 +398,10 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-19 LOAD-S5 C2: LOAD +1 (135 → 136 / server 71 → 72).
     # 2026-08-20 LOAD-S5 후속: HAND +1 (136 → 137 / server 72 → 73).
     # 2026-08-20 LOAD-S6 C2: HAND +1, LOAD +1 (137 → 139 / server 73 → 75).
-    assert len(references) == 139
+    # 2026-08-20 LOAD-S7 C2: HAND +1, LOAD +3 (139 → 143 / server 75 → 79).
+    assert len(references) == 143
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 75, "ios": 64}
+    assert by_repo == {"server": 79, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -440,8 +445,9 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
     #                server locator 3건 증가 (42 → 45).
     # 2026-08-19 LOAD-S5 C2: shared single-flight와 실제 worker 인용을 분리해 server +1.
     # 2026-08-20 LOAD-S6 C2: admission 기본값·잔여 한계의 config 근거를 더해 server +1.
-    assert len(references) == 47
-    assert by_repo == {"server": 37, "ios": 10}
+    # 2026-08-20 LOAD-S7 C2: cooldown 기본값·arm/prune·shared-task 경계를 분리해 server +3.
+    assert len(references) == 50
+    assert by_repo == {"server": 40, "ios": 10}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():
