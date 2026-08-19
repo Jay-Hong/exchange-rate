@@ -4568,6 +4568,30 @@ async def get_comparison_notification_logs(
 # 계정 삭제 API (Apple App Store 5.1.1(v) 준수)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+_ACCOUNT_DELETION_TARGETS = (
+    # 히스토리는 설정보다 먼저 지운다. 현재 FK는 없지만 향후 FK 추가에도 안전한 순서다.
+    ("comparison_logs", models.ComparisonNotificationLog),
+    ("comparison_alerts", models.ComparisonAlert),
+    ("source_logs", models.SourceNotificationLog),
+    ("source_settings", models.SourceNotificationSetting),
+    # 기존 account_deletion 구조화 로그 필드명(deleted_logs/settings)은 보존한다.
+    ("logs", models.NotificationLog),
+    ("settings", models.NotificationSetting),
+    ("devices", models.UserDevice),
+    ("entitlements", models.UserEntitlement),
+)
+
+
+def _delete_user_owned_rows(db: Session, user_id: str) -> Dict[str, int]:
+    """현재 트랜잭션에서 user_id 소유 행을 모두 삭제하고 테이블별 건수를 반환한다."""
+    return {
+        name: db.query(model).filter(model.user_id == user_id).delete(
+            synchronize_session=False
+        )
+        for name, model in _ACCOUNT_DELETION_TARGETS
+    }
+
+
 @app.delete("/api/user/me", status_code=204)
 async def delete_user_account(
     request: Request,
@@ -4584,7 +4608,10 @@ async def delete_user_account(
     - NotificationSetting: 환율 알림 설정
     - SourceNotificationLog: source 기반 알림 발송 기록
     - SourceNotificationSetting: source 기반 알림 설정
+    - ComparisonNotificationLog: 비교 알림 발송 기록
+    - ComparisonAlert: 비교 알림 설정
     - UserDevice: FCM 토큰 (푸시 알림용)
+    - UserEntitlement: 사용자별 기능 entitlement
 
     Headers:
         Authorization: Bearer <Firebase ID Token>
@@ -4605,28 +4632,7 @@ async def delete_user_account(
     user_id = await verify_firebase_token(request, check_revoked=True)
 
     try:
-        # 삭제 순서: 외래 키 의존성 없으므로 순서 무관하나, 로그 먼저 삭제
-        deleted_logs = db.query(models.NotificationLog).filter(
-            models.NotificationLog.user_id == user_id
-        ).delete(synchronize_session=False)
-
-        deleted_settings = db.query(models.NotificationSetting).filter(
-            models.NotificationSetting.user_id == user_id
-        ).delete(synchronize_session=False)
-
-        # Source 기반 알림 (USDT exchange + KRX derivative)
-        deleted_source_logs = db.query(models.SourceNotificationLog).filter(
-            models.SourceNotificationLog.user_id == user_id
-        ).delete(synchronize_session=False)
-
-        deleted_source_settings = db.query(models.SourceNotificationSetting).filter(
-            models.SourceNotificationSetting.user_id == user_id
-        ).delete(synchronize_session=False)
-
-        deleted_devices = db.query(models.UserDevice).filter(
-            models.UserDevice.user_id == user_id
-        ).delete(synchronize_session=False)
-
+        deleted = _delete_user_owned_rows(db, user_id)
         db.commit()
 
         logger.info(
@@ -4634,11 +4640,7 @@ async def delete_user_account(
             extra={
                 "event": "account_deletion",
                 "user_id": user_id[:8] + "...",  # 보안: UID 일부만 로깅
-                "deleted_logs": deleted_logs,
-                "deleted_settings": deleted_settings,
-                "deleted_source_logs": deleted_source_logs,
-                "deleted_source_settings": deleted_source_settings,
-                "deleted_devices": deleted_devices,
+                **{f"deleted_{name}": count for name, count in deleted.items()},
             }
         )
 

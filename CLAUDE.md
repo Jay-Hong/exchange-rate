@@ -551,7 +551,7 @@ scheduler.add_job(
 ### 계정 API (Apple App Store 5.1.1(v) 준수)
 
 - `DELETE /api/user/me` - 사용자 계정 데이터 삭제 (Firebase ID Token 필요)
-  - 삭제 대상: `notification_logs`, `notification_settings`, `user_devices`
+  - 삭제 대상: `notification_logs`, `notification_settings`, `source_notification_logs`, `source_notification_settings`, `comparison_notification_logs`, `comparison_alerts`, `user_devices`, `user_entitlements`
   - 응답: `204 No Content`
   - 오류: `401`(토큰 만료/무효/철회), `500`(서버 처리 오류), `503`(Firebase 연결 오류)
   - 클라이언트 권장: 401 시 재인증 후 재시도, 서버 삭제 완료 후 Firebase Auth 삭제

@@ -735,7 +735,7 @@ enum RevenueCatConfig {
 > **PENDING 상태**: RevenueCat 상태 확인 중이면 503 반환 + `Retry-After: 5` 헤더 포함  
 > (신규 사용자/일시적 API 오류 시, 잠시 후 재시도 유도)
 
-> 💡 **계정 삭제**: `DELETE /api/user/me` 호출 시 해당 사용자의 알림 데이터(`notification_settings`, `notification_logs`, `user_devices`)가 함께 삭제됩니다.
+> 💡 **계정 삭제**: `DELETE /api/user/me` 호출 시 해당 사용자의 일반·source·비교 알림 설정과 발송 기록, 기기 토큰, entitlement가 모두 삭제됩니다(`notification_settings`, `notification_logs`, `source_notification_settings`, `source_notification_logs`, `comparison_alerts`, `comparison_notification_logs`, `user_devices`, `user_entitlements`).
 
 > **API vs Locked Preview 정책:**
 >
