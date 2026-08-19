@@ -219,6 +219,12 @@ def analyze_container_events(events: Sequence[dict], old_id: str) -> DieAnalysis
         return DieAnalysis(FAILED, len(dies), dies[-1], destroyed,
                            f"die {len(dies)}건 — crash-loop 의심")
     code = dies[0]
+    if not code:
+        # ⛔ `exitCode` 속성이 **비어 있는 것**은 관측 불능이지 비정상 종료가 아니다.
+        #    예전에는 `"" != "0"` 이 그대로 FAILED 로 떨어져, 종료 방식을 *읽지 못한*
+        #    경우를 장애로 승격했다 — 이 파일 머리의 "관측 불능 ≠ 장애" 원칙 위반이다.
+        return DieAnalysis(UNVERIFIED, 1, None, destroyed,
+                           "die exitCode 속성 부재 — 관측 불능")
     if code != "0":
         return DieAnalysis(FAILED, 1, code, destroyed, f"die exitCode={code}")
     return DieAnalysis(PASS, 1, code, destroyed, "정상 종료")
@@ -427,10 +433,29 @@ def evaluate_continuity(samples: Sequence[ContainerIdentity]) -> tuple[str, str]
 # 닫힌 어휘가 아니라 완전성 검사 대상이 될 수 없고, 무관한 debug 한 줄 추가가
 # CI를 깨뜨린다. **판정에 실제로 쓰는 소수만** curated로 유지한다.
 SHUTDOWN_FAILURE_MARKERS = (
+    # Uvicorn 자신이 lifespan shutdown 실패를 알리는 유일한 문자열. follower 는
+    # `docker logs` 라 이 평문 줄도 들어온다 — app.log(JSON 전용)에는 없다.
+    "Application shutdown failed",
+    "timeout graceful shutdown exceeded",
+    # 아래 두 줄은 main.py 가 예외를 **삼키고 로그만 남기는** 지점이다
+    # (`:743` 종료 시작 / `:810` 합류). 삼켜지므로 graceful marker 순서는 그대로
+    # 완전하고, 이 marker 가 없으면 실패가 조용히 PASS 로 통과한다.
+    "auth lane 종료 시작 실패",
+    "auth lane 합류 실패",
     "[krx_close_snapshot] close timeout",
     "[krx] bootstrap cancel 실패",
     "[krx] client.stop() 실패",
     "[krx] task await 실패",
+)
+GRACEFUL_SHUTDOWN_MARKERS = (
+    "Shutting down",
+    "Waiting for application shutdown.",
+    "Application shutdown complete.",
+    "Finished server process",
+)
+RUNTIME_STARTUP_MARKERS = (
+    "Started server process",
+    "Application startup complete.",
 )
 RUNTIME_FAILURE_MARKERS = (
     "[krx] KisFuturesClient task crashed",
@@ -449,19 +474,86 @@ _ALLOWED_LOG_FIELDS = ("timestamp", "level", "logger", "message")
 
 
 def project_log_line(line: str) -> Optional[dict]:
-    """JSON 로그 → allowlist 필드만. 원문·exc_info·extra는 저장하지 않는다.
+    """JSON 또는 ``docker logs --timestamps`` 한 줄 → allowlist 필드만.
 
     산출물은 사후 공유·보관되고 로그에는 UID·토큰·경로가 섞인다. 전체 `docker
     inspect` 덤프를 남기지 않는 것과 같은 이유다(`{{json .Config.Env}}`는
     KIS_APP_SECRET을 전량 노출한다).
+
+    Docker timestamp prefix가 붙은 Uvicorn 평문 로그도 시간창에 배치할 수
+    있게 한다. JSON payload는 자체 timestamp를 우선하고, 평문은 Docker
+    timestamp와 message만 남긴다.
     """
+    docker_stamp: Optional[str] = None
+    payload = line
+    prefix, sep, rest = line.partition(" ")
+    if sep:
+        try:
+            parsed_prefix = datetime.fromisoformat(prefix.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+        else:
+            if parsed_prefix.tzinfo is not None:
+                docker_stamp = prefix
+                payload = rest
     try:
-        parsed = json.loads(line)
+        parsed = json.loads(payload)
     except ValueError:
-        return None
+        if docker_stamp is None:
+            return None
+        return {"timestamp": docker_stamp, "message": payload}
     if not isinstance(parsed, dict):
         return None
-    return {k: parsed[k] for k in _ALLOWED_LOG_FIELDS if k in parsed}
+    projected = {k: parsed[k] for k in _ALLOWED_LOG_FIELDS if k in parsed}
+    if "timestamp" not in projected and docker_stamp is not None:
+        projected["timestamp"] = docker_stamp
+    return projected
+
+
+@dataclass(frozen=True)
+class LifecycleLogAnalysis:
+    status: str
+    markers: tuple[str, ...]
+    detail: str
+
+
+def _ordered_marker_analysis(lines: Sequence[str], markers: Sequence[str],
+                             *, label: str) -> LifecycleLogAnalysis:
+    """Marker 순서·로그 파싱 완전성을 함께 판정한다."""
+    projected = [project_log_line(line) for line in lines]
+    if any(item is None for item in projected):
+        return LifecycleLogAnalysis(
+            UNVERIFIED, (), f"{label} 로그에 timestamp 배치 불가 줄 존재")
+
+    messages = [str(item.get("message", "")) for item in projected if item]
+    found: list[str] = []
+    cursor = 0
+    for marker in markers:
+        for idx in range(cursor, len(messages)):
+            if marker in messages[idx]:
+                found.append(marker)
+                cursor = idx + 1
+                break
+        else:
+            return LifecycleLogAnalysis(
+                UNVERIFIED, tuple(found), f"{label} marker 누락/순서 불일치: {marker}")
+    return LifecycleLogAnalysis(PASS, tuple(found), f"{label} marker 순서 완전")
+
+
+def analyze_graceful_shutdown_log(lines: Sequence[str]) -> LifecycleLogAnalysis:
+    """구 컨테이너 전용 follower에서 graceful shutdown을 증명한다."""
+    failures = scan_log_markers(lines, SHUTDOWN_FAILURE_MARKERS)
+    if failures:
+        return LifecycleLogAnalysis(
+            FAILED, (), f"shutdown failure marker {len(failures)}건")
+    return _ordered_marker_analysis(
+        lines, GRACEFUL_SHUTDOWN_MARKERS, label="graceful shutdown")
+
+
+def analyze_runtime_startup_log(lines: Sequence[str]) -> LifecycleLogAnalysis:
+    """신 컨테이너 로그가 startup 시작점까지 보존됐는지 본다."""
+    return _ordered_marker_analysis(
+        lines, RUNTIME_STARTUP_MARKERS, label="runtime startup")
 
 
 @dataclass(frozen=True)
@@ -489,43 +581,6 @@ def count_unplaceable(lines: Sequence[str]) -> int:
         if when.tzinfo is None:
             total += 1
     return total
-
-
-def covers_window_start(lines: Sequence[str],
-                        since_iso: str) -> tuple[bool, Optional[str]]:
-    """남아 있는 로그가 창 **시작점 이전**까지 덮는가 → `(덮는가, 가장 오래된 줄)`.
-
-    `app.log*`를 사후 조회하는 구조라, 회전이 보존분(backupCount)을 넘겨 일어나면
-    `[T0, …)`의 앞부분이 통째로 사라진다. 그 상태에서 "실패 marker 0건"은
-    **관측 결과가 아니라 관측 부재**다.
-
-    판정은 "가장 오래된 파싱 가능한 줄 <= T0". 같거나 이르면 T0 시점이 보존분
-    안에 들어 있다는 뜻이다. 줄이 하나도 파싱되지 않으면 덮는다고 말할 수 없다.
-    """
-    try:
-        since = datetime.fromisoformat(since_iso)
-    except (TypeError, ValueError) as exc:
-        raise CollectorError(f"로그 창 시작 파싱 실패: {exc}") from exc
-    if since.tzinfo is None:
-        raise CollectorError("로그 창 경계는 timezone-aware여야 한다")
-
-    # `filter_log_window`와 **같은 방식**으로 뽑는다 — 다르게 뽑으면 "덮는다고
-    # 판정한 창"과 "실제로 필터된 창"이 갈릴 수 있다.
-    stamps = []
-    for line in lines:
-        projected = project_log_line(line)
-        stamp = (projected or {}).get("timestamp")
-        try:
-            when = datetime.fromisoformat(str(stamp))
-        except (TypeError, ValueError):
-            continue
-        if when.tzinfo is None:
-            continue
-        stamps.append(when)
-    if not stamps:
-        return False, None
-    oldest = min(stamps)
-    return oldest <= since, oldest.isoformat()
 
 
 def filter_log_window(lines: Sequence[str], since_iso: str,
@@ -624,6 +679,7 @@ class Adapters:
     admin_fetch: Callable[[str], Any]
     inspect_format: Callable[[str], Any]
     container_events: Callable[[str, str, str], Any]
+    read_old_container_log: Callable[[], Any]
     read_log_lines: Callable[[str, str], Any]
     expiry_probe: Callable[[str], Any]
     source_fingerprint: Callable[[], Any]
@@ -759,8 +815,8 @@ async def collect_evidence(baseline: Baseline, adapters: Adapters,
     축을 결합해 최종 판정을 낸다:
       1. admin 샘플 시계열 (sticky 집계)
       2. 컨테이너 연속성 3-tuple (검증 창 중간 재시작 검출)
-      3. 구 컨테이너 die exitCode + 제거 증거
-      4. 로그 3분할 (T0~StartedAt 구 프로세스 shutdown / StartedAt 이후 신 runtime)
+      3. 구 컨테이너 die exitCode + 제거 + 전용 follower의 graceful marker
+      4. 로그 2창 (T0~StartedAt 구 follower / StartedAt 이후 신 Docker runtime)
 
     관측 성공 + 나쁜 상태 = FAILED / 관측 불능 = UNVERIFIED. 둘 다 후속을
     차단하지만 rollback을 자동으로 의미하지는 않는다.
@@ -1466,16 +1522,44 @@ async def _analyze_shutdown(adapters: Adapters, baseline: Baseline, now_iso: str
         return DieAnalysis(UNVERIFIED, 0, None, False, "event 0건 — 관측 불능")
     analysis = analyze_container_events(list(events), baseline.old_container_id)
     removal_probe: Optional[str] = None
-    if analysis.status == PASS and not analysis.destroyed:
+    if (analysis.die_count == 1 and analysis.exit_code in {"0", "143"}
+            and not analysis.destroyed):
         # die만으로는 제거를 증명하지 못한다 — inspect not-found로 보강.
         removal_probe = await _classify_removal(adapters, baseline.old_container_id)
         if removal_probe == PASS:
             analysis = replace(
                 analysis, destroyed=True,
-                detail="정상 종료 + inspect not-found로 제거 확인")
+                detail=f"exitCode={analysis.exit_code} + inspect not-found로 제거 확인")
         else:
-            analysis = replace(analysis, status=removal_probe,
-                               detail="die는 정상이나 제거 증거 없음")
+            analysis = replace(
+                analysis, status=removal_probe,
+                detail=f"exitCode={analysis.exit_code}이나 제거 증거 없음")
+
+    graceful: Optional[LifecycleLogAnalysis] = None
+    if analysis.die_count == 1 and analysis.exit_code in {"0", "143"}:
+        try:
+            old_lines = list(await adapters.read_old_container_log())
+        except CollectorError as exc:
+            graceful = LifecycleLogAnalysis(
+                UNVERIFIED, (), f"구 컨테이너 follower 읽기 실패: {exc}")
+        else:
+            graceful = analyze_graceful_shutdown_log(old_lines)
+
+        if not analysis.destroyed:
+            # 제거되지 않은 컨테이너는 로그가 깨끗해도 정상 교체가 아니다.
+            if analysis.status == PASS:
+                analysis = replace(analysis, status=FAILED,
+                                   detail="graceful 종료 로그는 있으나 제거 증거 없음")
+        elif graceful.status == PASS:
+            # Compose stop은 SIGTERM을 사용하므로 Uvicorn은 정상 shutdown을 마치고도
+            # 143을 낼 수 있다. **143 자체를 허용하지 않고** 전용 follower의 순서가
+            # 맞는 graceful marker와 제거 증거가 함께 있을 때만 승격한다.
+            analysis = replace(
+                analysis, status=PASS,
+                detail=f"exitCode={analysis.exit_code} + 제거 + graceful shutdown 확인")
+        else:
+            analysis = replace(analysis, status=graceful.status,
+                               detail=graceful.detail)
     # ⚠️ record는 probe **이후** 한 번만 쓴다. probe 전에 쓰면 최종 PASS artifact에
     #    "destroy 없음"만 남고 그걸 보강한 증거가 빠져 감사 계약이 불완전해진다.
     artifact.append("shutdown", {"verdict": analysis.status,
@@ -1483,6 +1567,11 @@ async def _analyze_shutdown(adapters: Adapters, baseline: Baseline, now_iso: str
                                  "exit_code": analysis.exit_code,
                                  "destroyed": analysis.destroyed,
                                  "removal_probe": removal_probe,
+                                 "graceful_shutdown": (
+                                     {"verdict": graceful.status,
+                                      "markers": list(graceful.markers),
+                                      "detail": graceful.detail}
+                                     if graceful else None),
                                  "detail": analysis.detail})
     return analysis
 
@@ -1498,7 +1587,7 @@ async def _classify_removal(adapters: Adapters, old_id: str) -> str:
 async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
                         new_started_at: Optional[str],
                         artifact: EvidenceArtifact) -> str:
-    """시간창 3분할. 구 프로세스 shutdown 창과 신 프로세스 runtime 창을 나눈다.
+    """컨테이너 identity별 2창. 구 shutdown과 신 runtime을 나눈다.
 
     한 창으로 합치면, 배포가 07:00 직후일 때 `[T0, StartedAt)` 사이에 찍힌 **구
     프로세스의 정당한 rollover**까지 FAILED로 오판한다.
@@ -1512,25 +1601,18 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
                                  "error": "새 컨테이너 StartedAt 미취득 — 창 분할 불가"})
         return UNVERIFIED
     try:
-        all_lines = list(await adapters.read_log_lines(baseline.t0_iso, now_iso))
-        covered, oldest = covers_window_start(all_lines, baseline.t0_iso)
-        if not covered:
-            # ⛔ 남은 줄만 보고 "실패 marker 0건"을 내면 "실패가 없었다"가 아니라
-            #    "볼 수도 없었다"가 된다. 회전(backupCount 초과)으로 창 앞부분이
-            #    사라진 경우가 그렇다 (외부 검토 지적).
-            artifact.append("logs", {
-                "verdict": UNVERIFIED, "t0": baseline.t0_iso,
-                "oldest_retained": oldest,
-                "error": "로그 회전으로 [T0, StartedAt) 창 앞부분이 남아 있지 않다"})
-            return UNVERIFIED
-        shutdown = filter_log_window(all_lines, baseline.t0_iso, new_started_at)
-        runtime = filter_log_window(all_lines, new_started_at, now_iso)
+        old_lines = list(await adapters.read_old_container_log())
+        runtime_lines = list(await adapters.read_log_lines(new_started_at, now_iso))
+        shutdown = filter_log_window(old_lines, baseline.t0_iso, new_started_at)
+        runtime = filter_log_window(runtime_lines, new_started_at, now_iso)
     except CollectorError as exc:
         # 로그를 못 읽은 것은 "오류 없음"이 아니다.
         artifact.append("logs", {"verdict": UNVERIFIED, "error": str(exc)[:200]})
         return UNVERIFIED
 
-    unplaceable_total = count_unplaceable(all_lines)
+    unplaceable_total = count_unplaceable(old_lines) + count_unplaceable(runtime_lines)
+    graceful = analyze_graceful_shutdown_log(old_lines)
+    startup = analyze_runtime_startup_log(runtime.lines)
     shutdown_hits = scan_log_markers(shutdown.lines, SHUTDOWN_FAILURE_MARKERS)
     runtime_hits = scan_log_markers(runtime.lines, RUNTIME_FAILURE_MARKERS)
     pre_rollover = scan_log_markers(shutdown.lines, [ROLLOVER_MARKER])
@@ -1541,6 +1623,12 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
                        "lines": len(shutdown.lines)},
         "window_post": {"since": new_started_at, "until": now_iso,
                         "lines": len(runtime.lines)},
+        "graceful_shutdown": {"verdict": graceful.status,
+                              "markers": list(graceful.markers),
+                              "detail": graceful.detail},
+        "runtime_startup": {"verdict": startup.status,
+                            "markers": list(startup.markers),
+                            "detail": startup.detail},
         # 배치 불가는 창 속성이 아니라 입력 전체의 속성 — 한 번만 센다.
         "unparsed_total": unplaceable_total,
         "shutdown_failures": shutdown_hits,
@@ -1554,11 +1642,11 @@ async def _analyze_logs(adapters: Adapters, baseline: Baseline, now_iso: str,
     # ⚠️ marker 부재만으로 PASS를 주면 **로그가 유실됐을 때도 PASS**다
     #    (codex 감사 지적). 창이 실제로 관측 가능했는지를 함께 요구한다:
     #      - 배치 불가 줄이 있으면 그 줄에 marker가 있었는지 알 수 없다
-    #      - post 창이 통째로 비었으면 회전으로 사라졌거나 로그가 안 쌓인 것이다
-    #        (새 프로세스는 startup 로그를 반드시 남긴다)
+    #      - 전용 follower에 graceful 순서가 없으면 구 종료 tail을 증명하지 못한다
+    #      - 신 Docker 로그에 startup 순서가 없으면 runtime 시작점을 증명하지 못한다
     if unplaceable_total:
         return UNVERIFIED
-    if not runtime.lines:
+    if graceful.status != PASS or startup.status != PASS:
         return UNVERIFIED
     return PASS
 
@@ -1641,7 +1729,7 @@ async def _prepare(args) -> int:
     # ⛔ prepare 에서 즉시 실패한다. 예전에는 None 을 baseline 에 저장하고 배포 후 collect 가
     #    UNVERIFIED 를 내게 했는데, 그 시점에는 구 컨테이너가 이미 제거돼 되돌릴 수 없는
     #    검증 공백이 생긴다. baseline 을 다시 얻을 수 있는 **재생성 전**이 차단 지점이다.
-    adapters = production_adapters(target)
+    adapters = production_adapters(target=target)
     try:
         service_baseline = await snapshot_source_freshness(adapters)
     except CollectorError as exc:
@@ -1711,6 +1799,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="배포 후 증거 수집 (baseline 필수). **자동 승인 아님** — runbook 대조 필요")
     ver.add_argument("--baseline", required=True)
     ver.add_argument("--evidence", required=True, help="증거 artifact 경로 (기존 파일이면 거부)")
+    ver.add_argument(
+        "--old-container-log", required=True,
+        help="배포 전 시작해 종결한 구 컨테이너 전용 docker logs follower 파일")
     ver.add_argument("--poll-seconds", type=float, default=45.0)
     ver.add_argument("--startup-deadline-seconds", type=float, default=600.0)
     ver.add_argument("--verify-deadline-seconds", type=float, default=720.0)
@@ -1719,7 +1810,8 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def production_adapters(target: Target = PRODUCTION_TARGET) -> Adapters:
+def production_adapters(target: Target = PRODUCTION_TARGET, *,
+                        old_container_log: Optional[pathlib.Path] = None) -> Adapters:
     """운영 어댑터 배선. 명령 **리터럴만** 여기 모여 있고 판정 로직은 전부 위에 있다.
 
     ⚠️ `docker events --filter`·`--format` 플래그는 **운영 호스트에서 사전 확인**
@@ -1752,25 +1844,29 @@ def production_adapters(target: Target = PRODUCTION_TARGET) -> Adapters:
                 raise CollectorError(f"event JSON 파싱 실패: {exc}") from exc
         return out
 
-    async def read_log_lines(since: str, until: str):
-        """host bind mount 로그 전체를 읽는다 (창 분할은 `filter_log_window`가 한다).
+    async def read_old_container_log():
+        """runbook이 cutover 전에 시작하고 collect 전에 닫은 전용 follower."""
+        if old_container_log is None:
+            raise CollectorError("구 컨테이너 follower 경로가 배선되지 않았다")
+        try:
+            return old_container_log.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            raise CollectorError(
+                f"구 컨테이너 follower 읽기 실패 {old_container_log}: {exc}") from exc
 
-        `docker logs`는 컨테이너 재생성 시 구 로그가 사라지므로 bind mount를 본다.
-        rotation 때문에 `app.log*` 전체가 대상이다.
-        ⛔ `2>/dev/null || true` 로 감싸지 않는다 — 로그 부재·권한 오류가 빈 로그로
-           바뀌면 그대로 false PASS 가 된다. 실패는 CollectorError 로 올려 UNVERIFIED.
+    async def read_log_lines(since: str, until: str):
+        """신 컨테이너 전용 Docker 로그를 읽는다.
+
+        고빈도 `app.log*`는 약 2시간마다 회전하고 파일별 순차 read 중 rotation이
+        일어나면 중간 누락을 증명할 수 없다. 구 프로세스는 별 follower가 담당하므로,
+        신 runtime은 container identity가 고정된 `docker logs`에서 직접 가져온다.
         """
-        log_dir = REPO_ROOT / "volumes" / "logs" / "app"
-        paths = sorted(log_dir.glob("app.log*"))
-        if not paths:
-            raise CollectorError(f"로그 파일 없음: {log_dir}/app.log*")
-        lines: list[str] = []
-        for path in paths:
-            try:
-                lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines())
-            except OSError as exc:
-                raise CollectorError(f"로그 읽기 실패 {path.name}: {exc}") from exc
-        return lines
+        raw = await run_command([
+            "docker", "logs", "--timestamps", "--since", since,
+            "--until", until, target.container,
+        ])
+        return raw.splitlines()
 
     async def expiry_probe(contract_month: str) -> str:
         """컨테이너 **안에서** 만기 계산을 실행 — 배포된 코드의 실제 동작을 본다.
@@ -1798,7 +1894,9 @@ def production_adapters(target: Target = PRODUCTION_TARGET) -> Adapters:
         await asyncio.sleep(seconds)
 
     return Adapters(admin_fetch=admin_fetch, inspect_format=inspect_format,
-                    container_events=container_events, read_log_lines=read_log_lines,
+                    container_events=container_events,
+                    read_old_container_log=read_old_container_log,
+                    read_log_lines=read_log_lines,
                     expiry_probe=expiry_probe, source_fingerprint=source_fingerprint,
                     now=lambda: datetime.now(timezone.utc), sleep=sleep)
 
@@ -1808,9 +1906,13 @@ async def _collect(args) -> int:
     evidence = pathlib.Path(args.evidence)
     if evidence.exists():
         raise CollectorError(f"evidence가 이미 있다(이전 실행 산출물): {evidence}")
+    old_container_log = pathlib.Path(args.old_container_log)
+    if not old_container_log.is_file():
+        raise CollectorError(
+            f"구 컨테이너 follower 파일 없음: {old_container_log}")
     artifact = EvidenceArtifact(evidence)
     result = await collect_evidence(
-        baseline, production_adapters(), artifact,
+        baseline, production_adapters(old_container_log=old_container_log), artifact,
         Deadlines(startup_seconds=args.startup_deadline_seconds,
                   verify_seconds=args.verify_deadline_seconds,
                   observe_seconds=args.observe_seconds,

@@ -759,7 +759,7 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 | 2 | **동작 probe** | 컨테이너 **안에서** `_compute_expiry_date("202608") == 2026-08-14`, `("202602") == 2026-02-13`. ⭐ 8/17 이후엔 **구 코드도 A75609/no_op을 내므로 동작 축의 유일한 판별자**다. 단 이것만으로는 "보정이 들어갔다"까지이고 revision은 1번이 가른다 |
 | 3 | **12분 polling** | 30~60초 주기로 container ID·StartedAt·RestartCount·KRX status **전량 저장**. `--observe-seconds`(기본 720)만큼 창을 **열어 둔다** — 첫 PASS에서 끝내면 실 관측이 ~45초로 줄어 그 뒤 재시작을 못 본다. 표본 2건 미만은 UNVERIFIED |
 | 4 | **종료 직전 identity 재확인** | 모든 축을 마친 뒤 3-tuple 동일 + `RestartCount == 0` 재확인 (그 사이 재시작이면 앞선 관측이 무효). `collect`가 코드로 수행하고 artifact에 남긴다 |
-| 5 | **로그 2창 분리 수집** | 배포 **전에** 구 컨테이너 log follower 시작 / 신 컨테이너 로그는 별도. `[T0, StartedAt)`의 rollover는 **증거**, `[StartedAt, now)`의 rollover는 **비기대** |
+| 5 | **identity별 로그 2창** | 배포 **전에** 구 컨테이너 전용 `docker logs -f --timestamps`를 시작하고 collect 전에 닫아, `exitCode=143`을 제거 증거 + 순서가 완전한 graceful marker와 결속한다. 신 컨테이너는 고빈도 `app.log*` 회전 파일을 사후 순차 조회하지 않고 해당 container identity의 `docker logs --since StartedAt --until now`를 읽으며 startup marker 순서를 요구한다. `[T0, StartedAt)`의 rollover는 **증거**, `[StartedAt, now)`의 rollover는 **비기대** |
 | 6 | **서비스 smoke** | `prepare`가 배포 **전** FX 최신 관측과 USDT direct-write 시각을 각각 스냅샷하고, `collect`가 소스마다 대조한다. `/api/rates` 축은 FX만 덮고 KRX는 별 계약 축이 담당한다. USDT는 `/admin/api/usdt-redis-stats`의 별도 축으로, 배포 전 활성 source가 재시작 뒤 write를 재개했는지 판정한다. FAILED는 **모호하지 않은 것만** — baseline 소스 소실 / 관측 시각 역행 / 활성 USDT source의 재시작 후 write 0. **"FX 갱신 없음"은 판정하지 않고 소스별로 기록**하므로 ⭐**이 목록을 사람이 대조하는 것이 이 항목의 본체**다. ⚠️ 두 가지 한계: (a) `/health`는 [main.py:1305](app/main.py#L1305)에서 정적 dict라 **도달성만** 증명(축 이름이 `reachability`인 이유) (b) 배포+관측이 ~15분이라 저빈도 FX source의 "죽음"과 "느린 주기"가 구분되지 않는다 — 그래서 FX 나이 임계값을 쓰지 않는다 |
 | 7 | **baseline 배타 생성 + checksum 재검증** | `prepare`가 `O_EXCL`+fsync로 만들고 sha256 sidecar 기록 → `collect`가 로드 시 **재검증**(불일치·부재는 UNVERIFIED). `exists()` 후 write는 배타가 아니다 |
 | 8 | **축별 증거 + 종료 코드 + 최종 manifest** | 각 명령의 exit code 보존, 증거 파일 sha256, 절단 시 판정 하향 |
@@ -803,7 +803,7 @@ stop_follower() {
   kill "$FOLLOWER" 2>/dev/null || true
   local rc
   if wait "$FOLLOWER" 2>/dev/null; then rc=0; else rc=$?; fi
-  echo "follower rc=$rc" >> "$D/02-old-container.log"
+  echo "rc=$rc" > "$D/02-old-container.rc"
   FOLLOWER=""
   FOLLOWER_MUST_LIVE=0
 }
@@ -1084,9 +1084,8 @@ cutover_latest() {
 }
 
 # 4) 구 컨테이너 log follower — **배포 전에** 띄운다.
-#    ⚠️ collect 는 이 파일을 읽지 않는다(bind mount 를 사후 조회한다).
-#    이건 **회전으로 사라질 수 있는 구간의 사람용 사본**이다. collect 가
-#    "창 앞부분 없음"으로 UNVERIFIED 를 내면 이 파일이 유일한 근거가 된다.
+#    collect가 이 전용 파일을 읽어 exitCode=143을 graceful shutdown과 결속한다.
+#    고빈도 app.log* 회전과 분리된 구 container identity 전용 증거다.
 docker logs -f --since "$T0" --timestamps exchange-rate-app \
   > "$D/02-old-container.log" 2>&1 &
 FOLLOWER=$!
@@ -1203,17 +1202,20 @@ CUTOVER_PENDING=0
 # 11) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
 #    ⚠️ 여기서 nonzero 는 "배포 실패"가 아니라 "차단 소견"이다. 멈추지 않고
 #    아래 증거 종결까지 마친 뒤 사람이 판정한다.
+#    follower를 먼저 wait해 파일을 닫는다. 쓰는 중인 파일을 collect가 읽으면
+#    graceful marker tail이 잘려 정상 143을 UNVERIFIED로 오판할 수 있다.
+stop_follower
 if python3 scripts/krx_deploy_verifier.py collect \
   --baseline "$D/baseline.json" --evidence "$D/evidence.jsonl" \
+  --old-container-log "$D/02-old-container.log" \
   > "$D/12-collect.txt" 2>&1
 then collect_rc=0
 else collect_rc=$?
 fi
 echo "rc=$collect_rc" >> "$D/12-collect.txt"
 
-# 12) follower 종결 — kill → **wait** → rc 기록. wait 없이 해시하면 아직 쓰는
-#    중인 파일을 굳히게 되고, 종료 코드도 사라진다.
-stop_follower
+# 12) follower는 collect 전에 이미 종결됐다. helper는 idempotent지만 여기서 다시
+#     호출하지 않는다 — 증거 생성 순서를 한 곳에만 둔다.
 trap - EXIT INT TERM
 
 # 13) 신 컨테이너 로그 — 구 것과 **별도로**. compact `$TS`는 Docker 시각이 아니다.
@@ -1254,6 +1256,12 @@ full SHA와 같은지 먼저 확인하고 그 SHA로만 fast-forward한다. 이 
 도메인 flag rollback과 다르다. 이번 image는 KRX·REST auth·DB timeout·topic 계측을 함께
 담으므로 즉시 회귀 시 **구 image ID 전체**로 돌아간다. 배포 디렉터리의 상태 파일이 가리키는
 tag와 image가 일치하지 않으면 실행하지 않는다.
+
+> ⚠️ 아래 블록은 **응급 복원 명령**이지 rollback drill 성공 증거가 아니다. 마지막 Docker
+> health는 도달성만 확인하며 REST·DB·KRX 기능 복원을 증명하지 않는다. 통제된 drill은 별도
+> 운영 GO와 KRX 무세션 창에서 `구 image 복원 → 사용자 대면 REST/DB/KRX smoke → NEW_IMAGE
+> 재복원 → ops/verify-rest-db-deploy.sh + KRX 관측`을 끝까지 수행해야 한다. 2026-08-19 현재
+> rollback tag/image 일치만 read-only로 재확인했고 실제 왕복 drill은 미실행이다.
 
 ```bash
 set -o pipefail

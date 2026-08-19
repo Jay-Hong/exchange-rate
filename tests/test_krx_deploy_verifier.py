@@ -263,7 +263,7 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
 
     def test_all_post_follower_abort_paths_use_the_cleanup_helper(self):
         self.assertIn("stop_follower()", self.script)
-        self.assertIn('echo "follower rc=$rc"', self.script)
+        self.assertIn('echo "rc=$rc" > "$D/02-old-container.rc"', self.script)
         self.assertIn("trap on_exit EXIT", self.script)
         self.assertIn("trap - EXIT INT TERM", self.script)
         self.assertIn("FOLLOWER_MUST_LIVE=1", self.script)
@@ -273,6 +273,13 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         tail = self.script[follower:]
         self.assertNotIn('kill "$FOLLOWER"', tail)
         self.assertGreaterEqual(tail.count("stop_follower"), 6)
+
+    def test_follower_is_closed_and_bound_to_collect(self):
+        collect = self.script.index("scripts/krx_deploy_verifier.py collect")
+        stop = self.script.rindex("stop_follower", 0, collect)
+        self.assertLess(stop, collect)
+        self.assertIn('--old-container-log "$D/02-old-container.log"', self.script)
+        self.assertNotIn('follower rc=', self.script)
 
     def test_dead_follower_is_rejected_by_the_runbook_helper(self):
         start = self.script.index("stop_follower()")
@@ -540,6 +547,10 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         )
         self.assertIn('[ "$ROLLED_IMAGE" = "$OLD_IMAGE" ]', rollback)
         self.assertIn('[ "${HEALTH:-}" = healthy ]', rollback)
+        self.assertIn("응급 복원 명령", rollback)
+        self.assertIn("rollback drill 성공 증거가 아니다", rollback)
+        self.assertIn("REST·DB·KRX 기능 복원을 증명하지 않는다", rollback)
+        self.assertIn("NEW_IMAGE", rollback)
 
     def test_document_matches_usdt_verifier_and_incident_boundary(self):
         self.assertIn("/admin/api/usdt-redis-stats", self.text)
@@ -793,6 +804,48 @@ class TestEvaluatePostSample(unittest.TestCase):
 # Docker event 축
 # ---------------------------------------------------------------------------
 
+class TestSwallowedShutdownFailureVocabulary(unittest.TestCase):
+    """graceful marker 순서가 **완전해도** 삼킨 실패는 FAILED 여야 한다.
+
+    `main.py` 의 auth lane 2 지점과 Uvicorn 의 lifespan 실패는 예외를 재전파하지
+    않으므로 4개 graceful marker 가 그대로 다 찍힌다. 실패 어휘가 없으면 그 경로가
+    조용히 PASS 로 통과한다.
+    """
+
+    GOOD = [
+        "2026-08-18T11:13:58.4Z INFO:     Shutting down",
+        "2026-08-18T11:13:58.5Z INFO:     Waiting for application shutdown.",
+        "2026-08-18T11:14:00.7Z INFO:     Application shutdown complete.",
+        "2026-08-18T11:14:00.7Z INFO:     Finished server process [7]",
+    ]
+
+    def test_clean_sequence_passes(self):
+        self.assertEqual(V.analyze_graceful_shutdown_log(self.GOOD).status, V.PASS)
+
+    def test_swallowed_failures_are_caught_despite_complete_markers(self):
+        import json as _json
+        for marker, line in (
+            ("uvicorn lifespan 실패",
+             "2026-08-18T11:14:00.7Z ERROR:    Application shutdown failed. Exiting."),
+            ("graceful timeout",
+             "2026-08-18T11:14:00.7Z ERROR:    Cancel 3 running task(s), "
+             "timeout graceful shutdown exceeded"),
+            ("auth lane 종료 시작",
+             "2026-08-18T11:13:59.0Z " + _json.dumps(
+                 {"timestamp": "2026-08-18T20:13:59+09:00", "level": "ERROR",
+                  "logger": "exchange_rate.main",
+                  "message": "auth lane 종료 시작 실패"}, ensure_ascii=False)),
+            ("auth lane 합류",
+             "2026-08-18T11:14:00.7Z " + _json.dumps(
+                 {"timestamp": "2026-08-18T20:14:00+09:00", "level": "ERROR",
+                  "logger": "exchange_rate.main",
+                  "message": "auth lane 합류 실패"}, ensure_ascii=False)),
+        ):
+            with self.subTest(marker=marker):
+                got = V.analyze_graceful_shutdown_log(self.GOOD + [line])
+                self.assertEqual(got.status, V.FAILED, msg=got.detail)
+
+
 class TestContainerEvents(unittest.TestCase):
 
     def _die(self, code="0", cid="old123"):
@@ -804,6 +857,33 @@ class TestContainerEvents(unittest.TestCase):
 
     def test_nonzero_exit_fails(self):
         got = V.analyze_container_events([self._die(code="137")], "old123")
+        self.assertEqual(got.status, V.FAILED)
+
+    def test_missing_exit_code_is_unverified_not_failed(self):
+        """`exitCode` 속성 부재는 **관측 불능**이다 — 예전엔 `"" != "0"` 으로 FAILED 였다.
+
+        관측 불능을 장애로 승격하면, 종료 방식을 읽지 못한 정상 배포가 차단된다.
+        UNVERIFIED 도 후속을 막지만 사람이 원인을 구분할 수 있다.
+        """
+        got = V.analyze_container_events(
+            [{"Action": "die", "Actor": {"ID": "old123", "Attributes": {}}}], "old123")
+        self.assertEqual(got.status, V.UNVERIFIED)
+        self.assertIsNone(got.exit_code)
+        self.assertEqual(got.die_count, 1)
+
+    def test_signal_exit_codes_other_than_sigterm_still_fail(self):
+        """143 승격은 `_analyze_shutdown` 이 증거와 결속할 때만이고, 128+N 일반 허용이 아니다."""
+        for code in ("137", "139", "129", "1", "3"):
+            with self.subTest(code=code):
+                got = V.analyze_container_events([self._die(code=code)], "old123")
+                self.assertEqual(got.status, V.FAILED)
+        # 143 자체도 이 저수준 함수에서는 FAILED — 승격은 상위에서만 일어난다.
+        self.assertEqual(
+            V.analyze_container_events([self._die(code="143")], "old123").status, V.FAILED)
+
+    def test_143_is_not_accepted_without_correlated_log_evidence(self):
+        """이벤트 순수 함수는 143만 보고 정상 종료로 승격하지 않는다."""
+        got = V.analyze_container_events([self._die(code="143")], "old123")
         self.assertEqual(got.status, V.FAILED)
 
     def test_multiple_dies_are_failed_not_unverified(self):
@@ -898,6 +978,29 @@ class TestLogProjection(unittest.TestCase):
     def test_non_json_line_returns_none(self):
         self.assertIsNone(V.project_log_line("plain text log"))
 
+    def test_docker_timestamp_prefixed_json_is_projected(self):
+        line = (
+            '2026-08-18T11:14:03.123456789Z '
+            '{"level":"INFO","message":"Application startup complete.",'
+            '"extra":{"uid":"secret"}}')
+        self.assertEqual(
+            V.project_log_line(line),
+            {"timestamp": "2026-08-18T11:14:03.123456789Z",
+             "level": "INFO", "message": "Application startup complete."})
+
+    def test_docker_timestamp_prefixed_plaintext_is_projected(self):
+        line = "2026-08-18T11:14:03.123456789Z INFO: Started server process [7]"
+        self.assertEqual(
+            V.project_log_line(line),
+            {"timestamp": "2026-08-18T11:14:03.123456789Z",
+             "message": "INFO: Started server process [7]"})
+
+    def test_lifecycle_markers_must_be_complete_and_ordered(self):
+        reversed_lines = list(reversed(_OLD_GRACEFUL_LINES))
+        got = V.analyze_graceful_shutdown_log(reversed_lines)
+        self.assertEqual(got.status, V.UNVERIFIED)
+        self.assertIn("누락/순서", got.detail)
+
     def test_marker_scan_finds_shutdown_failures(self):
         lines = [
             json.dumps({"level": "WARNING", "message":
@@ -937,6 +1040,53 @@ class TestLogProjection(unittest.TestCase):
         line = json.dumps({"level": "ERROR",
                            "message": "[krx] KisFuturesClient task crashed"})
         self.assertEqual(len(V.scan_log_markers([line], V.RUNTIME_FAILURE_MARKERS)), 1)
+
+
+class TestProductionLogAdapters(unittest.IsolatedAsyncioTestCase):
+    async def test_runtime_log_reader_uses_container_identity_and_exact_window(self):
+        target = V.Target(container="candidate-app")
+        output = (
+            "2026-08-18T11:14:03.123456789Z "
+            "INFO: Application startup complete.\n")
+        with mock.patch.object(
+                V, "run_command", new=mock.AsyncMock(return_value=output)) as run:
+            adapters = V.production_adapters(target=target)
+            lines = await adapters.read_log_lines(
+                "2026-08-18T11:14:02Z", "2026-08-18T11:26:02Z")
+
+        run.assert_awaited_once_with([
+            "docker", "logs", "--timestamps",
+            "--since", "2026-08-18T11:14:02Z",
+            "--until", "2026-08-18T11:26:02Z",
+            "candidate-app",
+        ])
+        self.assertEqual(lines, [output.strip()])
+
+    async def test_old_log_reader_requires_explicit_collect_binding(self):
+        adapters = V.production_adapters()
+        with self.assertRaisesRegex(V.CollectorError, "경로가 배선되지 않았다"):
+            await adapters.read_old_container_log()
+
+    async def test_missing_old_log_does_not_leave_stale_evidence_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            baseline_path = root / "baseline.json"
+            body = _baseline().to_json().encode("utf-8")
+            baseline_path.write_bytes(body)
+            (root / "baseline.json.sha256").write_text(
+                f"{hashlib.sha256(body).hexdigest()}  baseline.json\n",
+                encoding="utf-8",
+            )
+            evidence = root / "evidence.jsonl"
+            args = SimpleNamespace(
+                baseline=str(baseline_path), evidence=str(evidence),
+                old_container_log=str(root / "missing.log"),
+                startup_deadline_seconds=1, verify_deadline_seconds=1,
+                observe_seconds=1, poll_seconds=1,
+            )
+            with self.assertRaisesRegex(V.CollectorError, "follower 파일 없음"):
+                await V._collect(args)
+            self.assertFalse(evidence.exists())
 
 
 # ---------------------------------------------------------------------------
@@ -1398,30 +1548,39 @@ class _Clock:
         self.now_value = self.now_value + timedelta(seconds=seconds)
 
 
-# 배포 전부터 앱은 로그를 쓰고 있다 — 보존된 로그가 T0 이전을 덮는 게 정상이다.
-# 이 줄이 없는 fixture 는 "회전으로 창 앞부분이 사라진" 비정상 상태를 뜻한다.
-_PRE_T0_LINE = json.dumps(
-    {"timestamp": "2026-08-17T05:59:00+00:00", "level": "INFO",
-     "logger": "app.main", "message": "배포 전 정상 동작"})
-
-
 def _line(stamp: str, level: str = "info", message: str = "x") -> str:
     return json.dumps({"timestamp": stamp, "level": level.upper(),
                        "logger": "app.main", "message": message})
 
 
-_RUNTIME_OK_LINE = json.dumps(
-    {"timestamp": "2026-08-17T06:05:30+00:00", "level": "INFO",
-     "logger": "app.main", "message": "startup complete"})
+_OLD_GRACEFUL_LINES = [
+    _line("2026-08-17T06:03:00+00:00", message="Shutting down"),
+    _line("2026-08-17T06:03:01+00:00",
+          message="Waiting for application shutdown."),
+    _line("2026-08-17T06:03:02+00:00",
+          message="Application shutdown complete."),
+    _line("2026-08-17T06:03:03+00:00",
+          message="Finished server process [7]"),
+]
+
+_RUNTIME_START_LINES = [
+    _line("2026-08-17T06:05:01+00:00", message="Started server process [7]"),
+    _line("2026-08-17T06:05:03+00:00",
+          message="Application startup complete."),
+]
+
+_RUNTIME_OK_LINE = _line(
+    "2026-08-17T06:05:30+00:00", message="startup complete")
 
 
 def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
-              events=None, shutdown_lines=None, runtime_lines=None,
+              events=None, old_container_lines=None, shutdown_lines=None,
+              runtime_lines=None,
               removal_error="Error: No such object: old123",
               new_image="sha256:bbb", health_status="healthy",
               probe=None, source_fp=_FP, final_identity_raw=None,
               rates_count=30, rates_updated_at="2026-08-17T06:06:00+00:00",
-              rates_error=None, retained_covers_t0=True, rates_by_source=None,
+              rates_error=None, rates_by_source=None,
               usdt_after=None, usdt_error=None):
     """scripted 어댑터. `statuses`의 각 원소는 dict(payload) 또는 예외.
 
@@ -1490,12 +1649,16 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
             {"Action": "destroy", "Actor": {"ID": "old123"}},
         ]
 
+    async def read_old_container_log():
+        base = (list(old_container_lines) if old_container_lines is not None
+                else list(_OLD_GRACEFUL_LINES))
+        return base + list(shutdown_lines or [])
+
     async def read_log_lines(_since, _until):
-        # 운영 어댑터와 동일하게 **전체 로그**를 돌려준다. 창 분할은
-        # `filter_log_window`가 timestamp로 한다.
-        base = list(runtime_lines) if runtime_lines is not None else [_RUNTIME_OK_LINE]
-        pre = [_PRE_T0_LINE] if retained_covers_t0 else []
-        return pre + list(shutdown_lines or []) + base
+        # 운영 어댑터와 동일하게 신 컨테이너 전용 로그만 돌려준다.
+        if runtime_lines is not None:
+            return list(runtime_lines)
+        return list(_RUNTIME_START_LINES) + [_RUNTIME_OK_LINE]
 
     async def expiry_probe(month):
         value = probe_map.get(month)
@@ -1512,6 +1675,7 @@ def _adapters(clock, *, statuses, identity_raw="new1|2026-08-17T06:05:00Z|0",
 
     return V.Adapters(admin_fetch=admin_fetch, inspect_format=inspect_format,
                       container_events=container_events,
+                      read_old_container_log=read_old_container_log,
                       read_log_lines=read_log_lines, expiry_probe=expiry_probe,
                       source_fingerprint=source_fingerprint,
                       now=clock.now, sleep=clock.sleep)
@@ -1675,30 +1839,25 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS, got["reasons"])
 
-    async def test_rotated_away_pre_window_is_unverified(self):
-        """⭐ 로그 회전으로 T0 이전이 사라졌으면 **완전한 창이 아니다**.
-
-        `app.log*`를 사후 조회하는 구조라, 회전이 보존분(backupCount)을 넘겨
-        일어나면 `[T0, StartedAt)` 앞부분이 통째로 없어진다. 그런데 남은 줄만
-        보고 "실패 marker 0건"을 내면, 그건 "실패가 없었다"가 아니라
-        "봤을 수도 없었다"다 (외부 검토 지적).
-        """
-        # 남아 있는 가장 오래된 줄이 T0(06:00Z)보다 **나중** — 앞이 잘렸다
-        late = _line("2026-08-17T06:04:00+00:00", "info", "늦게 남은 줄")
-        ad = _adapters(self.clock, statuses=[_payload()],
-                       retained_covers_t0=False,
-                       runtime_lines=[late, _RUNTIME_OK_LINE])
+    async def test_truncated_old_follower_is_unverified(self):
+        """구 follower tail이 잘리면 exit 0도 정상 종료로 승인하지 않는다."""
+        ad = _adapters(
+            self.clock, statuses=[_payload()],
+            old_container_lines=_OLD_GRACEFUL_LINES[:-1])
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.UNVERIFIED)
-        self.assertTrue(any("회전" in r or "창" in r for r in got["reasons"]),
+        self.assertTrue(any("graceful" in r or "로그" in r for r in got["reasons"]),
                         got["reasons"])
 
-    async def test_complete_pre_window_is_not_flagged(self):
-        """T0 이전 줄이 남아 있으면 창은 완전하다 — 오탐 금지."""
-        early = _line("2026-08-17T05:58:00+00:00", "info", "T0 이전 줄")
-        ad = _adapters(self.clock, statuses=[_payload()],
-                       retained_covers_t0=False,   # 앵커 없이, 이 줄만으로 덮는다
-                       runtime_lines=[early, _RUNTIME_OK_LINE])
+    async def test_missing_runtime_startup_is_unverified(self):
+        """신 container 로그에 startup 시작점이 없으면 중간 누락을 배제 못 한다."""
+        ad = _adapters(
+            self.clock, statuses=[_payload()], runtime_lines=[_RUNTIME_OK_LINE])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+
+    async def test_complete_identity_specific_logs_pass(self):
+        ad = _adapters(self.clock, statuses=[_payload()])
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.PASS, got["reasons"])
 
@@ -1945,6 +2104,63 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         got = await V.collect_evidence(_baseline(), ad, self._artifact())
         self.assertEqual(got["verdict"], V.FAILED)
 
+    async def test_sigterm_143_with_destroy_and_graceful_log_passes(self):
+        """Compose SIGTERM 143은 세 증거가 결속될 때만 정상으로 승격한다."""
+        ad = _adapters(self.clock, statuses=[_payload()], events=[
+            {"Action": "die", "Actor": {
+                "ID": "old123", "Attributes": {"exitCode": "143"}}},
+            {"Action": "destroy", "Actor": {"ID": "old123"}},
+        ])
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.PASS, got["reasons"])
+
+    async def test_sigterm_143_without_complete_graceful_log_is_unverified(self):
+        ad = _adapters(
+            self.clock, statuses=[_payload()],
+            events=[
+                {"Action": "die", "Actor": {
+                    "ID": "old123", "Attributes": {"exitCode": "143"}}},
+                {"Action": "destroy", "Actor": {"ID": "old123"}},
+            ],
+            old_container_lines=_OLD_GRACEFUL_LINES[:-1],
+        )
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.UNVERIFIED)
+
+    async def test_sigterm_143_with_shutdown_failure_marker_fails(self):
+        failure = _line(
+            "2026-08-17T06:02:00+00:00", "warning",
+            "[krx_close_snapshot] close timeout (5s), cancel 1 pending tasks")
+        ad = _adapters(
+            self.clock, statuses=[_payload()],
+            events=[
+                {"Action": "die", "Actor": {
+                    "ID": "old123", "Attributes": {"exitCode": "143"}}},
+                {"Action": "destroy", "Actor": {"ID": "old123"}},
+            ],
+            shutdown_lines=[failure],
+        )
+        got = await V.collect_evidence(_baseline(), ad, self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
+    async def test_sigterm_143_without_removal_evidence_fails(self):
+        base = _adapters(self.clock, statuses=[_payload()], events=[
+            {"Action": "die", "Actor": {
+                "ID": "old123", "Attributes": {"exitCode": "143"}}},
+        ])
+
+        async def inspect_present(fmt):
+            if fmt.startswith("__probe__"):
+                return "still-there"
+            if "Image" in fmt:
+                return "sha256:bbb"
+            return "new1|2026-08-17T06:05:00Z|0"
+
+        got = await V.collect_evidence(
+            _baseline(), dataclasses.replace(base, inspect_format=inspect_present),
+            self._artifact())
+        self.assertEqual(got["verdict"], V.FAILED)
+
     async def test_missing_die_event_is_unverified_not_pass(self):
         """marker/이벤트 부재를 '정상'으로 기록하지 않는다."""
         ad = _adapters(self.clock, statuses=[_payload()], events=[])
@@ -2096,7 +2312,11 @@ class TestCollectEvidence(unittest.IsolatedAsyncioTestCase):
         shutdown = next(r for r in records if r["kind"] == "shutdown")
         self.assertEqual(shutdown["removal_probe"], V.PASS)
         self.assertTrue(shutdown["destroyed"])  # probe로 보강된 상태가 반영됨
-        self.assertIn("not-found", shutdown["detail"])
+        self.assertEqual(shutdown["graceful_shutdown"]["verdict"], V.PASS)
+        self.assertEqual(
+            shutdown["graceful_shutdown"]["markers"],
+            list(V.GRACEFUL_SHUTDOWN_MARKERS))
+        self.assertIn("graceful shutdown", shutdown["detail"])
 
     async def test_die_ok_but_not_removed_and_probe_says_present(self):
         """die만으로는 제거를 증명하지 못한다."""
