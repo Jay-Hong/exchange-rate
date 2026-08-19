@@ -6528,10 +6528,10 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `3eee5cdf467e2c2356618d6b33cb5af9037f07a5`
+- server 기준 commit: `3ff84d156fd159e7e8616a7bf140daa59db690fa`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `54585b79e0eb635ef04f1b102644a2358d7181ed1d45b0db1a0ed39ff9705dd6`
+- manifest SHA: `23bc87cdd76610b793d94605d24fd55e381443dbc4312e212eadef3cfcb24a0c`
 - baseline SHA: `e5fda896f3686cef8cf33044725acfb11bfd6ef846ef8079aaba4ec0a1c0b34e`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 

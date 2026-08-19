@@ -259,21 +259,21 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "54585b79e0eb635ef04f1b102644a2358d7181ed1d45b0db1a0ed39ff9705dd6",
+    "manifest_sha256": "23bc87cdd76610b793d94605d24fd55e381443dbc4312e212eadef3cfcb24a0c",
     "baseline_sha256": "e5fda896f3686cef8cf33044725acfb11bfd6ef846ef8079aaba4ec0a1c0b34e",
-    "lock_sha256": "6a52cae7e0a6700bc0677934cdcc751bd90669021faeaf3b58253613b3d57db1",
-    "server_commit": "3eee5cdf467e2c2356618d6b33cb5af9037f07a5",
+    "lock_sha256": "bbe27446baaaffaf812e770ce358cb45308bb11a6f52a0914b08d4528ecf261e",
+    "server_commit": "3ff84d156fd159e7e8616a7bf140daa59db690fa",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "0a1f8e7f62fd0ce774486dc7fa8aa4a1ba82bcb8bb0e797c1db05a9d04884109",
-    "CLIENT": "c33dbc3e28946c235207d315ac8bb488ead20fb6a9f5502acb2df79cb7c2bf95",
-    "CUT": "ff656ca9bf8ceffbaad6a32e67d9f31ddbdf53022f062ac1de256dab2548931c",
-    "HAND": "b5b02ff097fd23fd88e73b0e30708cbe66f9e0f895a7601349535030c54da7b3",
-    "HEALTH": "ae940a13d799bea6ed0f39974cd0c7149d2e9b2137ec1a466546cfc7413371a0",
-    "LOAD": "3aea32e6196f4b6aa2eed5c6c554eeace96de3d31a71c73e84bd35d7798e202e"
+    "ADR": "50ee64e69fad91eea74d8fdbf2a3d59e2e4644548fed74bf1d46d893ae4fdaba",
+    "CLIENT": "20442ea612edd45685bec0b26111399b79fffacac39540cd4f3e4be57ec2edb9",
+    "CUT": "a7fdc62efbd66cde8dc17c63487220e6e3d94a501e2f3fd95b24eb4075a55f90",
+    "HAND": "1842537191402b78ac3b6af905316d222841cef6f66e9b26392d6b26cb8e091b",
+    "HEALTH": "d8a8381c07bfffb57270cef4c8ab7cddb7c8c430c03d71c477a6c14284e8e658",
+    "LOAD": "cf61076bf43aa6e3a518f560a0b068d592e9a0d2b901d4fc4d93a562e69fab40"
   },
-  "claim_ledger_sha256": "5e7e2328b12e414e5e5b2894577b6d4644f880c93ea16a7e8cadfa9b199b36f8",
+  "claim_ledger_sha256": "09f4392a9bf238f0a78e66ee93cafa814802885f600d6b807f2433049e70f786",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 61,
