@@ -1262,8 +1262,20 @@ tag와 image가 일치하지 않으면 실행하지 않는다.
 > ⚠️ 아래 블록은 **응급 복원 명령**이지 rollback drill 성공 증거가 아니다. 마지막 Docker
 > health는 도달성만 확인하며 REST·DB·KRX 기능 복원을 증명하지 않는다. 통제된 drill은 별도
 > 운영 GO와 KRX 무세션 창에서 `구 image 복원 → 사용자 대면 REST/DB/KRX smoke → NEW_IMAGE
-> 재복원 → ops/verify-rest-db-deploy.sh + KRX 관측`을 끝까지 수행해야 한다. 2026-08-19 현재
-> rollback tag/image 일치만 read-only로 재확인했고 실제 왕복 drill은 미실행이다.
+> 재복원 → ops/verify-rest-db-deploy.sh + KRX 관측`을 끝까지 수행해야 한다.
+>
+> ✅ **통제된 왕복 drill 완료 (2026-08-19 16:12:07~16:18:16 KST)** — KRX 무세션 창에서
+> `a505d741` 구 image를 복원해 health·DB 강제 경로·KRX 전 행 digest 무변조·USDT 5소스
+> 재연결/first tick·FX scheduler/warmup/Investing/은행 경로를 확인한 뒤 `4deda493` 신 image로
+> 재복원했다. 신 image에서 같은 기능 축과 REST/DB 5개 hard gate를 모두 통과했고, 최종
+> container/image/latest·healthy·restart 0을 재확인했다. 봉인 증거는
+> `~/logs/krx-drill-20260819T071207Z/` (`FINAL_STATUS=DRILL_OK`, `SHA256SUMS` 13/13 OK)에 있다.
+> 17:05~17:11 KST 사후 cron 4종도 정상 완료됐으며, 17:50 CM 재구독 ACK 후 18:00:01~18:00:17
+> 사이 신규 KRX tick 12건이 적재돼 실시간 복귀까지 확인했다(18:14 재조회 123건).
+>
+> ⚠️ **CM 개장(17:50)과 첫 체결(18:00) 사이 ~10분은 호가만 흐른다** — 실측으로 17:52 시점에
+> 호가 frame 145건·체결 0건이었다. 이 구간의 `source_rates` 신규 tick 0건은 연결 장애가
+> **아니다**. 복귀 판정은 `connected`+구독 ACK 로 하고, 신규 tick 은 첫 체결 이후에 본다.
 
 ```bash
 set -o pipefail
