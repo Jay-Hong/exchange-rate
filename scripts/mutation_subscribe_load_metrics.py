@@ -75,7 +75,7 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
      '        "calls_by_channel": {name: 0 for name in CHANNELS},'),
     # ⚠️ 앵커는 현행 버전을 따라간다 — 버전이 오를 때마다 이 변이도 함께 갱신(S1c-07 계보).
     ("S1c-07 CONTRACT_VERSION 롤백", MODULE,
-     'CONTRACT_VERSION = "subscribe-load/6"', 'CONTRACT_VERSION = "subscribe-load/5"'),
+     'CONTRACT_VERSION = "subscribe-load/7"', 'CONTRACT_VERSION = "subscribe-load/6"'),
     ("S1c-08 premium 제출 집합 축소(unavailable_persistent)", MODULE,
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),\n    KRX_ENTITLEMENT:',
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient"}),\n    KRX_ENTITLEMENT:'),
@@ -275,8 +275,8 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     if isinstance(verdict, Unavailable) and verdict.kind is UnavailableKind.PERSISTENT:'''),
     # ── S3: seam ③ + channel (topic_initial_snapshot.py / topic_dispatcher.py) ──
     ("S3-40 channel 기본값을 anonymous 로", SNAPSHOT,
-     '    websocket: "WebSocket", topics: List[str], *, channel: str = "unattributed"',
-     '    websocket: "WebSocket", topics: List[str], *, channel: str = "anonymous"'),
+     '    channel: str = "unattributed",',
+     '    channel: str = "anonymous",'),
     ("S3-41 record_snapshot_call 누락", SNAPSHOT,
      "    subscribe_load.record_snapshot_call(channel)\n    sent = 0",
      "    sent = 0"),
@@ -298,50 +298,31 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
         # ⛔ dedupe **통과분만** 센다 — 요청 1건이 몇 배 topic 으로 퍼지는지의 분자.
         #    build 실패 topic 도 수요였으므로 여기(=build 앞)서 센다.
         subscribe_load.record_snapshot_topic()''',
-      '''        except Exception:
-            logger.warning(
-                "initial snapshot build 실패 (격리)",
-                extra={"topic": topic},
-                exc_info=True,
-            )
-            continue
+      '''            raise InitialSnapshotFatalFailure(topic) from exc
 
         if payload is None:'''),
      ('''        seen.add(topic)''',
-      '''        except Exception:
-            logger.warning(
-                "initial snapshot build 실패 (격리)",
-                extra={"topic": topic},
-                exc_info=True,
-            )
-            continue
+      '''            raise InitialSnapshotFatalFailure(topic) from exc
         subscribe_load.record_snapshot_topic()
 
         if payload is None:''')),
     ("S3-44 build worker 축 우회(timed_call 제거)", SNAPSHOT,
-     '''        payload = await asyncio.to_thread(
-            subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-            _build_snapshot_sync, topic,
-        )''',
-     '''        payload = await asyncio.to_thread(_build_snapshot_sync, topic)'''),
+     '''                    payload = await asyncio.to_thread(
+                        subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                        _run_snapshot_worker, topic, request_budget,
+                    )''',
+     '''                    payload = await asyncio.to_thread(
+                        _run_snapshot_worker, topic, request_budget,
+                    )'''),
     ("S3-45 built/none_payload 스왑", SNAPSHOT,
      '        load.finish("none_payload" if payload is None else "built")',
      '        load.finish("built" if payload is None else "none_payload")'),
     ("S3-46 build 예외를 CM 안에서 none_payload 로 접음(파생 기록 소실)", SNAPSHOT,
-     '''        payload = await asyncio.to_thread(
-            subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-            _build_snapshot_sync, topic,
-        )
-        load.finish("none_payload" if payload is None else "built")''',
-     '''        try:
-            payload = await asyncio.to_thread(
-                subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-                _build_snapshot_sync, topic,
-            )
-        except Exception:
-            load.finish("none_payload")
-            return None
-        load.finish("none_payload" if payload is None else "built")'''),
+     '''            load.finish("none_payload" if payload is None else "built")''',
+     '''            except Exception:
+                load.finish("none_payload")
+                return None
+            load.finish("none_payload" if payload is None else "built")'''),
     ("S3-47 lease_skipped 기록 누락", SNAPSHOT,
      '''            # ⛔ build 를 **다 하고 버린** 낭비 — 폭주가 스스로를 키우는 구간의 신호.
             subscribe_load.record_snapshot_send("lease_skipped")''',
@@ -353,16 +334,21 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     ("S3-49 connection_closed 기록 누락", SNAPSHOT,
      '''            subscribe_load.record_snapshot_send("connection_closed")''',
      "            pass"),
-    ("S3-50 send raised catch 를 BaseException 으로 확대", SNAPSHOT,
-     '''        except Exception:
+    ("S3-50 취소 전용 절 제거 + send catch 를 BaseException 으로 확대", SNAPSHOT,
+     ('''        except asyncio.CancelledError:
+            request_budget.stop("caller_cancelled")
+            raise
+''',
+      '''        except Exception:
             # ⛔ **`Exception` 한정** — `BaseException` 으로 넓히면 취소(CancelledError)가
             #    `raised`(실제 전송 예외 신호)를 오염시킨다. 기록만 하고 **그대로 전파** —
             #    위 주석의 규율(프로그래밍 오류를 접지 않는다)은 불변이다.
             subscribe_load.record_snapshot_send("raised")
-            raise''',
-     '''        except BaseException:
-            subscribe_load.record_snapshot_send("raised")
             raise'''),
+     ('',
+      '''        except BaseException:
+            subscribe_load.record_snapshot_send("raised")
+            raise''')),
     ("S3-51 raised 기록 자체 제거", SNAPSHOT,
      '''            subscribe_load.record_snapshot_send("raised")
             raise''',
@@ -415,18 +401,18 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
     subscribe_load.record_snapshot_call(channel)
     sent = 0'''),
     ("S3-52 dispatcher anonymous channel 제거", DISPATCHER,
-     'await send_initial_snapshots(websocket, free_topics, channel="anonymous")',
-     "await send_initial_snapshots(websocket, free_topics)"),
+     '                    channel="anonymous",\n',
+     ''),
     ("S3-53 dispatcher token_bearing channel 제거", DISPATCHER,
-     'await send_initial_snapshots(websocket, accepted_names, channel="token_bearing")',
-     "await send_initial_snapshots(websocket, accepted_names)"),
-    ("S3-57 계측 계약 오류 재전파 제거", SNAPSHOT,
+     '                channel="token_bearing",\n',
+     ''),
+    ("S3-57 계측 계약 오류를 조용히 skip", SNAPSHOT,
+     '''        except Exception as exc:
+            if _is_transient_snapshot_error(exc):''',
      '''        except subscribe_load.SubscribeLoadContractError:
-            # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
-            # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.
-            raise
-        except Exception:''',
-     '''        except Exception:'''),
+            continue
+        except Exception as exc:
+            if _is_transient_snapshot_error(exc):'''),
     ("S3-58b 계약 오류 전용 WARNING 을 generic 으로 격하", MODULE,
      '''              if isinstance(exc, SubscribeLoadContractError):
                   # ⚠️ 계약 오류는 "미지정/제출 불가" 가 아니다 — 문구를 나누고 원본 예외를

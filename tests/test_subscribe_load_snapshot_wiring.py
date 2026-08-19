@@ -128,6 +128,19 @@ class TestRequestDenominatorIsExactlyOnce(SnapshotWiringTestCase):
 
 
 class TestDedupeAndBuildAxis(SnapshotWiringTestCase):
+    async def test_duplicate_success_topic_counts_and_builds_once(self):
+        """dedupe 전 계수 변이는 성공 경로에서만 두 번째 topic까지 도달해 드러난다."""
+        self._register(["fx:usd-krw"])
+        with self._patch_build(_payload) as build:
+            sent = await send_initial_snapshots(
+                self.ws, ["fx:usd-krw", "fx:usd-krw"]
+            )
+        self.assertEqual(sent, 1)
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(
+            self._snap()["snapshot_send"]["topics_deduped_total"], 1
+        )
+
     async def test_fatal_topic_is_counted_before_build_and_stops_remaining_topics(self):
         """fatal build도 수요로 센 뒤 1011로 끝내며, 남은 topic은 시작하지 않는다."""
         self._register(["fx:usd-krw", "usdt:krw"])
@@ -188,7 +201,7 @@ class TestDedupeAndBuildAxis(SnapshotWiringTestCase):
         """⑥ — 공유 builder 본문에는 계측을 두지 않는다.
 
         ⚠️ **근거가 S0(`a2621df`)에서 바뀌었다.** 구 근거는 *"REST 호출이 WS 축으로 계측된다"*
-        였는데, 이제 REST twin 합산은 **의도**다(`subscribe-load/6`: snapshot_build 는 WS+twin).
+        였는데, 이제 REST twin 합산은 **의도**다(`subscribe-load/7`: snapshot_build 는 WS+twin).
         지금의 근거는 둘이다:
           1. `queue_wait` = (worker 시작 − caller 제출)이라 **caller 쪽 시각**이 필요하다.
              본문은 worker 시작 이후만 보므로 그 값을 잴 수 없다.

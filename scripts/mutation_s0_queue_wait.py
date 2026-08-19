@@ -24,14 +24,14 @@ CAP = REPO / "ops" / "capture_topic_auth_rollout.py"
 TESTS = ["tests/test_subscribe_load_metrics.py", "tests/test_topic_auth_rollout_capture.py",
          "tests/test_topic_initial_snapshot_e2e.py", "tests/test_ws_metrics_exposure.py"]
 
-WRAP_CALL = "        payload = await build_snapshot_observed(topic)"
+WRAP_CALL = "        payload = await build_snapshot_observed(topic, budget=request_budget)"
 
 MUTANTS = [
     # ── 계약 ──────────────────────────────────────────────────────────
-    ("CONTRACT_VERSION 을 /5 로 되돌림", SLM,
-     'CONTRACT_VERSION = "subscribe-load/6"', 'CONTRACT_VERSION = "subscribe-load/5"'),
-    ("캡처기가 /6 를 수용하지 않음", CAP,
-     'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/6"',
+    ("CONTRACT_VERSION 을 /6 로 되돌림", SLM,
+     'CONTRACT_VERSION = "subscribe-load/7"', 'CONTRACT_VERSION = "subscribe-load/6"'),
+    ("캡처기가 /7 을 수용하지 않음", CAP,
+     'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/7"',
      'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/5"'),
     ("캡처기 subscribe_load 검증 배선 제거", CAP,
      "        metric_schema_errors.extend(_subscribe_load_schema_errors(raw_body))\n", ""),
@@ -39,13 +39,29 @@ MUTANTS = [
     ("REST twin 배선 제거(구 직접 to_thread 복원)", MAIN,
      WRAP_CALL, "        payload = await asyncio.to_thread(_build_snapshot_sync, topic)"),
     ("WS 이중 계수(래퍼를 두 번 호출)", SNAP,
-     "            payload = await build_snapshot_observed(topic)\n",
-     "            payload = await build_snapshot_observed(topic)\n"
-     "            payload = await build_snapshot_observed(topic)\n"),
+     "            payload = await build_snapshot_observed(topic, budget=request_budget)\n",
+     "            payload = await build_snapshot_observed(topic, budget=request_budget)\n"
+     "            payload = await build_snapshot_observed(topic, budget=request_budget)\n"),
     # ── 측정 지점 ─────────────────────────────────────────────────────
     ("제출 시각을 to_thread **뒤**로 (queue_wait 정의 파괴)", SNAP,
-     "        load.mark_submitted()\n        payload = await asyncio.to_thread(",
-     "        payload = await asyncio.to_thread("),
+     """            load.mark_submitted()
+            deadline_cm = asyncio.timeout(remaining)
+            try:
+                async with deadline_cm:
+                    payload = await asyncio.to_thread(
+                        subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                        _run_snapshot_worker, topic, request_budget,
+                    )
+""",
+     """            deadline_cm = asyncio.timeout(remaining)
+            try:
+                async with deadline_cm:
+                    payload = await asyncio.to_thread(
+                        subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                        _run_snapshot_worker, topic, request_budget,
+                    )
+                    load.mark_submitted()
+"""),
     # ⛔ 저장 스키마(_blank)만 오염시키는 변이는 **무해**하다 — 노출 투영이 걸러낸다.
     #    계약 표면은 투영이므로 거기를 노린다(변이 선택 자체가 판별력의 일부다).
     ("caller-only 축에 worker 필드를 노출", SLM,

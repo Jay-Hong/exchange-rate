@@ -1,0 +1,347 @@
+"""LOAD-S5 — topic snapshot single-flight/cache 행동 계약."""
+from __future__ import annotations
+
+import asyncio
+import os
+import pathlib
+import subprocess
+import sys
+import unittest
+from unittest.mock import patch
+
+from app import config, subscribe_load_metrics as slm, topic_dispatcher
+from app import topic_initial_snapshot as snapshot
+from app.topic_initial_snapshot import (
+    SnapshotRequestBudget,
+    build_snapshot_observed,
+)
+
+
+def _budget() -> SnapshotRequestBudget:
+    return SnapshotRequestBudget(
+        ack_deadline_seconds=5.0,
+        snapshot_budget_seconds=10.0,
+        request_deadline_seconds=20.0,
+    )
+
+
+async def _wait_until(predicate, *, attempts: int = 200) -> None:
+    for _ in range(attempts):
+        if predicate():
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("condition did not become true")
+
+
+class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        topic_dispatcher._topic_payload_generations.clear()
+        with slm._lock:
+            slm._metrics.clear()
+            slm._metrics.update(slm._blank())
+
+    async def asyncTearDown(self) -> None:
+        topic_dispatcher._topic_payload_generations.clear()
+
+    async def test_concurrent_waiters_build_once_and_receive_isolated_payloads(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def build(topic, *, budget):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            return {
+                "type": "snapshot",
+                "version": 1,
+                "topic": topic,
+                "data": {"rates": [{"rate": 1400.0}]},
+            }
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=build,
+        ):
+            tasks = [
+                asyncio.create_task(build_snapshot_observed("usdt:krw", budget=_budget()))
+                for _ in range(20)
+            ]
+            await entered.wait()
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_singleflight"][
+                    "requests_total"
+                ] == 20
+            )
+            self.assertEqual(calls, 1)
+            release.set()
+            results = await asyncio.gather(*tasks)
+
+        self.assertTrue(all(result == results[0] for result in results))
+        self.assertEqual(len({id(result) for result in results}), 20)
+        self.assertEqual(len({id(result["data"]) for result in results}), 20)
+        results[0]["data"]["rates"][0]["rate"] = -1
+        self.assertEqual(results[1]["data"]["rates"][0]["rate"], 1400.0)
+
+        metrics = slm.subscribe_load_metrics()["snapshot_singleflight"]
+        self.assertEqual(metrics["leaders_total"], 1)
+        self.assertEqual(metrics["joined_total"], 19)
+        self.assertEqual(metrics["successes_cached_total"], 1)
+
+        cached = await build_snapshot_observed("usdt:krw", budget=_budget())
+        self.assertEqual(cached["data"]["rates"][0]["rate"], 1400.0)
+        self.assertIsNot(cached, results[1])
+        self.assertEqual(
+            slm.subscribe_load_metrics()["snapshot_singleflight"]["cache_hits_total"],
+            1,
+        )
+
+    async def test_leader_cancellation_does_not_cancel_shared_build_or_follower(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = asyncio.Event()
+        shared_budgets = []
+
+        async def build(topic, *, budget):
+            shared_budgets.append(budget)
+            entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return {"type": "snapshot", "topic": topic, "data": {}}
+
+        leader_budget = _budget()
+        follower_budget = _budget()
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=build,
+        ):
+            leader = asyncio.create_task(
+                build_snapshot_observed("usdt:krw", budget=leader_budget)
+            )
+            await entered.wait()
+            follower = asyncio.create_task(
+                build_snapshot_observed("usdt:krw", budget=follower_budget)
+            )
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_singleflight"][
+                    "joined_total"
+                ] == 1
+            )
+            leader.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await leader
+            self.assertEqual(leader_budget.stop_reason, "caller_cancelled")
+            self.assertFalse(cancelled.is_set(), "leader 취소가 shared task까지 전파됐다")
+            self.assertIsNot(shared_budgets[0], leader_budget)
+            self.assertIsNot(shared_budgets[0], follower_budget)
+
+            release.set()
+            self.assertEqual(
+                await follower,
+                {"type": "snapshot", "topic": "usdt:krw", "data": {}},
+            )
+            self.assertIsNone(shared_budgets[0].stop_reason)
+
+    async def test_failure_and_last_waiter_cancellation_remove_flight_for_retry(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def fail_once(topic, *, budget):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            await release.wait()
+            if calls == 1:
+                raise RuntimeError("boom")
+            return {"type": "snapshot", "topic": topic, "data": {"try": calls}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=fail_once,
+        ):
+            first = asyncio.create_task(build_snapshot_observed("usdt:krw", budget=_budget()))
+            second = asyncio.create_task(build_snapshot_observed("usdt:krw", budget=_budget()))
+            await entered.wait()
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_singleflight"][
+                    "joined_total"
+                ] == 1
+            )
+            release.set()
+            failures = await asyncio.gather(first, second, return_exceptions=True)
+            self.assertTrue(all(isinstance(exc, RuntimeError) for exc in failures))
+            self.assertEqual(calls, 1)
+            self.assertEqual(snapshot._snapshot_state().flights, {})
+
+            retried = await build_snapshot_observed("usdt:krw", budget=_budget())
+            self.assertEqual(retried["data"]["try"], 2)
+
+        cancel_entered = asyncio.Event()
+        cancel_seen = asyncio.Event()
+
+        async def cancellable(topic, *, budget):
+            cancel_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_seen.set()
+                raise
+
+        # generation을 바꿔 위 성공 cache와 다른 key를 만든다.
+        topic_dispatcher._advance_topic_payload_generation("usdt:krw")
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=cancellable,
+        ):
+            only = asyncio.create_task(build_snapshot_observed("usdt:krw", budget=_budget()))
+            await cancel_entered.wait()
+            only.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await only
+            await _wait_until(cancel_seen.is_set)
+            await _wait_until(lambda: not snapshot._snapshot_state().flights)
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            return_value={"type": "snapshot", "topic": "usdt:krw", "data": {}},
+        ) as retry:
+            await build_snapshot_observed("usdt:krw", budget=_budget())
+        retry.assert_awaited_once()
+
+    async def test_topic_generation_and_gate_are_distinct_keys(self):
+        calls = []
+
+        async def build(topic, *, budget):
+            calls.append((topic, config.FX_TOPIC_ENABLED))
+            return {"type": "snapshot", "topic": topic, "data": {"call": len(calls)}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=build,
+        ), patch.object(config, "FX_TOPIC_ENABLED", True):
+            first = await build_snapshot_observed("fx:usd-krw", budget=_budget())
+            await build_snapshot_observed("usdt:krw", budget=_budget())
+            self.assertEqual(len(calls), 2, "서로 다른 topic이 합쳐졌다")
+
+            with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True):
+                before = topic_dispatcher.topic_payload_generation("fx:usd-krw")
+                self.assertEqual(
+                    await topic_dispatcher.publish_topic("fx:usd-krw", first), 0
+                )
+                self.assertEqual(
+                    topic_dispatcher.topic_payload_generation("fx:usd-krw"),
+                    before + 1,
+                )
+            await build_snapshot_observed("fx:usd-krw", budget=_budget())
+            self.assertEqual(len(calls), 3, "새 generation이 이전 cache를 재사용했다")
+
+            with patch.object(config, "FX_TOPIC_ENABLED", False):
+                await build_snapshot_observed("fx:usd-krw", budget=_budget())
+            self.assertEqual(len(calls), 4, "availability gate 변화가 같은 key로 합쳐졌다")
+
+    async def test_none_is_not_success_cached(self):
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            return_value=None,
+        ) as build:
+            self.assertIsNone(await build_snapshot_observed("usdt:krw", budget=_budget()))
+            self.assertIsNone(await build_snapshot_observed("usdt:krw", budget=_budget()))
+        self.assertEqual(build.await_count, 2)
+        self.assertEqual(
+            slm.subscribe_load_metrics()["snapshot_singleflight"][
+                "successes_cached_total"
+            ],
+            0,
+        )
+
+    async def test_cancelling_flight_is_not_reused_by_immediate_retry(self):
+        entered = asyncio.Event()
+        first_cancelled = asyncio.Event()
+        calls = 0
+
+        async def build(topic, *, budget):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    first_cancelled.set()
+                    raise
+            return {"type": "snapshot", "topic": topic, "data": {"call": calls}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=build,
+        ):
+            first = asyncio.create_task(build_snapshot_observed("usdt:krw", budget=_budget()))
+            await entered.wait()
+            first.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await first
+            # shared task cleanup 완료를 기다리지 않고 즉시 재진입한다.
+            retried = await build_snapshot_observed("usdt:krw", budget=_budget())
+
+        self.assertEqual(retried["data"]["call"], 2)
+        self.assertTrue(first_cancelled.is_set())
+
+    async def test_success_cache_expires_at_the_configured_ceiling(self):
+        calls = 0
+
+        async def build(topic, *, budget):
+            nonlocal calls
+            calls += 1
+            return {"type": "snapshot", "topic": topic, "data": {"call": calls}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=build,
+        ), patch.object(config, "WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS", 0.01):
+            first = await build_snapshot_observed("usdt:krw", budget=_budget())
+            await asyncio.sleep(0.02)
+            second = await build_snapshot_observed("usdt:krw", budget=_budget())
+        self.assertEqual((first["data"]["call"], second["data"]["call"]), (1, 2))
+
+    async def test_unknown_metric_disposition_cannot_create_dynamic_keys(self):
+        before = slm.subscribe_load_metrics()["snapshot_singleflight"]
+        errors_before = slm.subscribe_load_metrics()["metrics_internal_errors_total"]
+        slm.record_snapshot_singleflight("typo")
+        after = slm.subscribe_load_metrics()["snapshot_singleflight"]
+        self.assertEqual(after, before)
+        self.assertEqual(
+            slm.subscribe_load_metrics()["metrics_internal_errors_total"],
+            errors_before + 1,
+        )
+
+
+class TestSnapshotCacheConfig(unittest.TestCase):
+    def test_cache_ttl_is_positive_and_no_more_than_live_freshness_contract(self):
+        self.assertGreater(config.WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS, 0)
+        self.assertLessEqual(config.WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS, 1.0)
+
+    def test_invalid_cache_ttl_fails_at_config_import(self):
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        for value in ("0", "1.0001", "nan", "inf"):
+            with self.subTest(value=value):
+                env = os.environ.copy()
+                env["WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS"] = value
+                proc = subprocess.run(
+                    [sys.executable, "-c", "import app.config"],
+                    cwd=repo,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("TTL", proc.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

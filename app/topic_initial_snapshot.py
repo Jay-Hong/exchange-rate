@@ -35,10 +35,13 @@ dormant)이나 **live subscriber 활성(신규 앱 출시) 전 해소 필요** =
 timestamp-merge 계약(구값으로 신값 덮지 않기, V2 client guide 항목) + 필요 시 server seq(deferred).
 """
 import asyncio
+import copy
 import logging
 import math
 import threading
 import time
+import weakref
+from dataclasses import dataclass, field
 
 from app import subscribe_load_metrics as subscribe_load
 
@@ -176,6 +179,23 @@ class SnapshotRequestBudget:
         if self._clock() >= deadline:
             self.stop("deadline")
             raise SnapshotWorkerStopped("deadline")
+
+    def fork_for_shared_build(self) -> "SnapshotRequestBudget":
+        """caller 수명과 분리된 shared build용 S3 budget을 만든다.
+
+        leader caller의 취소/짧은 잔여시간을 그대로 공유하면 다른 waiter까지 중단된다. shared
+        worker는 같은 snapshot 총예산을 새 build 시작점부터 한 번만 쓰고, 각 waiter는 자기 요청
+        budget으로 `shield(task)`를 기다린다.
+        """
+        ack_duration = self.ack_deadline_at_mono - self.started_at_mono
+        request_duration = self.request_deadline_at_mono - self.started_at_mono
+        return SnapshotRequestBudget(
+            started_at_mono=self._clock(),
+            ack_deadline_seconds=ack_duration,
+            snapshot_budget_seconds=self.snapshot_budget_seconds,
+            request_deadline_seconds=request_duration,
+            clock=self._clock,
+        )
 
 
 _snapshot_worker_state = threading.local()
@@ -433,10 +453,189 @@ def visible_snapshot_topics_sync(
     return tuple(t for t in topics if t != KRX_TOPIC)
 
 
+@dataclass(frozen=True)
+class SnapshotBuildKey:
+    """payload를 바꿀 수 있는 process-local 입력을 모두 포함한 LOAD-S5 key."""
+
+    topic: str
+    generation: int
+    supported: bool
+    enabled: bool
+
+
+@dataclass
+class _SnapshotFlight:
+    task: "asyncio.Task[Optional[Dict[str, Any]]]"
+    waiters: int = 0
+
+
+@dataclass(frozen=True)
+class _SnapshotSuccessCacheEntry:
+    # cache-owned dict는 caller에게 직접 노출하지 않는다. 모든 반환은 deepcopy다.
+    payload: Dict[str, Any]
+    expires_at_mono: float
+
+
+@dataclass
+class _SnapshotSingleflightState:
+    """asyncio 객체와 성공 cache를 event loop 경계 안에 가둔다."""
+
+    flights: Dict[SnapshotBuildKey, _SnapshotFlight] = field(default_factory=dict)
+    success_cache: Dict[SnapshotBuildKey, _SnapshotSuccessCacheEntry] = field(
+        default_factory=dict
+    )
+
+
+_snapshot_states: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _SnapshotSingleflightState]" = (
+    weakref.WeakKeyDictionary()
+)
+_snapshot_states_lock = threading.Lock()
+
+
+def _snapshot_state() -> _SnapshotSingleflightState:
+    loop = asyncio.get_running_loop()
+    with _snapshot_states_lock:
+        state = _snapshot_states.get(loop)
+        if state is None:
+            state = _SnapshotSingleflightState()
+            _snapshot_states[loop] = state
+        return state
+
+
+def _snapshot_build_key(topic: str) -> SnapshotBuildKey:
+    from app.topic_dispatcher import topic_payload_generation
+
+    return SnapshotBuildKey(
+        topic=topic,
+        generation=topic_payload_generation(topic),
+        supported=topic in set(supported_snapshot_topics()),
+        enabled=is_snapshot_topic_enabled(topic),
+    )
+
+
+def _prune_snapshot_success_cache(
+    state: _SnapshotSingleflightState, now_mono: float
+) -> None:
+    expired = [
+        key for key, entry in state.success_cache.items()
+        if entry.expires_at_mono <= now_mono
+    ]
+    for key in expired:
+        state.success_cache.pop(key, None)
+
+
+def _cached_snapshot(
+    state: _SnapshotSingleflightState, key: SnapshotBuildKey
+) -> Optional[Dict[str, Any]]:
+    now_mono = time.monotonic()
+    _prune_snapshot_success_cache(state, now_mono)
+    entry = state.success_cache.get(key)
+    if entry is None:
+        return None
+    return copy.deepcopy(entry.payload)
+
+
+def _consume_shared_task_exception(task: "asyncio.Task") -> None:
+    """마지막 waiter 취소와 task 실패가 경합해도 미회수 task 예외를 남기지 않는다."""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _run_shared_snapshot_build(
+    state: _SnapshotSingleflightState,
+    key: SnapshotBuildKey,
+    budget: SnapshotRequestBudget,
+) -> Optional[Dict[str, Any]]:
+    """registry entry의 유일한 정리 소유자. 실패/취소는 성공 cache에 넣지 않는다."""
+    task = asyncio.current_task()
+    try:
+        payload = await _build_snapshot_once_observed(key.topic, budget=budget)
+        if payload is not None and _snapshot_build_key(key.topic) == key:
+            state.success_cache[key] = _SnapshotSuccessCacheEntry(
+                payload=copy.deepcopy(payload),
+                expires_at_mono=(
+                    time.monotonic() + config.WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS
+                ),
+            )
+            subscribe_load.record_snapshot_success_cached()
+        return payload
+    finally:
+        current = state.flights.get(key)
+        if current is not None and current.task is task:
+            state.flights.pop(key, None)
+
+
 async def build_snapshot_observed(
     topic: str, *, budget: Optional[SnapshotRequestBudget] = None
 ) -> Optional[Dict[str, Any]]:
-    """WS subscribe 와 REST twin 이 **공유하는** snapshot build 관측 경로.
+    """WS/REST가 공유하는 LOAD-S5 single-flight + 짧은 성공 cache 진입점.
+
+    authorization은 이 함수 **전에** 끝나며 key에 사용자 정보가 없다. 공유 범위는 payload build뿐이다.
+    각 waiter는 자기 S3 budget으로 기다리고, shared task는 caller와 분리된 S3 budget을 쓴다.
+    """
+    request_budget = budget or SnapshotRequestBudget()
+    remaining = request_budget.remaining_snapshot_seconds()
+    if remaining <= 0:
+        request_budget.stop("deadline")
+        raise SnapshotDeadlineExceeded(topic)
+
+    state = _snapshot_state()
+    key = _snapshot_build_key(topic)
+    cached = _cached_snapshot(state, key)
+    if cached is not None:
+        subscribe_load.record_snapshot_singleflight("cache_hit")
+        return cached
+
+    flight = state.flights.get(key)
+    if flight is not None and (flight.task.done() or flight.task.cancelling()):
+        # 마지막 waiter가 cancel을 요청했지만 shared task의 finally가 아직 registry를 지우기 전인
+        # 짧은 창이다. 새 caller를 취소 중 task에 붙이지 않고 새 entry로 교체한다. 이전 task의
+        # finally는 task identity가 다르므로 새 entry를 지우지 못한다.
+        flight = None
+    if flight is None:
+        build_budget = request_budget.fork_for_shared_build()
+        build_budget.start_snapshot_phase()
+        task = asyncio.create_task(
+            _run_shared_snapshot_build(state, key, build_budget)
+        )
+        task.add_done_callback(_consume_shared_task_exception)
+        flight = _SnapshotFlight(task=task)
+        state.flights[key] = flight
+        disposition = "leader"
+    else:
+        disposition = "joined"
+    flight.waiters += 1
+    subscribe_load.record_snapshot_singleflight(disposition)
+
+    deadline_cm = asyncio.timeout(remaining)
+    try:
+        try:
+            async with deadline_cm:
+                payload = await asyncio.shield(flight.task)
+        except asyncio.TimeoutError as exc:
+            if not deadline_cm.expired():
+                raise
+            request_budget.stop("deadline")
+            raise SnapshotDeadlineExceeded(topic) from exc
+        return None if payload is None else copy.deepcopy(payload)
+    except asyncio.CancelledError:
+        request_budget.stop("caller_cancelled")
+        raise
+    finally:
+        flight.waiters -= 1
+        if flight.waiters == 0 and not flight.task.done():
+            # waiter는 취소 요청만 한다. registry 제거는 shared task의 finally 한 곳이 소유한다.
+            flight.task.cancel()
+
+
+async def _build_snapshot_once_observed(
+    topic: str, *, budget: Optional[SnapshotRequestBudget] = None
+) -> Optional[Dict[str, Any]]:
+    """실제 shared snapshot build 1회의 관측 경로.
 
     ⛔ 두 진입점이 각자 배선하면 축이 갈린다 — 같은 default executor 와 같은 I/O 를 쓰므로
        용량 산정(S6)에는 **합산**이 필요하다. 그래서 호출부가 아니라 여기서 한 번 감싼다.

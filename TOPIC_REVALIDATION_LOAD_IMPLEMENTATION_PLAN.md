@@ -42,6 +42,10 @@
   시간축에 결속했다. caller 취소·deadline 뒤 worker는 현재 bounded I/O를 끝낸 다음 checkpoint에서
   멈추고, 새 Redis/DB phase를 시작하지 않는다. post-ACK deadline/transient는 1013, fatal은 1011로
   terminal payload 없이 종결하며 REST twin의 deadline은 no-store 503으로 변환한다.
+- `LOAD-S5`: WS/REST가 공유하는 snapshot build를 topic generation 단위 single-flight로 합치고,
+  성공 결과만 최대 1초 cache한다. authorization은 공유 전에 끝나며 각 waiter는 독립된 payload
+  복사본과 요청 budget을 가진다. leader 취소는 남은 waiter의 shared build로 전파되지 않고,
+  마지막 waiter가 사라진 경우에만 shared build를 취소한다.
 - mutation runner 8개는 공유 worktree를 직접 변이하지 않고 격리 worktree에서 실행한다.
 
 `LOAD-S2-DB`는 statement 하나와 pool/connect phase를 유한하게 만들 뿐이다. 여러 statement의 합,
@@ -51,8 +55,9 @@
 `latest_rates_cache._get_sync_client()` 하나를 거쳐 Redis-first read한다는 호출 그래프를 확인했다.
 기존 read/connect 1초는 유한했지만 pool connection 수가 사실상 무제한이고 취소 후 반환 양성대조가
 없었다. `LOAD-S2-REDIS`가 이 두 누락을 닫았고, `LOAD-S3`가 여러 Redis/DB 호출의 합과 취소된
-worker의 다음 phase 진입을 제한했다. 다만 이 둘만으로 동시 폭주 흡수가 완성되지는 않는다.
-아래 `LOAD-S5/S6/S7`과 클라이언트 `R-CLI-24`, 부하 리허설·통합 활성화가 끝나기 전에는
+worker의 다음 phase 진입을 제한했다. `LOAD-S5`는 그 bounded build를 같은 key의 연결들이
+공유하게 해 동시 작업량을 연결 수가 아니라 활성 key 수에 가깝게 줄였다. 다만 bounded waiter와
+실패 cooldown은 아직 없다. 아래 `LOAD-S6/S7`과 클라이언트 `R-CLI-24`, 부하 리허설·통합 활성화가 끝나기 전에는
 `R-LOAD-3 완료` 또는 `자원 상한 완료`라고 쓰지 않는다.
 
 ### 운영 상태는 별도 재확인
@@ -67,7 +72,7 @@ worker의 다음 phase 진입을 제한했다. 다만 이 둘만으로 동시 �
 LOAD-S2-DB (PostgreSQL phase 상한, 완료)
   -> Redis I/O 상한 감사·누락 보강 (완료)
   -> LOAD-S3 (요청 전체 예산 + worker 협력 중단, 완료)
-  -> LOAD-S5 (topic single-flight/cache)
+  -> LOAD-S5 (topic single-flight/cache, 완료)
   -> LOAD-S6 (bounded wait + 1013 종결)
   -> LOAD-S7 (서버 실패 cooldown)
   -> LOAD-S4 (통합 활성화)
@@ -133,6 +138,22 @@ phase를 시작하지 않게 한다.
 - build 실패·취소 뒤 registry entry가 남지 않고 다음 호출이 재시도할 수 있다.
 - 서로 다른 topic/generation은 합쳐지지 않는다.
 - payload aliasing으로 한 caller의 수정이 다른 caller에 전파되지 않는다.
+
+### 구현 결과 (2026-08-19)
+
+- process-local key는 `(topic, generation, supported, enabled)`다. 중앙
+  `topic_dispatcher.publish_topic*()`가 새 live payload를 받을 때 topic generation을 올리고,
+  build 완료 시 generation이나 availability gate가 바뀌었으면 그 결과를 cache하지 않는다.
+- single-flight registry와 성공 cache는 event loop별 상태로 분리한다. shared task는 caller와
+  독립된 `SnapshotRequestBudget`을 쓰며, waiter는 자기 남은 예산까지만 `asyncio.shield()`로 기다린다.
+  실패·취소 registry 제거는 shared task의 `finally` 한 곳이 소유한다.
+- 성공 payload만 cache-owned deep copy로 최대 1초 보관하고, 모든 waiter/cache-hit 반환에서 다시
+  deep copy한다. `None`·예외·취소는 cache하지 않는다. 실패 cooldown은 여전히 `LOAD-S7` 소관이다.
+- 고정 cardinality 계측 `snapshot_singleflight`가 요청을 leader/join/cache-hit으로 분리하고 실제
+  cache 저장 수를 별도로 센다. 계약 버전은 `subscribe-load/7`이다.
+- 20 waiter→builder 1회, leader 단독 취소, 마지막 waiter 취소, 실패 후 재시도, topic/generation/gate
+  분리, payload aliasing, TTL·설정 fail-closed를 실행형 테스트로 잠갔다. `shield`·generation·deepcopy·
+  registry 정리를 각각 제거한 변이는 모두 해당 테스트를 red로 만든다.
 
 ## LOAD-S6 — bounded wait와 예산 기반 1013
 

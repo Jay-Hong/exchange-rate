@@ -37,8 +37,10 @@ caller 쪽만 재면 양방향으로 어긋난다 — 포기 뒤에도 도는 �
 - (S3) `built − Σ(sends_by_outcome)` 는 **send outcome 이 남지 않은 post-build 종료
   잔차**다(취소뿐 아니라 BaseException 류·기록 실패도 포함, 계측 내부 오류 조합에선 음수도
   가능) — **취소 건수로 단정할 수 없다**. 취소 귀속은 통제 시나리오에서만 한다.
-- (S3) `topics_deduped_total == snapshot_build.started_total` 등식은 **계측 내부 오류가
-  없는 정상 경로에서만** 성립한다(observe 진입 부기 실패 시 전자만 오른다).
+- (LOAD-S5) `snapshot_build.started_total`은 **실제 shared build 수**다. 요청 수는
+  `snapshot_singleflight.requests_total`, 합쳐진 수는 `joined_total`, 완료 cache 재사용은
+  `cache_hits_total`이 소유한다. 따라서 `topics_deduped_total == snapshot_build.started_total`
+  등식은 더 이상 성립하지 않는다.
 - (S4) deadline stage 는 **만료가 관측된 단계**이지 예산을 소비한 단계가 아니다 — 공유 절대
   deadline 이라 identity 가 예산 대부분을 쓰고 성공하면 만료는 authorization 에 계상된다
   (suspension 없는 동기 소진은 관측 자체가 불가). 실무상 identity 소비는 대부분 await I/O 라
@@ -87,7 +89,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/6"
+CONTRACT_VERSION = "subscribe-load/7"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -210,6 +212,13 @@ def _blank() -> dict[str, Any]:
         "calls_by_channel": {name: 0 for name in CHANNEL_KEYS},
         "topics_deduped_total": 0,
         "sends_by_outcome": {name: 0 for name in SEND_OUTCOME_KEYS},
+    }
+    axes["snapshot_singleflight"] = {
+        "requests_total": 0,
+        "leaders_total": 0,
+        "joined_total": 0,
+        "cache_hits_total": 0,
+        "successes_cached_total": 0,
     }
     axes["terminal"] = {
         "auth_wire_deadline_expired_by_stage": {name: 0 for name in DEADLINE_STAGE_KEYS},
@@ -645,6 +654,42 @@ def record_snapshot_send(outcome: str) -> None:
         _warn("subscribe-load: allowlist 밖 send outcome — unclassified 로 접는다", axis="snapshot_send")
 
 
+def record_snapshot_singleflight(disposition: str) -> None:
+    """LOAD-S5 요청 1건을 leader/join/cache-hit 중 하나로 고정 cardinality 기록한다."""
+    field_by_disposition = {
+        "leader": "leaders_total",
+        "joined": "joined_total",
+        "cache_hit": "cache_hits_total",
+    }
+    try:
+        field = field_by_disposition[disposition]
+        with _lock:
+            block = _metrics["snapshot_singleflight"]
+            block["requests_total"] += 1
+            block[field] += 1
+    except Exception:  # noqa: BLE001 — 관측이 snapshot 결과를 결정하지 않는다
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot single-flight 기록 실패",
+            axis="snapshot_singleflight",
+            exc_info=sys.exc_info(),
+        )
+
+
+def record_snapshot_success_cached() -> None:
+    """generation이 여전히 같아 성공 payload를 cache에 넣은 실제 build 1건."""
+    try:
+        with _lock:
+            _metrics["snapshot_singleflight"]["successes_cached_total"] += 1
+    except Exception:  # noqa: BLE001 — 관측이 snapshot 결과를 결정하지 않는다
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot success cache 기록 실패",
+            axis="snapshot_singleflight",
+            exc_info=sys.exc_info(),
+        )
+
+
 def record_auth_wire_deadline_expired(stage: str) -> None:
     """wire deadline 이 **실제로 만료**된 분기 1회 — 사용자에게 보인 과부하 결과.
 
@@ -735,6 +780,7 @@ def subscribe_load_metrics() -> dict[str, Any]:
             "topics_deduped_total": send["topics_deduped_total"],
             "sends_by_outcome": dict(send["sends_by_outcome"]),
         }
+        out["snapshot_singleflight"] = dict(_metrics["snapshot_singleflight"])
         terminal = _metrics["terminal"]
         out["terminal"] = {
             "auth_wire_deadline_expired_by_stage": dict(terminal["auth_wire_deadline_expired_by_stage"]),

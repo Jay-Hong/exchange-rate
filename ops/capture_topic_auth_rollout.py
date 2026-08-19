@@ -280,12 +280,16 @@ def _arrival_schema_errors(rollout: Mapping[str, object]) -> list[str]:
     return errors
 
 
-SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/6"
+SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/7"
 # ⛔ worker 축에만 있어야 한다 — caller-only 축에 생기면 제출 시각이 없는 자리에서 0 이 쌓여
 #    "대기 없음"으로 읽힌다. 축 목록은 **여기 literal** 이다(원본 파생을 쓰면 함께 줄어든다).
 SUBSCRIBE_LOAD_WORKER_AXES = ("krx_entitlement", "snapshot_build")
 SUBSCRIBE_LOAD_QUEUE_WAIT_FIELDS = (
     "queue_wait_observed_total", "queue_wait_ms_sum", "queue_wait_ms_max",
+)
+SUBSCRIBE_LOAD_SINGLEFLIGHT_FIELDS = (
+    "requests_total", "leaders_total", "joined_total", "cache_hits_total",
+    "successes_cached_total",
 )
 
 
@@ -316,6 +320,34 @@ def _subscribe_load_schema_errors(raw_body: bytes) -> list[str]:
         missing = [f for f in SUBSCRIBE_LOAD_QUEUE_WAIT_FIELDS if f not in axis_block]
         if missing:
             errors.append(f"subscribe_load.{axis} lacks {', '.join(missing)}")
+    singleflight = block.get("snapshot_singleflight")
+    if not isinstance(singleflight, dict):
+        errors.append("subscribe_load.snapshot_singleflight must be an object")
+    else:
+        counts = {
+            field: _safe_count(singleflight, field)
+            for field in SUBSCRIBE_LOAD_SINGLEFLIGHT_FIELDS
+        }
+        for field, value in counts.items():
+            if value is None:
+                errors.append(
+                    f"subscribe_load.snapshot_singleflight.{field} must be a non-negative integer"
+                )
+        if all(value is not None for value in counts.values()):
+            classified = (
+                counts["leaders_total"]
+                + counts["joined_total"]
+                + counts["cache_hits_total"]
+            )
+            if counts["requests_total"] != classified:
+                errors.append(
+                    "subscribe_load.snapshot_singleflight requests must equal "
+                    "leaders + joined + cache_hits"
+                )
+            if counts["successes_cached_total"] > counts["leaders_total"]:
+                errors.append(
+                    "subscribe_load.snapshot_singleflight cached successes must not exceed leaders"
+                )
     return errors
 
 

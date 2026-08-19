@@ -232,6 +232,23 @@ class TopicRegistry:
 # ⛔ 재바인딩·재초기화하면 살아 있는 구독과 lease 가 통째로 소실된다.
 registry = TopicRegistry()
 
+# LOAD-S5 snapshot cache generation. live payload가 중앙 dispatcher에 들어오는 순간 topic별로
+# 증가한다. snapshot cache key가 이 값을 포함하므로 새 live payload와 이전 cache가 합쳐지지
+# 않는다. process-local registry/cache와 같은 수명이며 정수 overflow가 없는 Python int다.
+_topic_payload_generations: Dict[str, int] = {}
+
+
+def topic_payload_generation(topic: str) -> int:
+    """현재 topic payload generation. 읽기는 side effect가 없다."""
+    return _topic_payload_generations.get(topic, 0)
+
+
+def _advance_topic_payload_generation(topic: str) -> int:
+    """새 live payload가 dispatcher에 들어왔음을 기록하고 새 generation을 반환한다."""
+    generation = _topic_payload_generations.get(topic, 0) + 1
+    _topic_payload_generations[topic] = generation
+    return generation
+
 
 def _lease_wire_map(websocket: "WebSocket", topics: Iterable[str]) -> Dict[str, tuple]:
     """ack 에 실을 `{topic: (lease_id, 남은 초)}`. lease 없는(무토큰) topic 은 빠진다."""
@@ -281,6 +298,10 @@ async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
     """
     if not config.TOPIC_DISPATCHER_ENABLED:
         return 0
+
+    # 구독자가 build 뒤 사라졌더라도 payload가 바뀐 사실은 cache invalidation에 필요하다.
+    # 그래서 subscriber empty 검사보다 먼저 올린다. FF-off는 snapshot도 dormant라 제외한다.
+    _advance_topic_payload_generation(topic)
 
     subscribers = leased_subscribers(topic)
     if not subscribers:
@@ -359,6 +380,8 @@ async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSe
     """
     if not config.TOPIC_DISPATCHER_ENABLED:
         return TopicSendCounts(attempted=0, sent=0, enabled=False)
+
+    _advance_topic_payload_generation(topic)
 
     # ⛔ **`registry.get_subscribers` 를 직접 부르지 않는다.** 한때 이 함수만 그렇게 해서
     #    lease 게이트를 통째로 우회했다. 발행 경로는 전부 `leased_subscribers()` 를 지난다.

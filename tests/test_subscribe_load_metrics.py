@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/6")
+        self.assertEqual(snap["contract_version"], "subscribe-load/7")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -122,9 +122,11 @@ class TestFieldContract(SubscribeLoadTestCase):
             )
         self.assertEqual(main_src.count("asyncio.to_thread(_build_snapshot_sync"), 0,
                          "REST twin 이 builder 를 직접 to_thread 하면 축이 갈린다")
-        # 래퍼는 to_thread 직전에 제출 시각을 찍어야 한다 — 그 순서가 queue_wait 의 정의다
+        # LOAD-S5 public 래퍼는 waiter/single-flight를 소유하고, 실제 shared build 래퍼가
+        # to_thread 직전 제출 시각을 찍는다 — 그 순서가 queue_wait 의 정의다.
         fn = next(n for n in ast.walk(ast.parse(snap_src))
-                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "build_snapshot_observed")
+                  if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == "_build_snapshot_once_observed")
         body = ast.unparse(fn)
         self.assertLess(body.index("mark_submitted"), body.index("asyncio.to_thread"),
                         "제출 시각은 to_thread **앞**에서 찍어야 한다")
@@ -219,9 +221,9 @@ class TestFieldContract(SubscribeLoadTestCase):
         """⛔ '있다/없다' 만 보면 임의 필드 추가(예: 파생 중복 `snapshot_calls_total`)를 못 잡는다."""
         snap = self._snapshot()
         self.assertEqual(sorted(snap), sorted(
-            ["contract_version", "scope", "caveat", "metrics_internal_errors_total",
+             ["contract_version", "scope", "caveat", "metrics_internal_errors_total",
              slm.PREMIUM_RC, slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD, "snapshot_send",
-             "terminal"]))
+             "snapshot_singleflight", "terminal"]))
         self.assertEqual(sorted(snap["terminal"]), sorted(
             ["auth_wire_deadline_expired_by_stage", "subscribe_auth_failed_by_error"]))
         caller_fields = ["started_total", "by_outcome", "duration_ms_sum", "duration_ms_max",
@@ -235,6 +237,10 @@ class TestFieldContract(SubscribeLoadTestCase):
             self.assertEqual(sorted(snap[axis]), sorted(caller_fields + worker_fields))
         self.assertEqual(sorted(snap["snapshot_send"]),
                          sorted(["calls_by_channel", "topics_deduped_total", "sends_by_outcome"]))
+        self.assertEqual(sorted(snap["snapshot_singleflight"]), sorted([
+            "requests_total", "leaders_total", "joined_total", "cache_hits_total",
+            "successes_cached_total",
+        ]))
 
     def test_unknown_axis_is_refused(self):
         with self.assertRaises(slm.SubscribeLoadContractError):

@@ -27,11 +27,18 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
                 # ⛔ 캡처기가 subscribe_load 계약도 검증한다 — 없으면 그 창의 분석이
                 #    필드 누락을 모른 채 계산된다.
                 "subscribe_load": {
-                    "contract_version": "subscribe-load/6",
+                    "contract_version": "subscribe-load/7",
                     "krx_entitlement": {"queue_wait_observed_total": 0,
                                         "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0},
                     "snapshot_build": {"queue_wait_observed_total": 0,
                                        "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0},
+                    "snapshot_singleflight": {
+                        "requests_total": 0,
+                        "leaders_total": 0,
+                        "joined_total": 0,
+                        "cache_hits_total": 0,
+                        "successes_cached_total": 0,
+                    },
                 },
                 "topic_auth_rollout": {
                     "started_at_epoch_seconds": float(started),
@@ -564,6 +571,27 @@ class TestSubscribeLoadValidationStaysWired(unittest.TestCase):
         self.assertIn("metric_schema_errors", src,
                       "결과가 metric_schema_errors 로 합류해야 창이 unverifiable 로 표시된다")
 
+    def test_singleflight_counts_are_complete_and_arithmetically_bound(self):
+        body = json.loads(response())
+        block = body["metrics"]["subscribe_load"]["snapshot_singleflight"]
+        block.update({
+            "requests_total": 7,
+            "leaders_total": 2,
+            "joined_total": 3,
+            "cache_hits_total": 2,
+            "successes_cached_total": 2,
+        })
+        raw = json.dumps(body).encode()
+        self.assertEqual(capture._subscribe_load_schema_errors(raw), [])
+
+        block["requests_total"] = 8
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("requests must equal" in error for error in errors))
+
+        block["requests_total"] = 7
+        block.pop("joined_total")
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("joined_total" in error for error in errors))
+
 if __name__ == "__main__":
     unittest.main()
-

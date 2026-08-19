@@ -647,10 +647,20 @@ WS_TOPIC_REQUEST_DEADLINE_SECONDS = float(
     os.getenv("WS_TOPIC_REQUEST_DEADLINE_SECONDS", "25")
 )
 
+# ── LOAD-S5 — topic snapshot 성공 cache freshness ceiling ───────────────────
+# 이 값은 용량 튜닝값이 아니라 v1 live 최신성 계약(서버 수신 뒤 1초 이내 반영)의 **상한**이다.
+# 실제 invalidation은 `topic_dispatcher.publish_topic*`가 올리는 topic generation이 맡고, TTL은
+# 구독자가 없어서 publisher build 자체가 생략된 구간과 누락된 invalidation을 1초 안에 자른다.
+# 0이면 동시 burst의 완료 직후 waiter를 흡수할 cache가 사라지므로 허용하지 않는다.
+WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS = float(
+    os.getenv("WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS", "1.0")
+)
+
 for _name, _value in (
     ("WS_TOPIC_ACK_DEADLINE_SECONDS", WS_TOPIC_ACK_DEADLINE_SECONDS),
     ("WS_TOPIC_SNAPSHOT_BUDGET_SECONDS", WS_TOPIC_SNAPSHOT_BUDGET_SECONDS),
     ("WS_TOPIC_REQUEST_DEADLINE_SECONDS", WS_TOPIC_REQUEST_DEADLINE_SECONDS),
+    ("WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS", WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS),
 ):
     if not math.isfinite(_value) or _value <= 0:
         raise ValueError(f"{_name} must be finite and > 0 (got {_value!r})")
@@ -660,6 +670,8 @@ if WS_TOPIC_ACK_DEADLINE_SECONDS >= WS_TOPIC_REQUEST_DEADLINE_SECONDS:
     raise ValueError("WS topic ACK deadline must be less than the request deadline")
 if WS_TOPIC_SNAPSHOT_BUDGET_SECONDS > WS_TOPIC_REQUEST_DEADLINE_SECONDS:
     raise ValueError("WS topic snapshot budget must not exceed the request deadline")
+if WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS > 1.0:
+    raise ValueError("WS topic snapshot cache TTL must not exceed the 1s live freshness contract")
 
 # §8-C `temporarily_unavailable` 동반값 (일시 장애).
 WS_AUTH_RETRY_AFTER_SECONDS = 5
