@@ -358,7 +358,8 @@ class TestProductionGuardUsesSessionUrl(unittest.TestCase):
                                    ensure_ascii=False, sort_keys=True),
         }), encoding="utf-8")
         proc = self._run_script("--revert-from", str(pre),
-                                "--preimage-out", str(self.tmp_out))
+                                "--preimage-out", str(self.tmp_out),
+                                database_url="sqlite:///:memory:")
         pre.unlink(missing_ok=True)
         self.assertNotIn("ModuleNotFoundError", proc.stderr)
         # 정방향 교정의 사전조건 메시지가 나오면 안 된다 (revert 로 갔어야 한다)
