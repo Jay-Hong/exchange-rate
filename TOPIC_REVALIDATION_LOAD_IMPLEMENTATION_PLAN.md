@@ -35,13 +35,19 @@
 
 - `LOAD-S1`: WS/REST Firebase 인증이 별도 executor lane과 named app을 사용한다.
 - `LOAD-S2-DB`: PostgreSQL pool 대기, 물리 연결, statement 실행에 각각 유한 상한을 전달한다.
+- `LOAD-S2-REDIS`: snapshot sync Redis는 read/connect 1초, pool 대기 1초, 최대 50 connection으로
+  제한한다. caller 취소 직후에는 `to_thread` worker가 계속 돈다는 반대 상태와, read timeout 뒤
+  connection이 pool로 돌아오는 상태를 실제 stalled RESP 서버로 함께 검증한다.
 - mutation runner 8개는 공유 worktree를 직접 변이하지 않고 격리 worktree에서 실행한다.
 
 `LOAD-S2-DB`는 statement 하나와 pool/connect phase를 유한하게 만들 뿐이다. 여러 statement의 합,
 여러 topic의 합, caller 취소 뒤 계속 도는 `to_thread` worker의 전체 수명은 제한하지 않는다.
-또한 이 완료 표시는 **PostgreSQL만** 가리킨다. snapshot 경로가 쓰는 Redis client의 connect/read
-상한과 취소 시 socket 반환은 별도 전수 감사가 필요하다. 유한함을 증명하지 못한 Redis 경로는
-`LOAD-S3` 착수 전에 `LOAD-S2` 후속으로 닫는다.
+`LOAD-S2-DB` 완료 표시는 **PostgreSQL만** 가리켰다. 후속 감사에서 WS와 REST가 공유하는
+`build_snapshot_observed()`가 sync builder를 default executor에 보내고, FX/USDT/KRX payload가 모두
+`latest_rates_cache._get_sync_client()` 하나를 거쳐 Redis-first read한다는 호출 그래프를 확인했다.
+기존 read/connect 1초는 유한했지만 pool connection 수가 사실상 무제한이고 취소 후 반환 양성대조가
+없었다. `LOAD-S2-REDIS`가 이 두 누락을 닫았다. 다만 여러 Redis/DB 호출의 합과 취소된 worker의
+다음 phase 진입은 아직 `LOAD-S3` 소관이다.
 따라서 아래 단계가 완료되기 전에는 `R-LOAD-3 완료` 또는 `자원 상한 완료`라고 쓰지 않는다.
 
 ### 운영 상태는 별도 재확인

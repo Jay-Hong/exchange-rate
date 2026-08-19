@@ -52,42 +52,55 @@ class TestGetSyncClient(unittest.TestCase):
         latest_rates_cache._last_written_usdt_state.clear()
 
     def test_lazy_init_creates_client(self):
-        """첫 호출 시 redis_sync.from_url 호출 + client 캐싱."""
+        """첫 호출 시 bounded pool + client 생성, 이후 client 캐싱."""
+        fake_pool = MagicMock(name="fake_redis_pool")
         fake_client = MagicMock(name="fake_redis_client")
-        with patch.object(latest_rates_cache.redis_sync, "from_url",
-                          return_value=fake_client) as mock_from_url:
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
+                          return_value=fake_pool) as mock_from_url, \
+             patch.object(latest_rates_cache.redis_sync, "Redis",
+                          return_value=fake_client) as mock_redis:
             result = _get_sync_client()
         self.assertIs(result, fake_client)
         mock_from_url.assert_called_once()
-        # 두 번째 호출은 cache 사용 — from_url 추가 호출 X
-        with patch.object(latest_rates_cache.redis_sync, "from_url") as mock_again:
+        mock_redis.assert_called_once_with(connection_pool=fake_pool)
+        # 두 번째 호출은 cache 사용 — pool/client 추가 생성 X
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool,
+                          "from_url") as mock_pool_again, \
+             patch.object(latest_rates_cache.redis_sync, "Redis") as mock_redis_again:
             result2 = _get_sync_client()
         self.assertIs(result2, fake_client)
-        mock_again.assert_not_called()
+        mock_pool_again.assert_not_called()
+        mock_redis_again.assert_not_called()
 
     def test_reset_recreates_client(self):
         """_sync_client = None 후 호출 → 재생성 (Codex 권고: env 변경 테스트 친화)."""
+        fake_pool_1 = MagicMock(name="pool_1")
+        fake_pool_2 = MagicMock(name="pool_2")
         fake_client_1 = MagicMock(name="client_1")
         fake_client_2 = MagicMock(name="client_2")
-        with patch.object(latest_rates_cache.redis_sync, "from_url",
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
+                          return_value=fake_pool_1), \
+             patch.object(latest_rates_cache.redis_sync, "Redis",
                           return_value=fake_client_1):
             first = _get_sync_client()
         self.assertIs(first, fake_client_1)
         # reset
         latest_rates_cache._sync_client = None
         latest_rates_cache._last_written_usdt_state.clear()
-        with patch.object(latest_rates_cache.redis_sync, "from_url",
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
+                          return_value=fake_pool_2), \
+             patch.object(latest_rates_cache.redis_sync, "Redis",
                           return_value=fake_client_2):
             second = _get_sync_client()
         self.assertIs(second, fake_client_2)
         self.assertIsNot(second, fake_client_1)
 
     def test_init_failure_returns_none_and_logs(self):
-        """from_url 예외 시 None 반환 + warning 로그 (best-effort).
+        """pool 생성 예외 시 None 반환 + warning 로그 (best-effort).
 
         logger.warning patch — traceback 회귀 stderr 노출 차단 + contract 검증.
         """
-        with patch.object(latest_rates_cache.redis_sync, "from_url",
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
                           side_effect=RuntimeError("connect fail")), \
              patch.object(latest_rates_cache.logger, "warning") as mock_warn:
             result = _get_sync_client()
@@ -97,11 +110,14 @@ class TestGetSyncClient(unittest.TestCase):
     def test_reads_config_at_call_time(self):
         """env는 호출 시점에 config에서 read (테스트 친화)."""
         from app import config
+        fake_pool = MagicMock()
         fake_client = MagicMock()
         with patch.object(config, "REDIS_URL", "redis://test-host:1234"), \
              patch.object(config, "REDIS_PASSWORD", "test-pw"), \
-             patch.object(latest_rates_cache.redis_sync, "from_url",
-                          return_value=fake_client) as mock_from_url:
+             patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
+                          return_value=fake_pool) as mock_from_url, \
+             patch.object(latest_rates_cache.redis_sync, "Redis",
+                          return_value=fake_client):
             _get_sync_client()
         call_args = mock_from_url.call_args
         self.assertEqual(call_args.args[0], "redis://test-host:1234")
@@ -109,6 +125,9 @@ class TestGetSyncClient(unittest.TestCase):
         # socket_timeout 짧게 설정 검증
         self.assertEqual(call_args.kwargs["socket_timeout"], 1.0)
         self.assertEqual(call_args.kwargs["socket_connect_timeout"], 1.0)
+        self.assertEqual(call_args.kwargs["max_connections"], 50)
+        self.assertEqual(call_args.kwargs["timeout"], 1.0)
+        self.assertFalse(call_args.kwargs["retry_on_timeout"])
 
 
 # ---------------------------------------------------------------------------
@@ -750,7 +769,7 @@ class TestBankInvestingSetTelemetryWiring(unittest.TestCase):
         self.assertEqual((a["attempt"], a["success"], a["failure"]), (1, 1, 0))
 
     def test_bank_client_unavailable_records_failure(self):
-        with patch.object(latest_rates_cache.redis_sync, "from_url",
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
                           side_effect=RuntimeError("init fail")), \
              patch.object(latest_rates_cache.logger, "warning"):
             ok = latest_rates_cache.set_latest_bank_rate_from_sync_job(
@@ -806,7 +825,7 @@ class TestBankInvestingSetTelemetryWiring(unittest.TestCase):
         self.assertEqual((a["attempt"], a["success"], a["failure"]), (1, 1, 0))
 
     def test_investing_client_unavailable_records_failure(self):
-        with patch.object(latest_rates_cache.redis_sync, "from_url",
+        with patch.object(latest_rates_cache.redis_sync.BlockingConnectionPool, "from_url",
                           side_effect=RuntimeError("init fail")), \
              patch.object(latest_rates_cache.logger, "warning"):
             ok = latest_rates_cache.set_latest_investing_rate_from_sync_job(

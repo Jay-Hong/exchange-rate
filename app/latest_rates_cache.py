@@ -328,6 +328,17 @@ async def _set_latest(key: str, value: str) -> bool:
 
 _sync_client: Optional[redis_sync.Redis] = None  # lazy module-level
 
+# Snapshot builder와 sync crawler가 공유하는 Redis pool 상한.
+#
+# - Python default executor는 최대 32 worker이고 Redis 명령은 worker당 한 번에 하나씩 실행한다.
+# - crawler thread 여유를 포함해 50 connection으로 제한하되, 포화 시 즉시 거절하지 않고 1초
+#   기다린다. 이 상한은 LOAD-S3의 요청 전체 deadline을 대신하지 않는다.
+# - socket read/connect 1초는 기존 값 그대로다. caller가 asyncio.to_thread를 취소해도 실행 중인
+#   sync 명령은 이 상한 안에 끝나고 redis-py의 finally에서 pool로 반환된다.
+SYNC_REDIS_MAX_CONNECTIONS = 50
+SYNC_REDIS_POOL_WAIT_TIMEOUT_SECONDS = 1.0
+SYNC_REDIS_SOCKET_TIMEOUT_SECONDS = 1.0
+
 # 5b-bis 옵션 A (§12.8.3 결정 #1) — USDT 전용 in-memory state per (source, asset).
 # 매 tick Redis GET 회피 → Redis I/O ↓↓ + saturation 완화 (Codex Finding 1 해결).
 # Process restart 후 첫 tick(cold-start)만 Redis GET. SET 성공 후에만 갱신
@@ -346,20 +357,25 @@ def _get_sync_client() -> Optional[redis_sync.Redis]:
 
     Note:
         redis-py sync `Redis`는 internal connection pool 기반 thread-safe.
-        socket_timeout/socket_connect_timeout 1.0s — crawler hot path가 Redis
-        지연으로 막히지 않게 (worst case 5거래소 × 1초 = 5초).
+        `BlockingConnectionPool(max_connections=50, timeout=1.0)` — 짧은 경합은 기다리되
+        소켓이 무제한 늘거나 pool 대기가 무한해지지 않는다. socket read/connect도 1.0s라
+        crawler hot path가 Redis 지연으로 막히지 않는다(worst case 5거래소 × 1초 = 5초).
         Async circuit_breaker는 건드리지 않음 (broadcast/mirror Redis path 격리).
     """
     global _sync_client
     if _sync_client is None:
         try:
-            _sync_client = redis_sync.from_url(
+            pool = redis_sync.BlockingConnectionPool.from_url(
                 config.REDIS_URL,
                 password=config.REDIS_PASSWORD or None,
                 decode_responses=False,
-                socket_timeout=1.0,
-                socket_connect_timeout=1.0,
+                max_connections=SYNC_REDIS_MAX_CONNECTIONS,
+                timeout=SYNC_REDIS_POOL_WAIT_TIMEOUT_SECONDS,
+                socket_timeout=SYNC_REDIS_SOCKET_TIMEOUT_SECONDS,
+                socket_connect_timeout=SYNC_REDIS_SOCKET_TIMEOUT_SECONDS,
+                retry_on_timeout=False,
             )
+            _sync_client = redis_sync.Redis(connection_pool=pool)
         except Exception:
             logger.warning(
                 "Redis sync client init 실패 (best-effort, read path DB fallback)",
