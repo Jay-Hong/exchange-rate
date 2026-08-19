@@ -273,6 +273,40 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         tail = self.script[follower:]
         self.assertNotIn('kill "$FOLLOWER"', tail)
         self.assertGreaterEqual(tail.count("stop_follower"), 6)
+        self.assertIn('2>&1 9>&- &', self.script,
+                      "background follower가 배포 flock fd를 상속하면 parent 사망 뒤 lock이 남는다")
+
+    def test_deploy_lock_is_acquired_before_any_operational_step_and_fails_closed(self):
+        acquire = self.script.index('acquire_deploy_lock > "$D/00-deploy-lock.txt"')
+        handoff = self.script.index("systemctl start fxi-topic-auth-capture.service")
+        self.assertLess(acquire, handoff)
+        self.assertIn('DEPLOY_LOCK="$HOME/.fxi-krx-deploy.lock"', self.script)
+        self.assertIn("flock -n 9", self.script)
+        self.assertIn("lock_acquired=true", self.script)
+
+        start = self.script.index("acquire_deploy_lock()")
+        end = self.script.index("\nacquire_deploy_lock >", start)
+        helper = self.script[start:end]
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            fake_flock = root / "flock"
+            fake_flock.write_text("#!/usr/bin/env bash\nexit 1\n", encoding="utf-8")
+            fake_flock.chmod(0o755)
+            env = dict(os.environ, HOME=td, PATH=f"{td}:{os.environ['PATH']}")
+            result = subprocess.run(
+                [
+                    "bash", "-c",
+                    'DEPLOY_SHA=$(printf "a%.0s" {1..40}); D="$1"; '
+                    + helper + "\nacquire_deploy_lock",
+                    "--", td,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("다른 배포", result.stdout)
 
     def test_follower_is_closed_and_bound_to_collect(self):
         collect = self.script.index("scripts/krx_deploy_verifier.py collect")
@@ -393,6 +427,59 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         self.assertIn('docker logs --timestamps --since "$T0"', self.normalized)
         self.assertNotIn('--since "$TS"', self.script)
 
+    def test_disk_gate_enforces_the_80_percent_boundary(self):
+        start = self.script.index("verify_root_disk_capacity()")
+        end = self.script.index("\nverify_cutover_window()", start)
+        helper = self.script[start:end]
+
+        def run(use: str) -> subprocess.CompletedProcess[str]:
+            fake_df = (
+                "df() { printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted on' "
+                f"'/dev/root 100 50 50 {use} /'; }}; "
+            )
+            return subprocess.run(
+                ["bash", "-c", fake_df + helper + "\nverify_root_disk_capacity"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(run("79%").returncode, 0)
+        self.assertNotEqual(run("80%").returncode, 0)
+        self.assertNotEqual(run("unknown").returncode, 0)
+        self.assertIn('run 00-disk.txt "디스크" -- verify_root_disk_capacity', self.script)
+
+    def test_cutover_window_enforces_boundaries_and_rejects_active_oneoffs(self):
+        start = self.script.index("verify_cutover_window()")
+        end = self.script.index("\n# 실패하면 그 자리에서", start)
+        helper = self.script[start:end]
+
+        def run(minute: str, oneoffs: str = "") -> subprocess.CompletedProcess[str]:
+            stubs = (
+                f"FAKE_MINUTE={minute!r}; FAKE_ONEOFFS={oneoffs!r}; "
+                "date() { printf '%s\\n' \"$FAKE_MINUTE\"; }; "
+                "timeout() { return 0; }; "
+                "docker() { printf '%s' \"$FAKE_ONEOFFS\"; }; "
+            )
+            return subprocess.run(
+                ["bash", "-c", stubs + helper + "\nverify_cutover_window"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        for minute in ("12", "44"):
+            with self.subTest(minute=minute):
+                self.assertEqual(run(minute).returncode, 0)
+        for minute in ("11", "45"):
+            with self.subTest(minute=minute):
+                self.assertNotEqual(run(minute).returncode, 0)
+        self.assertNotEqual(run("20", "abc oneoff").returncode, 0)
+        window = self.script.index('run 08-cutover-window.txt')
+        cutover = self.script.index("cutover_latest || exit 1")
+        self.assertLess(window, cutover)
+
     def test_recreate_cannot_build_or_touch_dependencies(self):
         self.assertIn(
             "docker compose up -d --pull never --no-build --no-deps "
@@ -402,23 +489,119 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         build = self.script.index(
             'docker compose -f docker-compose.yml -f "$D/compose-candidate.yml" build fastapi')
         cutover = self.script.index("cutover_latest || exit 1")
-        recreate = self.script.index("if ! run 09-recreate.txt")
+        recreate = self.script.index("if ! run 10-recreate.txt")
         self.assertLess(build, cutover)
         self.assertLess(cutover, recreate)
         self.assertIn('image: "$CANDIDATE_TAG"', self.script)
-        self.assertIn('[ "$LATEST_AFTER_BUILD" != "$OLD_IMAGE" ]', self.script)
+        self.assertIn('run 07-build.txt "candidate build / latest 무결성" -- build_candidate',
+                      self.script)
+        self.assertIn('[ "$latest_after" != "$OLD_IMAGE" ]', self.script)
+        self.assertNotIn(
+            'docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest || true', self.script)
         self.assertIn("CUTOVER_PENDING=1", self.script)
         self.assertIn('restore_old_image > "$D/auto-rollback-on-exit.txt"', self.script)
+        self.assertIn(
+            "timeout -k 15s 180s docker compose up -d --pull never --no-build --no-deps ",
+            self.normalized,
+        )
+        self.assertIn('timeout -k 15s 300s bash ops/verify-rest-db-deploy.sh "$D"',
+                      self.script)
+
+    def test_build_failure_always_checks_and_restores_shared_latest(self):
+        start = self.script.index("restore_shared_latest()")
+        end = self.script.index("\nCUTOVER_PENDING=0", start)
+        helpers = self.script[start:end]
+
+        def run(build_rc: int, mutate: bool, restore_rc: int = 0):
+            with tempfile.TemporaryDirectory() as td:
+                root = pathlib.Path(td)
+                state = root / "latest"
+                attempts = root / "attempts"
+                state.write_text("old", encoding="utf-8")
+                attempts.write_text("", encoding="utf-8")
+                stubs = r'''
+sleep() { :; }
+docker() {
+  if [ "$1" = compose ]; then
+    [ "$MUTATE" = 1 ] && printf new > "$STATE"
+    return "$BUILD_RC"
+  fi
+  if [ "$1" = image ] && [ "$2" = inspect ]; then cat "$STATE"; return 0; fi
+  if [ "$1" = tag ]; then
+    printf x >> "$ATTEMPTS"
+    [ "$RESTORE_RC" -eq 0 ] || return "$RESTORE_RC"
+    printf old > "$STATE"; return 0
+  fi
+  return 99
+}
+'''
+                env = dict(
+                    os.environ,
+                    BUILD_RC=str(build_rc),
+                    MUTATE="1" if mutate else "0",
+                    RESTORE_RC=str(restore_rc),
+                    STATE=str(state),
+                    ATTEMPTS=str(attempts),
+                )
+                result = subprocess.run(
+                    [
+                        "bash", "-c",
+                        'OLD_IMAGE=old; ROLLBACK_TAG=rollback; CANDIDATE_TAG=candidate; '
+                        'D="$1"; ' + stubs + helpers + "\nbuild_candidate",
+                        "--", td,
+                    ],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    env=env,
+                )
+                return (result, state.read_text(encoding="utf-8"),
+                        len(attempts.read_text(encoding="utf-8")))
+
+        success, state, attempts = run(0, False)
+        self.assertEqual(success.returncode, 0, success.stdout + success.stderr)
+        self.assertEqual(state, "old")
+        self.assertEqual(attempts, 0)
+
+        failed, state, attempts = run(7, False)
+        self.assertEqual(failed.returncode, 7)
+        self.assertEqual(state, "old")
+        self.assertEqual(attempts, 0)
+
+        contaminated, state, attempts = run(0, True)
+        self.assertNotEqual(contaminated.returncode, 0)
+        self.assertEqual(state, "old", "오염을 감지했지만 latest를 복원하지 않았다")
+        self.assertEqual(attempts, 1)
+
+        failed_and_contaminated, state, attempts = run(7, True)
+        self.assertNotEqual(failed_and_contaminated.returncode, 0)
+        self.assertEqual(state, "old", "build 실패 뒤 latest 검사를 건너뛰었다")
+        self.assertEqual(attempts, 1)
+
+        restore_failed, state, attempts = run(0, True, restore_rc=9)
+        self.assertNotEqual(restore_failed.returncode, 0)
+        self.assertEqual(state, "new", "fake restore 실패가 성공으로 둔갑했다")
+        self.assertEqual(attempts, 3, "복원 실패를 bounded retry하지 않았다")
 
     def test_rest_db_smoke_precedes_rollback_disarm_and_collect(self):
-        health = self.script.index('run 10-health.txt')
+        health = self.script.index('run 11-health.txt')
         smoke = self.script.index('bash ops/verify-rest-db-deploy.sh "$D"')
         disarm = self.script.index("CUTOVER_PENDING=0", smoke)
         collect = self.script.index("scripts/krx_deploy_verifier.py collect")
         self.assertLess(health, smoke)
         self.assertLess(smoke, disarm)
         self.assertLess(disarm, collect)
-        self.assertIn("run 11-rest-db.txt", self.script)
+        self.assertIn("run 12-rest-db.txt", self.script)
+
+    def test_signal_traps_remain_armed_until_evidence_closure(self):
+        collect = self.script.index("scripts/krx_deploy_verifier.py collect")
+        finalize = self.script.rindex('if finalize_evidence "$D"')
+        disarm = self.script.rindex("trap - EXIT INT TERM")
+        final_exit = self.script.rindex('exit "$final_rc"')
+        self.assertLess(collect, finalize)
+        self.assertLess(finalize, disarm)
+        self.assertLess(disarm, final_exit)
+        self.assertNotIn("trap - EXIT INT TERM", self.script[collect:finalize])
 
     def test_collect_rc_is_preserved_even_under_errexit(self):
         self.assertIn("if python3 scripts/krx_deploy_verifier.py collect", self.script)
@@ -533,7 +716,7 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
     def test_maintenance_and_complete_baseline_precede_recreate(self):
         maintenance = self.script.index("ops/install-db-maintenance-cron.sh --check")
         prepare = self.script.index("scripts/krx_deploy_verifier.py prepare")
-        recreate = self.script.index("if ! run 09-recreate.txt")
+        recreate = self.script.index("if ! run 10-recreate.txt")
         self.assertLess(maintenance, prepare)
         self.assertLess(prepare, recreate)
 

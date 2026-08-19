@@ -774,8 +774,8 @@ stale은 gate가 차단). 완전 차단 복귀는 flag=false. 상세:
 
 | 단계 | nonzero 시 | 이유 |
 |---|---|---|
-| 디스크 확인 | **즉시 중단** | 용량은 사람이 판정하지만 `df` 자체가 실패하면 안전 여유를 확인할 수 없다 |
-| 최종 capture·timer 인계·롤백 태그·고정 SHA checkout·maintenance check·prepare·candidate build·recreate·REST auth/DB smoke | **즉시 중단** | 어느 전제든 빠진 채 recreate하면 회귀를 판정하거나 되돌릴 수 없다. candidate build는 공유 `latest`를 건드리지 않으며, 검증된 tag만 cutover 직전에 전환한다. REST auth/DB smoke 실패는 자동 rollback을 유지한 채 종료한다 |
+| 전역 lock·디스크 확인 | **즉시 중단** | 다른 배포가 진행 중이거나 `/` 사용률이 80% 이상이면 쓰기·build를 시작하지 않는다 |
+| 최종 capture·timer 인계·롤백 태그·고정 SHA checkout·maintenance check·prepare·candidate build·cutover 창·recreate·REST auth/DB smoke | **즉시 중단** | 어느 전제든 빠진 채 recreate하면 회귀를 판정하거나 되돌릴 수 없다. build 성공·실패와 무관하게 공유 `latest`를 재검증하고 오염됐으면 구 image로 복구한 뒤에도 실패로 끝낸다. cutover는 cron 원샷이 없는 `:12~:44`에만 시작하고 모든 긴 명령을 제한한다. REST auth/DB smoke 실패는 자동 rollback을 유지한 채 종료한다 |
 | collect | **계속** | nonzero는 "배포 실패"가 아니라 **차단 소견**이다. 증거 종결까지 마친 뒤 사람이 판정한다 |
 
 ```bash
@@ -796,6 +796,28 @@ install -d -m 0700 "$D"
 cd ~/exchange-rate
 FOLLOWER=""
 FOLLOWER_MUST_LIVE=0
+
+# 같은 호스트의 배포 실행을 커널 flock으로 직렬화한다. lock 파일의 존재나 기록된 PID는
+# 소유권 증거가 아니며, 실제 flock 실패를 stale metadata로 우회하지 않는다.
+acquire_deploy_lock() {
+  command -v flock >/dev/null 2>&1 || {
+    echo "⛔ 중단: flock(1)이 없어 배포 직렬화를 보장할 수 없다"; return 1;
+  }
+  DEPLOY_LOCK="$HOME/.fxi-krx-deploy.lock"
+  exec 9>>"$DEPLOY_LOCK" || return 1
+  chmod 600 "$DEPLOY_LOCK" || return 1
+  if ! flock -n 9; then
+    local holder
+    holder=$(cat "$DEPLOY_LOCK" 2>/dev/null | tr -d '\n')
+    echo "⛔ 중단: 다른 배포가 실행 중이다 (${holder:-owner=unknown})"
+    return 1
+  fi
+  : > "$DEPLOY_LOCK"
+  printf 'pid=%s started_utc=%s deploy_sha=%s evidence=%s\n' \
+    "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DEPLOY_SHA" "$D" >&9
+  printf 'lock_acquired=true\nlock_path=%s\nowner_pid=%s\n' "$DEPLOY_LOCK" "$$"
+}
+acquire_deploy_lock > "$D/00-deploy-lock.txt" 2>&1 || exit 1
 
 # follower가 뜬 뒤 어느 fail-closed 분기에서 끝나더라도 자식과 열린 로그를 남기지 않는다.
 stop_follower() {
@@ -988,6 +1010,47 @@ raise SystemExit(1 if blocked else 0)
 PY
 }
 
+verify_root_disk_capacity() {
+  local snapshot use_percent
+  snapshot=$(df -P /) || return 1
+  printf '%s\n' "$snapshot"
+  use_percent=$(printf '%s\n' "$snapshot" | awk 'NR == 2 {gsub(/%/, "", $5); print $5}')
+  if ! [[ "$use_percent" =~ ^[0-9]+$ ]]; then
+    echo "디스크 사용률을 판독할 수 없다: ${use_percent:-<empty>}"
+    return 1
+  fi
+  printf 'root_use_percent=%s\n' "$use_percent"
+  if [ "$use_percent" -ge 80 ]; then
+    echo "루트 파일시스템 사용률이 80% 이상이다 — 정리 후 재실행"
+    return 1
+  fi
+}
+
+verify_cutover_window() {
+  local minute oneoffs
+  command -v timeout >/dev/null 2>&1 || {
+    echo "timeout(1)이 없어 cutover 상한을 보장할 수 없다"; return 1;
+  }
+  minute=$(date +%M) || return 1
+  minute=$((10#$minute))
+  printf 'cutover_minute=%02d\n' "$minute"
+  # :05/:07/:09/:11 cron 뒤에 시작하고, bounded recreate+smoke+rollback이 다음 :05 전에
+  # 끝날 20분 이상의 여유를 남긴다.
+  if [ "$minute" -lt 12 ] || [ "$minute" -gt 44 ]; then
+    echo "cutover 허용 창이 아니다: 매시 :12~:44에 다시 실행"
+    return 1
+  fi
+  oneoffs=$(docker ps \
+    --filter label=com.docker.compose.project=exchange-rate \
+    --filter label=com.docker.compose.oneoff=True \
+    --format '{{.ID}} {{.Names}}') || return 1
+  if [ -n "$oneoffs" ]; then
+    printf '실행 중인 Compose one-shot이 있어 cutover하지 않는다:\n%s\n' "$oneoffs"
+    return 1
+  fi
+  echo "active_compose_oneoffs=0"
+}
+
 # 실패하면 그 자리에서 멈춘다. 계속 가면 안 되는 이유가 단계마다 다르다.
 run() {   # run <파일명> <설명> -- <명령...>
   local out="$D/$1" desc="$2"; shift 3
@@ -1016,8 +1079,8 @@ run handoff-timer-disable.txt "topic-auth timer disable" -- \
 run handoff-timer-state.txt "topic-auth timer/service 상태" -- \
   verify_timer_down || exit 1
 
-# 2) 디스크 (70% 경고 / 80% 초과면 정리 선행 — 판단은 사람이 한다)
-run 00-disk.txt "디스크" -- df -h / || exit 1
+# 2) 디스크 — `/` 사용률 80%부터 하드 차단한다. 출력만 보고 사람이 놓치는 경로가 없다.
+run 00-disk.txt "디스크" -- verify_root_disk_capacity || exit 1
 
 # 3) 롤백 앵커 — 현재 실행 image를 **새 immutable tag**로 고정하고 ID를 재확인한다.
 OLD_IMAGE=$(docker inspect exchange-rate-app --format '{{.Image}}') || exit 1
@@ -1041,10 +1104,13 @@ fi
 } > "$D/01-deploy-state.env"
 
 wait_for_image_health() {
-  local expected="$1" image health
-  for _ in $(seq 1 40); do
-    image=$(docker inspect exchange-rate-app --format '{{.Image}}') || return 1
-    health=$(docker inspect exchange-rate-app --format '{{.State.Health.Status}}') || return 1
+  local expected="$1" image health deadline
+  deadline=$((SECONDS + 120))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    image=$(timeout -k 2s 5s docker inspect exchange-rate-app --format '{{.Image}}' \
+      2>/dev/null) || { sleep 3; continue; }
+    health=$(timeout -k 2s 5s docker inspect exchange-rate-app \
+      --format '{{.State.Health.Status}}' 2>/dev/null) || { sleep 3; continue; }
     [ "$image" = "$expected" ] && [ "$health" = healthy ] && return 0
     sleep 3
   done
@@ -1057,9 +1123,49 @@ restore_old_image() {
   tagged=$(docker image inspect "$ROLLBACK_TAG" --format '{{.Id}}') || return 1
   [ "$tagged" = "$OLD_IMAGE" ] || return 1
   docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest || return 1
-  docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi \
+  timeout -k 15s 180s docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi \
     || return 1
   wait_for_image_health "$OLD_IMAGE"
+}
+
+restore_shared_latest() {
+  local attempt restored
+  for attempt in 1 2 3; do
+    if docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest \
+      && restored=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}') \
+      && [ "$restored" = "$OLD_IMAGE" ]
+    then
+      echo "공유 latest 복원 완료(attempt=$attempt)"
+      return 0
+    fi
+    echo "공유 latest 복원 검증 실패(attempt=$attempt): ${restored:-<unreadable>}"
+    [ "$attempt" -eq 3 ] || sleep 2
+  done
+  return 1
+}
+
+build_candidate() {
+  local build_rc latest_after
+  if docker compose -f docker-compose.yml -f "$D/compose-candidate.yml" build fastapi
+  then build_rc=0
+  else build_rc=$?
+  fi
+
+  # build 자체가 실패해도 반드시 확인한다. Compose가 실패 전에 latest를 바꿨을 수 있다.
+  if ! latest_after=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}' \
+    2>/dev/null)
+  then latest_after=""
+  fi
+  if [ "$latest_after" != "$OLD_IMAGE" ]; then
+    echo "candidate build가 공유 latest를 바꿨다: ${latest_after:-<unreadable>}"
+    if restore_shared_latest; then
+      echo "공유 latest를 구 image로 복원했지만 build는 실패로 종결한다"
+    else
+      echo "공유 latest 복원 실패 — 수동 개입 필요"
+    fi
+    return 1
+  fi
+  [ "$build_rc" -eq 0 ] || return "$build_rc"
 }
 
 CUTOVER_PENDING=0
@@ -1087,7 +1193,7 @@ cutover_latest() {
 #    collect가 이 전용 파일을 읽어 exitCode=143을 graceful shutdown과 결속한다.
 #    고빈도 app.log* 회전과 분리된 구 container identity 전용 증거다.
 docker logs -f --since "$T0" --timestamps exchange-rate-app \
-  > "$D/02-old-container.log" 2>&1 &
+  > "$D/02-old-container.log" 2>&1 9>&- &
 FOLLOWER=$!
 FOLLOWER_MUST_LIVE=1
 trap on_exit EXIT
@@ -1145,28 +1251,20 @@ services:
   fastapi:
     image: "$CANDIDATE_TAG"
 YAML
-run 07-build.txt "candidate build" -- \
-  docker compose -f docker-compose.yml -f "$D/compose-candidate.yml" build fastapi || exit 1
+run 07-build.txt "candidate build / latest 무결성" -- build_candidate || exit 1
 NEW_IMAGE=$(docker image inspect "$CANDIDATE_TAG" --format '{{.Id}}') || exit 1
 if [ "$NEW_IMAGE" = "$OLD_IMAGE" ]; then
   echo "⛔ 중단: build 뒤 image ID가 구 image와 같다" | tee "$D/ABORT.txt"
   stop_follower
   exit 1
 fi
-LATEST_AFTER_BUILD=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}') \
-  || exit 1
-if [ "$LATEST_AFTER_BUILD" != "$OLD_IMAGE" ]; then
-  echo "⛔ 중단: candidate build가 공유 latest를 바꿨다" | tee "$D/ABORT.txt"
-  docker tag "$ROLLBACK_TAG" exchange-rate-fastapi:latest || true
-  stop_follower
-  exit 1
-fi
 printf 'CANDIDATE_TAG=%q\n' "$CANDIDATE_TAG" >> "$D/01-deploy-state.env"
 printf 'NEW_IMAGE=%q\n' "$NEW_IMAGE" >> "$D/01-deploy-state.env"
 
-# 9) cutover 직전 follower 생존을 마지막 확인한 뒤 candidate를 latest로 전환한다.
+# 9) cutover 직전 cron 창·Compose one-shot 부재와 follower 생존을 마지막 확인한 뒤 전환한다.
+run 08-cutover-window.txt "cutover 안전 창" -- verify_cutover_window || exit 1
 require_follower || exit 1
-run 08-cutover-tag.txt "candidate latest 전환" -- \
+run 09-cutover-tag.txt "candidate latest 전환" -- \
   cutover_latest || exit 1
 if ! CUTOVER_IMAGE=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}'); then
   exit 1
@@ -1176,8 +1274,8 @@ if [ "$CUTOVER_IMAGE" != "$NEW_IMAGE" ]; then
   exit 1
 fi
 FOLLOWER_MUST_LIVE=0  # recreate가 구 컨테이너를 내리면 follower 종료는 정상이다.
-if ! run 09-recreate.txt "recreate" -- \
-  docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi
+if ! run 10-recreate.txt "recreate" -- \
+  timeout -k 15s 180s docker compose up -d --pull never --no-build --no-deps --force-recreate fastapi
 then
   exit 1
 fi
@@ -1188,15 +1286,15 @@ if [ "$RUNNING_IMAGE" != "$NEW_IMAGE" ]; then
   echo "⛔ 신 컨테이너 image 불일치: $RUNNING_IMAGE != $NEW_IMAGE" | tee "$D/ABORT.txt"
   exit 1
 fi
-run 10-health.txt "신 image health" -- wait_for_image_health "$NEW_IMAGE" || {
+run 11-health.txt "신 image health" -- wait_for_image_health "$NEW_IMAGE" || {
   exit 1
 }
 
 # 10) 즉시 활성화되는 REST auth lane·DB timeout을 운영 경로에서 검증한다.
 #     이 단계까지 CUTOVER_PENDING=1을 유지한다. 실패하면 EXIT trap이 구 image를 자동 복원한다.
 #     rest-db.txt가 완전히 닫힌 뒤에만 collect로 가므로 최종 manifest와 경합하지 않는다.
-run 11-rest-db.txt "REST auth / DB timeout" -- \
-  bash ops/verify-rest-db-deploy.sh "$D" || exit 1
+run 12-rest-db.txt "REST auth / DB timeout" -- \
+  timeout -k 15s 300s bash ops/verify-rest-db-deploy.sh "$D" || exit 1
 CUTOVER_PENDING=0
 
 # 11) 증거 수집 (관측 창 12분 — 즉시 끝나지 않는다)
@@ -1215,8 +1313,7 @@ fi
 echo "rc=$collect_rc" >> "$D/12-collect.txt"
 
 # 12) follower는 collect 전에 이미 종결됐다. helper는 idempotent지만 여기서 다시
-#     호출하지 않는다 — 증거 생성 순서를 한 곳에만 둔다.
-trap - EXIT INT TERM
+#     호출하지 않는다. EXIT/INT/TERM trap은 최종 closure까지 유지한다.
 
 # 13) 신 컨테이너 로그 — 구 것과 **별도로**. compact `$TS`는 Docker 시각이 아니다.
 if docker logs --timestamps --since "$T0" exchange-rate-app \
@@ -1234,6 +1331,8 @@ sync
 if finalize_evidence "$D" "$collect_rc" "$logs_rc"; then final_rc=0
 else final_rc=$?
 fi
+# EXIT/INT/TERM trap은 payload manifest와 CLOSURE가 완전히 닫힌 뒤에만 해제한다.
+trap - EXIT INT TERM
 exit "$final_rc"
 ```
 
