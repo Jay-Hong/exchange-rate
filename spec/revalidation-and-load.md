@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `c28dd22ac825953094654190a5447c156469eef0`
+- server 기준 commit: `d3d29c1e37a459f14972c83ea9856b911db387fd`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `ca85f8a6409f5aa197c158bbdd6bccb29e97b1148c8c615fb342c04b51d7ce1f`
-- baseline SHA: `c2fe85b7f53d42a763be1b02caf2521e3f085cb9ab9629afbb2e7ddc6857cbbe`
+- manifest SHA: `d43e77eaf745ddd59c354838490629e06dbf5b262569f9f27251ad94c1b4d1ad`
+- baseline SHA: `2e63117e73d07cf4b3bfb80bc870ed6d494ee81a66e6e7c933f10692d0b4eb23`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -89,11 +89,14 @@ I/O 상한 · 서버 실패 cooldown).
 **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본
 30초). 아래 "그대로 쌓인다" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤
 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이
-서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:636-648`은 요청 topic을
-순차 순회하고, 공유 래퍼 `app/topic_initial_snapshot.py:436-490`은 전체 snapshot 예산 안에서
-`to_thread` worker를 실행한다. caller 취소/deadline 뒤 새 I/O phase 진입은 checkpoint가 막지만,
-topic별 single-flight/cache는 아직 없다. **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈
-연결 수 N, 총작업량 N×M. 동시 도착 N은 유한 DB/Redis pool 앞에 쌓이므로 S5~S7 흡수 장치가 필요하다.
+서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:835-847`은 요청 topic을
+순차 순회한다. `app/topic_initial_snapshot.py:456-632`의 LOAD-S5 래퍼는 같은
+`(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초
+cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 실제 worker는
+`app/topic_initial_snapshot.py:635-689`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을
+그대로 쓴다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 순간 실제
+job은 연결 수 N이 아니라 활성 key 수에 가까워졌다. bounded waiter와 실패 cooldown은 아직 없으므로
+동시 도착의 대기·실패 재동기화를 닫으려면 S6~S7이 필요하다.
 <!-- /rid: R-LOAD-3 -->
 
 ---

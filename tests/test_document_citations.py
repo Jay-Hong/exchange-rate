@@ -111,7 +111,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     #                **값 불변, 소유자만 이동**), E1-b(`…:105` online pool_timeout 10초)가
     #                신설되며 +3 (7 → 10).
     # 2026-08-19 LOAD-S3 C2: 순차 loop와 요청 전체 budget wrapper를 분리 인용해 +1 (10 → 11).
-    "LOAD": 11,
+    # 2026-08-19 LOAD-S5 C2: single-flight/cache wrapper와 실제 S3 worker를 분리 인용해 +1
+    #                (11 → 12).
+    "LOAD": 12,
 }
 
 
@@ -384,9 +386,10 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     #                E1-b(`app/database_settings.py:105`, online pool_timeout 10초)가 신설되며
     #                server locator 3건 증가 (126 → 129 / server 62 → 65).
     # 2026-08-19 LOAD-S3 C2: HAND +5, LOAD +1 (129 → 135 / server 65 → 71).
-    assert len(references) == 135
+    # 2026-08-19 LOAD-S5 C2: LOAD +1 (135 → 136 / server 71 → 72).
+    assert len(references) == 136
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 71, "ios": 64}
+    assert by_repo == {"server": 72, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -428,8 +431,9 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
     #                함께 인용하게 되며 server locator 2건 증가 (40 → 42).
     # 2026-08-17 S2: baseline 의 E1 도 같은 이유로 둘로 갈리고 E1-b 가 신설되며
     #                server locator 3건 증가 (42 → 45).
-    assert len(references) == 45
-    assert by_repo == {"server": 35, "ios": 10}
+    # 2026-08-19 LOAD-S5 C2: shared single-flight와 실제 worker 인용을 분리해 server +1.
+    assert len(references) == 46
+    assert by_repo == {"server": 36, "ios": 10}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():

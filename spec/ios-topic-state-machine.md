@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `c28dd22ac825953094654190a5447c156469eef0`
+- server 기준 commit: `d3d29c1e37a459f14972c83ea9856b911db387fd`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `ca85f8a6409f5aa197c158bbdd6bccb29e97b1148c8c615fb342c04b51d7ce1f`
-- baseline SHA: `c2fe85b7f53d42a763be1b02caf2521e3f085cb9ab9629afbb2e7ddc6857cbbe`
+- manifest SHA: `d43e77eaf745ddd59c354838490629e06dbf5b262569f9f27251ad94c1b4d1ad`
+- baseline SHA: `2e63117e73d07cf4b3bfb80bc870ed6d494ee81a66e6e7c933f10692d0b4eb23`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -275,7 +275,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는
 **두 경우를 모두** 다뤄야 한다
 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330`
-(stage 별 partition) · `app/topic_dispatcher.py:829-870`(per-topic 거부 코드).
+(stage 별 partition) · `app/topic_dispatcher.py:852-893`(per-topic 거부 코드).
 상태 서술은 `DECISIONS.md` ADR-041
 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11).
 전이표는 Stage A 완료를 전제로 한다.
