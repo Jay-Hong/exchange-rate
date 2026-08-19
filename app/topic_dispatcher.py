@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from dataclasses import dataclass
 
@@ -93,6 +94,40 @@ from app import config
 from app import subscribe_load_metrics as subscribe_load
 
 logger = logging.getLogger("exchange_rate.topic_dispatcher")
+
+
+async def _send_json_with_topic_deadline(
+    websocket: "WebSocket", payload: dict, *, budget, deadline_at_mono: float
+) -> None:
+    """내부 TimeoutError와 실제 wire deadline을 구분해 ACK 송신을 유한하게 만든다."""
+    from app.topic_wire import TopicRequestDeadlineExceeded
+
+    remaining = budget.remaining_until(deadline_at_mono)
+    if remaining <= 0:
+        budget.stop("deadline")
+        registry.remove_websocket(websocket)
+        try:
+            async with asyncio.timeout(1.0):
+                await websocket.close(code=1013)
+        except Exception:
+            logger.debug("topic deadline close 실패", exc_info=True)
+        raise TopicRequestDeadlineExceeded("ack")
+
+    deadline_cm = asyncio.timeout(remaining)
+    try:
+        async with deadline_cm:
+            await websocket.send_json(payload)
+    except asyncio.TimeoutError as exc:
+        if not deadline_cm.expired():
+            raise
+        budget.stop("deadline")
+        registry.remove_websocket(websocket)
+        try:
+            async with asyncio.timeout(1.0):
+                await websocket.close(code=1013)
+        except Exception:
+            logger.debug("topic deadline close 실패", exc_info=True)
+        raise TopicRequestDeadlineExceeded("ack") from exc
 
 
 
@@ -411,6 +446,8 @@ async def handle_client_message(
     상태를 wire 오류로 접으면 클라가 영구 재시도하고 운영자는 신호를 못 받는다.
     그 경로가 위 "또는 연결 종료"의 실체다.
     """
+    request_started_at_mono = time.monotonic()
+
     if raw_text == "ping":
         await websocket.send_json({"type": "pong"})
         return
@@ -547,10 +584,14 @@ async def handle_client_message(
     if msg_type == "subscribe":
         # lazy import로 dispatcher import 그래프 경량 유지(builder 체인은 첫 subscribe 시 로드).
         from app.topic_initial_snapshot import (
+            SnapshotRequestBudget,
             is_snapshot_topic_enabled,
             per_user_gated_snapshot_topics,
             send_initial_snapshots,
             supported_snapshot_topics,
+        )
+        request_budget = SnapshotRequestBudget(
+            started_at_mono=request_started_at_mono
         )
 
         if not identified:
@@ -575,7 +616,13 @@ async def handle_client_message(
             free_topics = topic_auth_rollout.filter_anonymous_topics(free_topics)
             if free_topics:
                 registry.register(websocket, free_topics)
-                await send_initial_snapshots(websocket, free_topics, channel="anonymous")
+                request_budget.start_snapshot_phase()
+                await send_initial_snapshots(
+                    websocket,
+                    free_topics,
+                    channel="anonymous",
+                    budget=request_budget,
+                )
             return
 
         # 토큰이 실린 요청만 인증 경로를 탄다.
@@ -599,9 +646,9 @@ async def handle_client_message(
             #    인가의 누적 상한"** 으로 정의하는데, identity 9초 + gated 9초가 각각 통과하면
             #    18초가 되어 그 정의를 어긴다.
             #
-            # ⚠️ **범위는 "인증 단계 누적"까지다** — registry 변경과 ack 송신은 이 창 **밖**이라
-            #    "10초 안에 ack"을 보장하지 않는다. 그 보장을 원하면 창을 넓혀야 하고, 그건
-            #    별도 결정이다(codex Medium).
+            # ⚠️ **범위는 "인증 단계 누적"까지다** — registry 변경과 ack 송신은 이 10초
+            #    sub-budget 밖이다. 대신 같은 요청 시작점에서 파생한 LOAD-S3 ACK deadline이
+            #    그 바깥 구간까지 누적 15초로 강제한다.
             # ⛔ 한때 이 주석이 iOS `topicCommandTimeout` 을 근거로 들었는데 그때 **그 상수는
             #    존재하지 않았다**(실측 0건) — **폐기한 reconciler 계획**의 값을 배포된 코드처럼
             #    인용했다. ⚠️ 그 교훈(계획값을 배포 코드로 인용하지 말 것)은 그대로 두되,
@@ -613,10 +660,13 @@ async def handle_client_message(
             #    상한이 그 바깥 구간까지 덮어야 한다. 이 값을 **올리거나** 클라 상수를
             #    **내리면** 클라가 먼저 포기해 §8-B-term 종결 프레임이 버려진다 — 한쪽만
             #    만지지 말 것.
-            request_deadline_at = (
-                asyncio.get_running_loop().time() + config.WS_AUTH_WIRE_DEADLINE_SECONDS
+            auth_deadline_at = min(
+                request_budget.ack_deadline_at_mono,
+                request_started_at_mono + config.WS_AUTH_WIRE_DEADLINE_SECONDS,
             )
-            async with asyncio.timeout_at(request_deadline_at) as deadline_cm:
+            async with asyncio.timeout(
+                request_budget.remaining_until(auth_deadline_at)
+            ) as deadline_cm:
                 uid = await authorize_subscribe(id_token)
         except asyncio.TimeoutError:
             if not deadline_cm.expired():
@@ -632,12 +682,15 @@ async def handle_client_message(
                 "WS subscribe 인증이 wire deadline 을 넘었다",
                 extra={"deadline_seconds": config.WS_AUTH_WIRE_DEADLINE_SECONDS},
             )
-            await websocket.send_json(
+            await _send_json_with_topic_deadline(
+                websocket,
                 build_subscription_error(
                     request_id=request_id,
                     error="temporarily_unavailable",
                     retry_after_seconds=config.WS_AUTH_RETRY_AFTER_SECONDS,
-                )
+                ),
+                budget=request_budget,
+                deadline_at_mono=request_budget.ack_deadline_at_mono,
             )
             return
         except SubscribeAuthFailed as failure:
@@ -646,12 +699,15 @@ async def handle_client_message(
             # ⚠️ **연결과 registry 는 불변이다.** §8-C 의 두 코드는 전체-요청 범위이므로 요청만
             #    접는다 — 구 동작은 예외가 상위로 올라가 연결이 닫히고 그 연결의 **다른 구독까지**
             #    사라졌다. 그 차이는 소켓에서만 관측된다.
-            await websocket.send_json(
+            await _send_json_with_topic_deadline(
+                websocket,
                 build_subscription_error(
                     request_id=request_id,
                     error=failure.error,
                     retry_after_seconds=failure.retry_after_seconds,
-                )
+                ),
+                budget=request_budget,
+                deadline_at_mono=request_budget.ack_deadline_at_mono,
             )
             return
         # ⛔ **UID 결속은 여기다** — identity 성공 직후, premium 판정 **전**. Denied/Unavailable
@@ -702,7 +758,9 @@ async def handle_client_message(
                 #    상한이 없으면 §8-B-term "식별된 요청은 반드시 종결된다"가 깨진다.
                 # ⚠️ **같은 절대 deadline** 을 공유한다 — identity 가 이미 쓴 시간만큼 예산이
                 #    줄어든 상태로 시작한다.
-                async with asyncio.timeout_at(request_deadline_at) as gate_cm:
+                async with asyncio.timeout(
+                    request_budget.remaining_until(auth_deadline_at)
+                ) as gate_cm:
                     outcome = await authorize_subscription_plan(
                         plan, mono=lambda: lease_clock().mono()
                     )
@@ -732,7 +790,8 @@ async def handle_client_message(
                 extra={"reason": outcome.reason, "kind": outcome.kind.value,
                        "topics": list(plan.premium_only + plan.premium_and_entitlement)},
             )
-            await websocket.send_json(
+            await _send_json_with_topic_deadline(
+                websocket,
                 build_subscription_error(
                     request_id=request_id,
                     error="temporarily_unavailable",
@@ -741,7 +800,9 @@ async def handle_client_message(
                         if persistent
                         else config.WS_AUTH_RETRY_AFTER_SECONDS
                     ),
-                )
+                ),
+                budget=request_budget,
+                deadline_at_mono=request_budget.ack_deadline_at_mono,
             )
             return
         if not isinstance(outcome, AuthorizationOutcome):
@@ -819,7 +880,8 @@ async def handle_client_message(
         # ⛔ 이 지점이 ③ **뒤**여야 한다 — mixed [free, KRX] 에서 Denied 를 처리하고 무료 등록까지
         #    마친 상태를 담아야 `rejected_topics` 와 `active_subscriptions` 가 모순되지 않는다.
         active = registry.get_subscriptions(websocket)
-        await websocket.send_json(
+        await _send_json_with_topic_deadline(
+            websocket,
             build_subscription_ack(
                 request_id=request_id,
                 operation="subscribe",
@@ -827,10 +889,18 @@ async def handle_client_message(
                 rejected=rejected,
                 active=active,
                 leases=_lease_wire_map(websocket, active),
-            )
+            ),
+            budget=request_budget,
+            deadline_at_mono=request_budget.ack_deadline_at_mono,
         )
         if accepted_names:
-            await send_initial_snapshots(websocket, accepted_names, channel="token_bearing")
+            request_budget.start_snapshot_phase()
+            await send_initial_snapshots(
+                websocket,
+                accepted_names,
+                channel="token_bearing",
+                budget=request_budget,
+            )
     else:  # unsubscribe
         # ⚠️ `unregister` 는 제거분이 아니라 **잔여**를 돌려준다 — 그게 곧 ack 의
         #    `active_subscriptions`(연결 최종 상태)다.

@@ -229,6 +229,23 @@ class TestTopicSnapshotRestBootstrap(unittest.TestCase):
         self.assertEqual(r.status_code, 404)
         self.assertEqual(r.json()["error"], "topic_unavailable")
 
+    def test_snapshot_deadline_is_retryable_503_without_retry_after(self):
+        from app.topic_initial_snapshot import SnapshotDeadlineExceeded
+
+        p_auth, p_prem = self._authed()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), p_auth, p_prem, \
+             patch(
+                 "app.topic_initial_snapshot.build_snapshot_observed",
+                 new=AsyncMock(side_effect=SnapshotDeadlineExceeded("usdt:krw")),
+             ):
+            r = self.client.get(
+                "/api/v2/topics/snapshot", params={"topic": "usdt:krw"}
+            )
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"error": "temporarily_unavailable"})
+        self.assertEqual(r.headers.get("cache-control"), "no-store")
+        self.assertNotIn("retry-after", {key.lower() for key in r.headers})
+
 
 class TestTopicSnapshotRestAuthGate(unittest.TestCase):
     """ADR-039 §8.1 **E3** — REST twin 인증·premium·KRX per-user 게이트.
@@ -1224,7 +1241,9 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
 
         self.assertEqual(observed, [990.0, 920.0, 1000.0, 1000.0])
         from unittest.mock import ANY
-        snapshot_mock.assert_awaited_once_with(ANY, ["fx:usd-krw"], channel="token_bearing")
+        snapshot_mock.assert_awaited_once_with(
+            ANY, ["fx:usd-krw"], channel="token_bearing", budget=ANY
+        )
         lease_spy.assert_called_once_with(
             now_mono=1000.0,
             premium_verified_at_mono=920.0,
@@ -2740,17 +2759,19 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
 
         ⚠️ **sleep 으로 재현하지 않는다**(codex): "0.5초 예산 / 각 단계 0.35초" 식 누적 테스트는
         CI 부하로 **첫 단계만 예산을 넘겨도 통과**해 거짓 green 이 된다 — 공유 여부를 전혀
-        검증하지 못한다. 대신 `timeout_at` 을 passthrough 로 감싸 **두 호출이 정확히 같은
-        `when` 을 받는지** 본다. 그게 "공유 절대 deadline"의 정의 그 자체다.
+        검증하지 못한다. 대신 예산 객체의 `remaining_until()`에 전달되는 절대시각을 기록해
+        **두 단계가 정확히 같은 deadline**을 쓰는지 본다. 상대 timeout 구현으로 바뀌어도 이
+        절대시각이 같다는 것이 "공유 absolute deadline"의 정의다.
         """
         from app import topic_dispatcher as dispatcher
+        from app.topic_initial_snapshot import SnapshotRequestBudget
 
-        seen_when = []
-        real_timeout_at = asyncio.timeout_at
+        seen_deadlines = []
+        real_remaining_until = SnapshotRequestBudget.remaining_until
 
-        def recording_timeout_at(when):
-            seen_when.append(when)
-            return real_timeout_at(when)
+        def recording_remaining_until(budget, deadline_at_mono):
+            seen_deadlines.append(deadline_at_mono)
+            return real_remaining_until(budget, deadline_at_mono)
 
         patchers = self._patchers()
         patchers["revenuecat_must_not_be_called"] = patch(
@@ -2765,19 +2786,28 @@ class TestAuthenticatedSubscribeIsAcknowledged(unittest.TestCase):
                 dispatcher, "authorize_subscription_plan",
                 new=AsyncMock(side_effect=lambda plan, **kw: _granted_outcome(plan)),
             ))
-            stack.enter_context(patch.object(dispatcher.asyncio, "timeout_at",
-                                             recording_timeout_at))
+            stack.enter_context(patch.object(
+                SnapshotRequestBudget,
+                "remaining_until",
+                recording_remaining_until,
+            ))
             with self.client.websocket_connect("/ws") as ws:
                 _receive_json_or_fail(ws, self.fail)
                 ws.send_json({"type": "subscribe", "request_id": "dl-share",
                               "id_token": "tok", "topics": ["fx:usd-krw", KRX_TOPIC]})
                 self._receive_for(ws, "dl-share")
 
-        self.assertEqual(len(seen_when), 2,
-                         f"인증 단계가 2회 timeout 을 열지 않았다: {seen_when!r}")
+        self.assertGreaterEqual(
+            len(seen_deadlines), 3,
+            f"identity·authorization·ACK 예산 판정이 모두 실행되지 않았다: {seen_deadlines!r}",
+        )
         self.assertEqual(
-            seen_when[0], seen_when[1],
+            seen_deadlines[0], seen_deadlines[1],
             "두 단계가 **서로 다른** deadline 을 열었다 — 상한이 단계 수만큼 곱해진다",
+        )
+        self.assertGreater(
+            seen_deadlines[2], seen_deadlines[1],
+            "ACK deadline이 auth sub-budget보다 뒤여야 오류/ack 송신 여유가 생긴다",
         )
 
     def test_client_message_handling_is_awaited_not_fire_and_forget(self):

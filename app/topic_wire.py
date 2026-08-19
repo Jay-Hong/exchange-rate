@@ -123,6 +123,26 @@ class InitialSnapshotConnectionClosed(Exception):
     """
 
 
+class TopicRequestDeadlineExceeded(Exception):
+    """topic 요청 예산 소진으로 서버가 연결을 1013으로 종결했다.
+
+    dispatcher가 이미 close를 시도했으므로 endpoint는 다음 `receive_text()`를 호출하지 않고
+    정상적인 과부하 제어 종료로 처리한다. terminal payload를 추가로 보내지 않는다.
+    """
+
+
+class InitialSnapshotDeadlineExceeded(TopicRequestDeadlineExceeded):
+    """post-ACK snapshot build/send 중 `TopicRequestDeadlineExceeded`."""
+
+
+class InitialSnapshotTransientFailure(Exception):
+    """post-ACK snapshot 일시 장애로 서버가 연결을 1013으로 종결했다."""
+
+
+class InitialSnapshotFatalFailure(Exception):
+    """post-ACK snapshot 프로그래밍/직렬화 오류로 서버가 연결을 1011로 종결했다."""
+
+
 class SubscribeIdentityConflict(Exception):
     """한 소켓에 **다른 UID** 가 나타났다 — 인증 실패 verdict 가 아니라 **연결 제어 신호**다.
 

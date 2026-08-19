@@ -3,7 +3,7 @@
 app.topic_initial_snapshot 검증:
   - _build_snapshot_sync: topic→builder 매핑 / enable gate(FX_TOPIC_ENABLED) / topic 필드 inject /
     미지원 topic None
-  - send_initial_snapshots: per-topic 격리(build 실패 continue) / send 실패 시 registry 정리+중단 /
+  - send_initial_snapshots: build 실패 1013/1011 분류 / send 실패 시 registry 정리+중단 /
     요청 내 dedupe / 빈 payload도 전송 / 미지원 skip
 
 builder/SessionLocal은 patch로 격리(실 DB 접근 0 — deterministic). 실 wire e2e(TestClient ws)는
@@ -388,9 +388,10 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, 0)
         ws.send_json.assert_not_called()
 
-    async def test_build_failure_isolated_continues(self):
+    async def test_fatal_build_failure_closes_1011_without_continuing(self):
         ws = MagicMock()
         ws.send_json = AsyncMock()
+        ws.close = AsyncMock()
         topic_dispatcher.registry.register(ws, ["fx:usd-krw", "usdt:krw"])
 
         def fake_build(topic):
@@ -398,12 +399,15 @@ class TestSendInitialSnapshots(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("build boom")
             return {"type": "snapshot", "topic": topic, "data": {}}
 
+        from app.topic_wire import InitialSnapshotFatalFailure
+
         with patch(
             "app.topic_initial_snapshot._build_snapshot_sync", side_effect=fake_build
         ):
-            sent = await send_initial_snapshots(ws, ["fx:usd-krw", "usdt:krw"])
-        self.assertEqual(sent, 1)  # fx build 실패 격리 → usdt 계속
-        ws.send_json.assert_awaited_once()
+            with self.assertRaises(InitialSnapshotFatalFailure):
+                await send_initial_snapshots(ws, ["fx:usd-krw", "usdt:krw"])
+        ws.close.assert_awaited_once_with(code=1011)
+        ws.send_json.assert_not_awaited()
 
     async def test_send_failure_removes_ws_and_aborts_remaining(self):
         ws = MagicMock()
@@ -466,9 +470,8 @@ class TestInitialSnapshotLeaseGate(unittest.IsolatedAsyncioTestCase):
     """전송 직전 lease 재검증 — 발행 경로와 **같은 게이트**를 공유하는지.
 
     ⛔ 이 게이트가 없으면 `leased_subscribers` 의 "모든 발행 경로가 공유하는 단일 게이트"가
-       거짓이 된다: snapshot build 는 `to_thread` 로 돌고 **인증 wire deadline 밖**이라
-       상한이 없으므로, 발급 시점 검사만으로는 S5 의 15분 revoke 상한이 이 경로에서
-       보증되지 않는다.
+       거짓이 된다: snapshot build 는 인증 wire deadline 밖이고 LOAD-S3 총예산 안에서도 lease가
+       만료될 수 있으므로, 발급 시점 검사만으로는 S5의 15분 revoke 상한이 보증되지 않는다.
     """
 
     _TOPIC = "fx:usd-krw"

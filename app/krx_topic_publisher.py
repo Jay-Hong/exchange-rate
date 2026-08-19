@@ -18,7 +18,7 @@ usdt:krw optional group(usd_krw_futures) 시대를 종료하고 KRX를 전용 to
 
 # 표준 라이브러리
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 # 로컬 애플리케이션
 from app import config, topic_dispatcher, topic_trigger_bridge
@@ -39,7 +39,9 @@ def build_krx_topic_payload(entry: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def load_krx_topic_entry(db=None) -> Optional[Dict[str, Any]]:
+def load_krx_topic_entry(
+    db=None, *, checkpoint: Optional[Callable[[], None]] = None
+) -> Optional[Dict[str, Any]]:
     """KRX latest entry 로드 — Redis-first, miss 시 DB fallback (snapshot 경로용).
 
     tick-발행 경로는 방금 Redis write 성공 직후라 사실상 항상 Redis hit.
@@ -48,11 +50,15 @@ def load_krx_topic_entry(db=None) -> Optional[Dict[str, Any]]:
     from app.latest_rates_cache import get_latest_krx_rate_from_sync_job
     from app.usdt_topic_payload import _normalize_entry
 
+    if checkpoint is not None:
+        checkpoint()
     raw = get_latest_krx_rate_from_sync_job(KRX_ASSET)
     if raw is None and db is not None:
         from app import crud
         # legacy shape dict({"bank","currency","rate","timestamp"}) 또는 None —
         # _normalize_entry가 legacy 키를 topic-native로 변환 (codex blocker 019f4117).
+        if checkpoint is not None:
+            checkpoint()
         raw = crud.get_latest_source_rate(db, "krx", KRX_ASSET)
     if raw is None:
         return None

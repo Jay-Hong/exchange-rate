@@ -38,6 +38,10 @@
 - `LOAD-S2-REDIS`: snapshot sync Redis는 read/connect 1초, pool 대기 1초, 최대 50 connection으로
   제한한다. caller 취소 직후에는 `to_thread` worker가 계속 돈다는 반대 상태와, read timeout 뒤
   connection이 pool로 돌아오는 상태를 실제 stalled RESP 서버로 함께 검증한다.
+- `LOAD-S3`: ACK 전 예산, ACK 후 snapshot 총예산, 요청 전체 absolute deadline을 한 monotonic
+  시간축에 결속했다. caller 취소·deadline 뒤 worker는 현재 bounded I/O를 끝낸 다음 checkpoint에서
+  멈추고, 새 Redis/DB phase를 시작하지 않는다. post-ACK deadline/transient는 1013, fatal은 1011로
+  terminal payload 없이 종결하며 REST twin의 deadline은 no-store 503으로 변환한다.
 - mutation runner 8개는 공유 worktree를 직접 변이하지 않고 격리 worktree에서 실행한다.
 
 `LOAD-S2-DB`는 statement 하나와 pool/connect phase를 유한하게 만들 뿐이다. 여러 statement의 합,
@@ -46,9 +50,10 @@
 `build_snapshot_observed()`가 sync builder를 default executor에 보내고, FX/USDT/KRX payload가 모두
 `latest_rates_cache._get_sync_client()` 하나를 거쳐 Redis-first read한다는 호출 그래프를 확인했다.
 기존 read/connect 1초는 유한했지만 pool connection 수가 사실상 무제한이고 취소 후 반환 양성대조가
-없었다. `LOAD-S2-REDIS`가 이 두 누락을 닫았다. 다만 여러 Redis/DB 호출의 합과 취소된 worker의
-다음 phase 진입은 아직 `LOAD-S3` 소관이다.
-따라서 아래 단계가 완료되기 전에는 `R-LOAD-3 완료` 또는 `자원 상한 완료`라고 쓰지 않는다.
+없었다. `LOAD-S2-REDIS`가 이 두 누락을 닫았고, `LOAD-S3`가 여러 Redis/DB 호출의 합과 취소된
+worker의 다음 phase 진입을 제한했다. 다만 이 둘만으로 동시 폭주 흡수가 완성되지는 않는다.
+아래 `LOAD-S5/S6/S7`과 클라이언트 `R-CLI-24`, 부하 리허설·통합 활성화가 끝나기 전에는
+`R-LOAD-3 완료` 또는 `자원 상한 완료`라고 쓰지 않는다.
 
 ### 운영 상태는 별도 재확인
 
@@ -60,8 +65,8 @@
 
 ```text
 LOAD-S2-DB (PostgreSQL phase 상한, 완료)
-  -> Redis I/O 상한 감사·누락 보강 (LOAD-S3 진입 게이트)
-  -> LOAD-S3 (요청 전체 예산 + worker 협력 중단)
+  -> Redis I/O 상한 감사·누락 보강 (완료)
+  -> LOAD-S3 (요청 전체 예산 + worker 협력 중단, 완료)
   -> LOAD-S5 (topic single-flight/cache)
   -> LOAD-S6 (bounded wait + 1013 종결)
   -> LOAD-S7 (서버 실패 cooldown)

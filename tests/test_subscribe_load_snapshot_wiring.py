@@ -34,6 +34,7 @@ class SnapshotWiringTestCase(unittest.IsolatedAsyncioTestCase):
         topic_dispatcher.registry = topic_dispatcher.TopicRegistry()
         self.ws = MagicMock()
         self.ws.send_json = AsyncMock()
+        self.ws.close = AsyncMock()
 
     async def asyncTearDown(self):
         topic_dispatcher.registry = self._original_registry
@@ -78,13 +79,29 @@ class TestChannelAttribution(SnapshotWiringTestCase):
                     self._snap()["snapshot_send"]["calls_by_channel"][ch], 1)
 
     async def test_dispatcher_call_sites_pass_their_channels(self):
-        """dispatcher :577/:826 배선 — 소스 trip-wire(호출부가 실제로 channel 을 넘긴다)."""
+        """두 dispatcher 호출이 channel과 같은 request budget을 함께 넘긴다."""
+        import ast
         import inspect
 
-        src = inspect.getsource(topic_dispatcher)
-        self.assertIn('send_initial_snapshots(websocket, free_topics, channel="anonymous")', src)
-        self.assertIn(
-            'send_initial_snapshots(websocket, accepted_names, channel="token_bearing")', src)
+        tree = ast.parse(inspect.getsource(topic_dispatcher))
+        observed = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id != "send_initial_snapshots" or len(node.args) < 2:
+                continue
+            topic_arg = node.args[1]
+            kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg is not None}
+            if not isinstance(topic_arg, ast.Name):
+                continue
+            channel = kwargs.get("channel")
+            budget = kwargs.get("budget")
+            if isinstance(channel, ast.Constant) and isinstance(budget, ast.Name):
+                observed.add((topic_arg.id, channel.value, budget.id))
+        self.assertEqual(observed, {
+            ("free_topics", "anonymous", "request_budget"),
+            ("accepted_names", "token_bearing", "request_budget"),
+        })
 
     async def test_unknown_channel_folds_without_new_keys(self):
         """④ — allowlist 밖 문자열은 key 를 늘리지 않고 unclassified + 진단."""
@@ -111,26 +128,26 @@ class TestRequestDenominatorIsExactlyOnce(SnapshotWiringTestCase):
 
 
 class TestDedupeAndBuildAxis(SnapshotWiringTestCase):
-    async def test_deduped_total_counts_after_dedupe_and_before_build(self):
-        """① — 중복 3회 요청 중 통과 2 + build 실패 topic 도 수요로 센다."""
+    async def test_fatal_topic_is_counted_before_build_and_stops_remaining_topics(self):
+        """fatal build도 수요로 센 뒤 1011로 끝내며, 남은 topic은 시작하지 않는다."""
         self._register(["fx:usd-krw", "usdt:krw"])
 
         def build(topic):
             if topic == "fx:usd-krw":
                 raise RuntimeError("build boom")
             return _payload(topic)
+        from app.topic_wire import InitialSnapshotFatalFailure
         with self._patch_build(build):
-            sent = await send_initial_snapshots(
-                self.ws, ["fx:usd-krw", "fx:usd-krw", "usdt:krw"])
-        self.assertEqual(sent, 1)  # ⑤ 반환값 불변 (build 실패 격리)
+            with self.assertRaises(InitialSnapshotFatalFailure):
+                await send_initial_snapshots(
+                    self.ws, ["fx:usd-krw", "fx:usd-krw", "usdt:krw"])
         snap = self._snap()
-        self.assertEqual(snap["snapshot_send"]["topics_deduped_total"], 2,
-                         "dedupe 앞에서 세면 3, build 뒤에서 세면 1 이 된다")
+        self.assertEqual(snap["snapshot_send"]["topics_deduped_total"], 1)
         # ⛔ multi-topic 요청 1건 = 요청 분모 1 — loop 안으로 옮기면 topic 수만큼 부푼다.
         self.assertEqual(snap["snapshot_send"]["calls_by_channel"]["unattributed"], 1)
         block = snap[slm.SNAPSHOT_BUILD]
         self.assertEqual(block["by_outcome"]["build_failed"], 1, "build 예외는 파생 기록")
-        self.assertEqual(block["by_outcome"]["built"], 1)
+        self.assertEqual(block["by_outcome"]["built"], 0)
         self.assertEqual(block["callers_awaiting"], 0)
 
     async def test_none_payload_is_a_domain_outcome_not_a_failure(self):
@@ -154,9 +171,12 @@ class TestDedupeAndBuildAxis(SnapshotWiringTestCase):
         def contract_boom(*args, **kwargs):
             raise slm.SubscribeLoadContractError("axis/handle mismatch")
 
+        from app.topic_wire import InitialSnapshotFatalFailure
+
         with patch.object(slm, "timed_call", new=contract_boom):
-            with self.assertRaises(slm.SubscribeLoadContractError):
+            with self.assertRaises(InitialSnapshotFatalFailure) as raised:
                 await send_initial_snapshots(self.ws, ["fx:usd-krw"])
+        self.assertIsInstance(raised.exception.__cause__, slm.SubscribeLoadContractError)
         snap = self._snap()
         block = snap[slm.SNAPSHOT_BUILD]
         self.assertEqual(block["by_outcome"]["build_failed"], 0)

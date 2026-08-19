@@ -41,7 +41,7 @@ Schema (version=1):
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from app.crud import (
     BANK_DISPLAY_ORDER,
@@ -193,7 +193,11 @@ def build_fx_tab_payload(
 
 
 def load_and_build_fx_topic_payload(
-    db: "Session", asset: str, bank_order: Iterable[str] = BANK_DISPLAY_ORDER
+    db: "Session",
+    asset: str,
+    bank_order: Iterable[str] = BANK_DISPLAY_ORDER,
+    *,
+    checkpoint: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """DB/Redis에서 FX 데이터 load 후 build_fx_tab_payload 호출 (PR Z-2e Step 3c).
 
@@ -220,16 +224,22 @@ def load_and_build_fx_topic_payload(
     # tuple로 고정해 advertised Iterable 계약을 안전하게 보장 (현 caller는 tuple/list라 무변화).
     bank_order = tuple(bank_order)
 
+    def check() -> None:
+        if checkpoint is not None:
+            checkpoint()
+
     # Banks Redis-first per-source fallback (lazy DB load)
     bank_rates: List[Dict[str, Any]] = []
     _db_banks_loaded: Optional[Dict[str, Dict[str, Any]]] = None
     for bank_source in bank_order:
+        check()
         redis_entry = get_latest_bank_rate_from_sync_job(bank_source, asset)
         if redis_entry is not None:
             bank_rates.append(redis_entry)
             continue
         # Redis miss/stale → DB fallback (lazy — 첫 miss 시 한 번)
         if _db_banks_loaded is None:
+            check()
             all_banks_db = select_latest_bank_rates_from_db(db, asset)
             _db_banks_loaded = {row["bank"]: row for row in all_banks_db}
         db_row = _db_banks_loaded.get(bank_source)
@@ -237,8 +247,10 @@ def load_and_build_fx_topic_payload(
             bank_rates.append(db_row)
 
     # Investing reference — Redis-first 단일 fallback
+    check()
     reference = get_latest_investing_rate_from_sync_job(asset)
     if reference is None:
+        check()
         reference = select_a_latest_investing_rate_from_db(db, asset)
 
     return build_fx_tab_payload(asset, bank_rates, reference, bank_order=bank_order)

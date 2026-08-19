@@ -1130,6 +1130,16 @@ async def websocket_endpoint(websocket: WebSocket):
         #    아래 `finally` 가 registry·manager 정리를 그대로 수행한다.
         #    ⛔ 여기서 다시 `receive_text()` 로 돌아가면 닫힌 소켓에 읽기를 시도해 ERROR 가 난다.
         logger.info("🔌 initial snapshot 중 연결 종료", extra={"topic": str(closed)})
+    except topic_wire.TopicRequestDeadlineExceeded as expired:
+        # dispatcher가 이미 1013으로 닫았다. 다음 receive를 시도하지 않고 과부하 제어 종료로 접는다.
+        logger.info("⏱️ initial snapshot deadline — 1013 종료", extra={"topic": str(expired)})
+    except topic_wire.InitialSnapshotTransientFailure as transient:
+        logger.info("⏱️ initial snapshot 일시 장애 — 1013 종료",
+                    extra={"topic": str(transient)})
+    except topic_wire.InitialSnapshotFatalFailure as fatal:
+        # traceback은 snapshot 경계에서 이미 ERROR로 남겼다. endpoint는 닫힌 소켓을 다시 읽지 않는다.
+        logger.info("initial snapshot fatal 오류 — 1011 종료 처리 완료",
+                    extra={"topic": str(fatal)})
     except topic_wire.SubscribeIdentityConflict as conflict:
         # ⚠️ **정상적인 정책 종료다 — ERROR 를 남기지 않는다.** 한 소켓에 다른 UID 가 나타나면
         #    rebind 하지 않고 1008 로 닫는다(dispatcher 가 이미 close 를 시도했다).
@@ -3143,8 +3153,12 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     """
     from app import config
     from app.topic_initial_snapshot import (
-        _build_snapshot_sync, resolve_snapshot_topic_access_sync,
-        build_snapshot_observed)
+        SnapshotDeadlineExceeded,
+        SnapshotRequestBudget,
+        build_snapshot_observed,
+        resolve_snapshot_topic_access_sync,
+        run_sync_with_request_budget,
+    )
 
     # 개인화 응답(비-entitled의 KRX 404 포함) — 오류까지 캐시 금지. 200만 no-store면 private
     # HTTP 캐시가 404를 휴리스틱 저장해 entitlement 부여 뒤에도 404가 남을 수 있다.
@@ -3154,6 +3168,7 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
         # 출시 전 dormant — supported_topics 비노출 (codex 019efe2d)
         return JSONResponse(status_code=404, content={"error": "topics_disabled"},
                             headers=no_store)
+    request_budget = SnapshotRequestBudget()
     user_id = await verify_firebase_token(request)          # 401 (부수효과 0 — 첫 실행문 계약)
     # INACTIVE 403 / PENDING 503. 반환값을 그대로 쓴다 — `premium_active=True` 하드코딩은
     # require_premium이 ACTIVE 외 상태를 raise한다는 전제에 묶여 상태가 늘면 fail-open이 된다.
@@ -3162,8 +3177,14 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     # 미지원 topic과 구분 불가해진다 (§3.2). 판정이 결과를 바꿀 수 없는 요청(비-게이팅 topic)은
     # entitlement를 조회하지 않는다 — FX/USDT bootstrap이 entitlement DB에 묶이지 않도록.
     try:
-        access = await asyncio.to_thread(
-            resolve_snapshot_topic_access_sync, topic, user_id, premium_active=premium_active)
+        access = await run_sync_with_request_budget(
+            resolve_snapshot_topic_access_sync,
+            topic,
+            user_id,
+            budget=request_budget,
+            premium_active=premium_active,
+            checkpoint=request_budget.checkpoint,
+        )
         if not access.allowed:
             return JSONResponse(status_code=404, headers=no_store, content={
                 "error": "unknown_topic",
@@ -3172,7 +3193,12 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
             })
         # ⛔ WS 와 **같은** 공유 래퍼를 쓴다 — snapshot_build 축은 두 진입점 합산이다
         #    (같은 default executor·I/O). 여기서 따로 to_thread 하면 축이 갈린다.
-        payload = await build_snapshot_observed(topic)
+        request_budget.start_snapshot_phase()
+        payload = await build_snapshot_observed(topic, budget=request_budget)
+    except SnapshotDeadlineExceeded:
+        # REST twin은 WS 1013 대신 retryable 503으로 접는다. terminal payload/Retry-After는 없다.
+        return JSONResponse(status_code=503, headers=no_store,
+                            content={"error": "temporarily_unavailable"})
     except TRANSIENT_DB_ERRORS as db_exc:
         # DB 순단 = 인프라 transient지 결함이 아니다 → 503(구 동작은 plain 500이라 클라 재시도
         # 분류에서 빠졌다). 판정·빌드를 **함께** 감싼다 — 한쪽만 감싸면 상태코드가 topic 종류에

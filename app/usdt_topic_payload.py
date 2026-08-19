@@ -52,7 +52,7 @@ Schema (version=1):
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from app.crud import (
     _bank_display_sort_key,
@@ -240,6 +240,8 @@ def build_tether_tab_payload(
 
 def load_and_build_tether_tab_payload(
     db: "Session",
+    *,
+    checkpoint: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """DB 통합 helper — 저장소별 dispatch 후 build_tether_tab_payload 호출.
 
@@ -277,10 +279,16 @@ def load_and_build_tether_tab_payload(
     # — Z-2d legacy_policy 우회 topic 전용 fetcher).
     # Stale 판정 X — USDT는 mirror cycle 미경유 (Z-2d allowlist), Redis 있으면
     # 시간 무관 사용. miss 처리만 DB fallback.
-    redis_usdt_results = [
-        get_latest_usdt_rate_from_sync_job(source, "usdt-krw")
-        for source in TETHER_TAB_EXCHANGE_SOURCES
-    ]
+    def check() -> None:
+        if checkpoint is not None:
+            checkpoint()
+
+    redis_usdt_results = []
+    for source in TETHER_TAB_EXCHANGE_SOURCES:
+        check()
+        redis_usdt_results.append(
+            get_latest_usdt_rate_from_sync_job(source, "usdt-krw")
+        )
     if all(r is not None for r in redis_usdt_results):
         # 모두 Redis hit — 그대로 사용 (topic-native shape)
         usdt_rates: List[Dict[str, Any]] = list(redis_usdt_results)  # type: ignore[arg-type]
@@ -289,6 +297,7 @@ def load_and_build_tether_tab_payload(
         # PR Z-2e B-Step Telemetry: fallback 호출 카운트 (ADR-029 trade-off 모니터링)
         from app import usdt_redis_stats
         usdt_redis_stats.record_db_fallback("usdt-krw")
+        check()
         usdt_rates = get_latest_source_rates_for_topic(
             db, asset="usdt-krw", sources=list(TETHER_TAB_EXCHANGE_SOURCES),
         )
@@ -300,12 +309,14 @@ def load_and_build_tether_tab_payload(
     bank_rates: List[Dict[str, Any]] = []
     _db_banks_loaded: Optional[Dict[str, Dict[str, Any]]] = None
     for bank_source in TETHER_TAB_BANK_SOURCES:
+        check()
         redis_entry = get_latest_bank_rate_from_sync_job(bank_source, "usd-krw")
         if redis_entry is not None:
             bank_rates.append(redis_entry)
             continue
         # Redis miss/stale → 해당 source만 DB fallback. lazy DB 조회 (필요 시 1회).
         if _db_banks_loaded is None:
+            check()
             all_banks_db = select_latest_bank_rates_from_db(db, "usd-krw")
             _db_banks_loaded = {row["bank"]: row for row in all_banks_db}
         db_row = _db_banks_loaded.get(bank_source)
@@ -313,8 +324,10 @@ def load_and_build_tether_tab_payload(
             bank_rates.append(db_row)
 
     # Investing reference — Redis-first read (단일 fallback)
+    check()
     investing_rate = get_latest_investing_rate_from_sync_job("usd-krw")
     if investing_rate is None:
+        check()
         investing_rate = select_a_latest_investing_rate_from_db(db, "usd-krw")
 
 

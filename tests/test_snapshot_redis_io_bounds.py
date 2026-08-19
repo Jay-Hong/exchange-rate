@@ -24,6 +24,16 @@ SNAPSHOT_REDIS_PATHS = (
 )
 
 
+def _unsafe_redis_imports(imported_modules: set[str]) -> set[str]:
+    """예외 타입 import는 허용하되 Redis client 직접 접근은 거부한다."""
+    return {
+        name
+        for name in imported_modules
+        if (name == "redis" or name.startswith("redis."))
+        and not (name == "redis.exceptions" or name.startswith("redis.exceptions."))
+    }
+
+
 class _StalledRespServer:
     """CLIENT SETINFO에는 답하고 GET 응답만 멈추는 최소 RESP 서버."""
 
@@ -149,7 +159,7 @@ class TestSnapshotRedisClientConfiguration(unittest.TestCase):
                     )
 
         self.assertFalse(
-            {name for name in imported_modules if name == "redis" or name.startswith("redis.")},
+            _unsafe_redis_imports(imported_modules),
             "snapshot 경로가 bounded sync client를 우회해 raw Redis client를 만들었다",
         )
         self.assertNotIn("app.cache", imported_modules, "snapshot 경로가 async redis_cache로 갈라졌다")
@@ -206,6 +216,16 @@ class TestBypassGuardCollectsBothImportForms(unittest.TestCase):
 
     def test_unrelated_app_import_is_not_flagged(self) -> None:
         self.assertNotIn("app.cache", self._modules("from app import crud, models\n"))
+
+    def test_exception_types_are_allowed_but_client_modules_are_not(self) -> None:
+        self.assertFalse(_unsafe_redis_imports({
+            "redis.exceptions",
+            "redis.exceptions.ConnectionError",
+            "redis.exceptions.TimeoutError",
+        }))
+        for module in ("redis", "redis.Redis", "redis.client", "redis.asyncio"):
+            with self.subTest(module=module):
+                self.assertEqual(_unsafe_redis_imports({module}), {module})
 
 
 class TestSnapshotRedisCancellation(unittest.IsolatedAsyncioTestCase):

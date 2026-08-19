@@ -1,6 +1,7 @@
 # app/config.py
 
 import enum
+import math
 import os
 from pathlib import Path
 from dotenv import load_dotenv
@@ -622,10 +623,43 @@ DEFAULT_EXECUTOR_PROBE_ENABLED = os.getenv("DEFAULT_EXECUTOR_PROBE_ENABLED", "fa
 DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS = float(os.getenv("DEFAULT_EXECUTOR_PROBE_INTERVAL_SECONDS", "5"))
 
 # ① wire deadline — **identity + gated 인가의 누적 상한**. **측정 없음**(= 2T).
-# ⚠️ 범위 주의: registry 변경과 ack 송신은 이 창 **밖**이다 — "이 시간 안에 ack"을 보장하지
-#    않는다. 그리고 단계마다 새로 시작하지 않는다(그러면 상한이 단계 수만큼 곱해진다) —
-#    dispatcher 가 요청 시작에 절대 시각을 잡아 두 단계가 **공유**한다.
+# ⚠️ 범위 주의: 이 값 자체는 인증 sub-budget이고 registry 변경·ack 송신은 밖이다. LOAD-S3의
+#    `WS_TOPIC_ACK_DEADLINE_SECONDS`가 그 바깥을 포함한 최종 ACK 상한을 별도로 강제한다.
+#    인증 단계마다 새로 시작하지 않는다(그러면 상한이 단계 수만큼 곱해진다) — dispatcher가
+#    요청 시작에 절대 시각을 잡아 두 단계가 **공유**한다.
 WS_AUTH_WIRE_DEADLINE_SECONDS = 10
+
+# ── LOAD-S3 — topic subscribe/snapshot 요청 전체 예산 ───────────────────────
+# ⚠️ 아래 값은 **활성화 승인값이 아니라 dormant 메커니즘 기본값**이다. S4 부하 리허설에서
+# queue/build/send p99와 클라이언트 deadline을 함께 측정한 뒤 운영값을 정한다.
+#
+# 세 예산은 한 요청의 `time.monotonic()` 시작점에서 파생한다.
+#   · ACK: 인증·인가·registry 변경·ack 송신까지의 누적 상한. iOS ACK watchdog(20s)보다 작다.
+#   · snapshot: ACK 뒤 전체 topic build+send에 추가로 허용하는 총예산(토픽별 리셋 금지).
+#   · request: ACK 전후를 모두 덮는 최종 absolute deadline.
+WS_TOPIC_ACK_DEADLINE_SECONDS = float(
+    os.getenv("WS_TOPIC_ACK_DEADLINE_SECONDS", "15")
+)
+WS_TOPIC_SNAPSHOT_BUDGET_SECONDS = float(
+    os.getenv("WS_TOPIC_SNAPSHOT_BUDGET_SECONDS", "8")
+)
+WS_TOPIC_REQUEST_DEADLINE_SECONDS = float(
+    os.getenv("WS_TOPIC_REQUEST_DEADLINE_SECONDS", "25")
+)
+
+for _name, _value in (
+    ("WS_TOPIC_ACK_DEADLINE_SECONDS", WS_TOPIC_ACK_DEADLINE_SECONDS),
+    ("WS_TOPIC_SNAPSHOT_BUDGET_SECONDS", WS_TOPIC_SNAPSHOT_BUDGET_SECONDS),
+    ("WS_TOPIC_REQUEST_DEADLINE_SECONDS", WS_TOPIC_REQUEST_DEADLINE_SECONDS),
+):
+    if not math.isfinite(_value) or _value <= 0:
+        raise ValueError(f"{_name} must be finite and > 0 (got {_value!r})")
+if WS_AUTH_WIRE_DEADLINE_SECONDS >= WS_TOPIC_ACK_DEADLINE_SECONDS:
+    raise ValueError("WS auth deadline must be less than the topic ACK deadline")
+if WS_TOPIC_ACK_DEADLINE_SECONDS >= WS_TOPIC_REQUEST_DEADLINE_SECONDS:
+    raise ValueError("WS topic ACK deadline must be less than the request deadline")
+if WS_TOPIC_SNAPSHOT_BUDGET_SECONDS > WS_TOPIC_REQUEST_DEADLINE_SECONDS:
+    raise ValueError("WS topic snapshot budget must not exceed the request deadline")
 
 # §8-C `temporarily_unavailable` 동반값 (일시 장애).
 WS_AUTH_RETRY_AFTER_SECONDS = 5

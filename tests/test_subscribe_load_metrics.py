@@ -100,12 +100,28 @@ class TestFieldContract(SubscribeLoadTestCase):
         repo = _pl.Path(__file__).resolve().parent.parent
         main_src = (repo / "app" / "main.py").read_text()
         snap_src = (repo / "app" / "topic_initial_snapshot.py").read_text()
-        self.assertEqual(main_src.count("await build_snapshot_observed(topic)"), 1,
+
+        def shared_calls(source):
+            return [
+                node for node in ast.walk(ast.parse(source))
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "build_snapshot_observed"
+            ]
+
+        rest_calls = shared_calls(main_src)
+        ws_calls = shared_calls(snap_src)
+        self.assertEqual(len(rest_calls), 1,
                          "REST twin 이 공유 래퍼를 정확히 한 번 불러야 한다")
+        self.assertEqual(len(ws_calls), 1,
+                         "WS 도 같은 래퍼를 정확히 한 번 불러야 한다(이중 계수 금지)")
+        for label, call in (("REST", rest_calls[0]), ("WS", ws_calls[0])):
+            self.assertEqual(
+                [kw.arg for kw in call.keywords], ["budget"],
+                f"{label} twin 이 공유 요청 예산을 snapshot 래퍼에 결속해야 한다",
+            )
         self.assertEqual(main_src.count("asyncio.to_thread(_build_snapshot_sync"), 0,
                          "REST twin 이 builder 를 직접 to_thread 하면 축이 갈린다")
-        self.assertEqual(snap_src.count("await build_snapshot_observed(topic)"), 1,
-                         "WS 도 같은 래퍼를 정확히 한 번 불러야 한다(이중 계수 금지)")
         # 래퍼는 to_thread 직전에 제출 시각을 찍어야 한다 — 그 순서가 queue_wait 의 정의다
         fn = next(n for n in ast.walk(ast.parse(snap_src))
                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "build_snapshot_observed")

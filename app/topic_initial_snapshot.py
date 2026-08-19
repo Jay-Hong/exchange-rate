@@ -19,7 +19,7 @@ topic 만 등록하고, 식별된 요청은 미지원 topic 을 `rejected_topics
 - subscribe handler는 WebSocket receive loop라 sync builder 직접 호출 시 모든 connection의
   event loop 반응성을 해침 → asyncio.to_thread로 offload (DB fallback 시 특히).
 - send 실패 = connection 실패 → registry 정리 + 남은 snapshot 중단 (publish_topic 패턴,
-  codex blocker 2). build 실패 = topic별 격리(다음 topic 계속).
+  codex blocker 2). ACK 후 build 실패는 transient=1013 / fatal=1011로 연결을 종결한다.
 - 빈 payload도 전송(builders는 빈 list/optional omission으로도 schema-valid snapshot 생성 —
   "빈 화면 방지" 목적상 skip 금지).
 - enable gate: fx는 FX_TOPIC_ENABLED(publisher와 일관) + TOPIC_DISPATCHER_ENABLED(caller가 이미
@@ -36,13 +36,21 @@ timestamp-merge 계약(구값으로 신값 덮지 않기, V2 client guide 항목
 """
 import asyncio
 import logging
+import math
+import threading
+import time
 
 from app import subscribe_load_metrics as subscribe_load
 
 from starlette.websockets import WebSocketDisconnect
 
-from app.topic_wire import InitialSnapshotConnectionClosed
-from typing import Any, Dict, List, NamedTuple, Optional, TYPE_CHECKING
+from app.topic_wire import (
+    InitialSnapshotConnectionClosed,
+    InitialSnapshotDeadlineExceeded,
+    InitialSnapshotFatalFailure,
+    InitialSnapshotTransientFailure,
+)
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, TYPE_CHECKING
 
 from app import config
 
@@ -50,6 +58,194 @@ if TYPE_CHECKING:
     from fastapi import WebSocket
 
 logger = logging.getLogger("exchange_rate.topic_initial_snapshot")
+
+
+def _is_transient_snapshot_error(exc: BaseException) -> bool:
+    from app.db_errors import TRANSIENT_DB_ERRORS, is_transient_db_error
+
+    if isinstance(exc, TRANSIENT_DB_ERRORS):
+        return is_transient_db_error(exc)
+    try:
+        from redis.exceptions import ConnectionError as RedisConnectionError
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+    except ImportError:
+        return False
+    return isinstance(exc, (RedisConnectionError, RedisTimeoutError))
+
+
+async def _close_snapshot_connection(websocket: "WebSocket", *, code: int) -> None:
+    from app.topic_dispatcher import registry
+
+    registry.remove_websocket(websocket)
+    try:
+        async with asyncio.timeout(1.0):
+            await websocket.close(code=code)
+    except Exception:
+        logger.debug("snapshot close 실패", extra={"code": code}, exc_info=True)
+
+
+class SnapshotDeadlineExceeded(TimeoutError):
+    """topic snapshot 요청의 absolute deadline이 끝났다."""
+
+
+class SnapshotWorkerStopped(RuntimeError):
+    """caller 취소/deadline을 worker checkpoint에서 관측한 협력 중단 신호."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
+class SnapshotRequestBudget:
+    """ACK와 snapshot worker가 공유하는 단일 monotonic 요청 예산.
+
+    `asyncio.to_thread` 취소는 실행 중인 함수를 멈추지 않는다. caller는 deadline에 맞춰
+    반환하되, worker는 각 Redis/DB 호출 사이에 `checkpoint()`를 호출해 다음 I/O를 시작하지
+    않는다. 실행 중인 I/O 자체의 종료는 LOAD-S2 DB/Redis timeout이 맡는다.
+    """
+
+    def __init__(
+        self,
+        *,
+        started_at_mono: Optional[float] = None,
+        ack_deadline_seconds: Optional[float] = None,
+        snapshot_budget_seconds: Optional[float] = None,
+        request_deadline_seconds: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._clock = clock
+        self.started_at_mono = clock() if started_at_mono is None else started_at_mono
+        self.ack_deadline_at_mono = self.started_at_mono + (
+            config.WS_TOPIC_ACK_DEADLINE_SECONDS
+            if ack_deadline_seconds is None else ack_deadline_seconds
+        )
+        self.request_deadline_at_mono = self.started_at_mono + (
+            config.WS_TOPIC_REQUEST_DEADLINE_SECONDS
+            if request_deadline_seconds is None else request_deadline_seconds
+        )
+        self.snapshot_budget_seconds = (
+            config.WS_TOPIC_SNAPSHOT_BUDGET_SECONDS
+            if snapshot_budget_seconds is None else snapshot_budget_seconds
+        )
+        ack_seconds = self.ack_deadline_at_mono - self.started_at_mono
+        request_seconds = self.request_deadline_at_mono - self.started_at_mono
+        for name, value in (
+            ("ack_deadline_seconds", ack_seconds),
+            ("snapshot_budget_seconds", self.snapshot_budget_seconds),
+            ("request_deadline_seconds", request_seconds),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and > 0 (got {value!r})")
+        if ack_seconds >= request_seconds:
+            raise ValueError("ACK deadline must be less than request deadline")
+        if self.snapshot_budget_seconds > request_seconds:
+            raise ValueError("snapshot budget must not exceed request deadline")
+        self.snapshot_deadline_at_mono: Optional[float] = None
+        self._stop = threading.Event()
+        self._stop_reason: Optional[str] = None
+
+    def start_snapshot_phase(self) -> float:
+        """ACK 뒤 snapshot 총예산을 한 번만 시작한다(토픽별 리셋 금지)."""
+        if self.snapshot_deadline_at_mono is None:
+            self.snapshot_deadline_at_mono = min(
+                self.request_deadline_at_mono,
+                self._clock() + self.snapshot_budget_seconds,
+            )
+        return self.snapshot_deadline_at_mono
+
+    def remaining_until(self, deadline_at_mono: float) -> float:
+        return max(0.0, deadline_at_mono - self._clock())
+
+    def remaining_snapshot_seconds(self) -> float:
+        return self.remaining_until(self.start_snapshot_phase())
+
+    def stop(self, reason: str) -> None:
+        if not self._stop.is_set():
+            self._stop_reason = reason
+            self._stop.set()
+
+    @property
+    def stop_reason(self) -> Optional[str]:
+        return self._stop_reason
+
+    def checkpoint(self) -> None:
+        """새 Redis/DB phase 진입 직전에 호출하는 worker 협력 중단점."""
+        if self._stop.is_set():
+            raise SnapshotWorkerStopped(self._stop_reason or "caller_stopped")
+        deadline = self.snapshot_deadline_at_mono or self.request_deadline_at_mono
+        if self._clock() >= deadline:
+            self.stop("deadline")
+            raise SnapshotWorkerStopped("deadline")
+
+
+_snapshot_worker_state = threading.local()
+
+
+def _worker_checkpoint() -> None:
+    budget = getattr(_snapshot_worker_state, "budget", None)
+    if budget is not None:
+        budget.checkpoint()
+
+
+def _active_worker_checkpoint() -> Optional[Callable[[], None]]:
+    if getattr(_snapshot_worker_state, "budget", None) is None:
+        return None
+    return _worker_checkpoint
+
+
+def _run_snapshot_worker(
+    topic: str, budget: SnapshotRequestBudget
+) -> Optional[Dict[str, Any]]:
+    """default executor 안에서 budget을 thread-local로 결속한 뒤 기존 builder를 호출한다."""
+    budget.checkpoint()  # queue에서 이미 만료됐으면 SessionLocal조차 열지 않는다.
+    _snapshot_worker_state.budget = budget
+    try:
+        return _build_snapshot_sync(topic)
+    finally:
+        _snapshot_worker_state.budget = None
+
+
+def _run_budgeted_sync_call(
+    function: Callable[..., Any],
+    args: tuple,
+    kwargs: Dict[str, Any],
+    budget: SnapshotRequestBudget,
+) -> Any:
+    budget.checkpoint()
+    return function(*args, **kwargs)
+
+
+async def run_sync_with_request_budget(
+    function: Callable[..., Any],
+    *args: Any,
+    budget: SnapshotRequestBudget,
+    **kwargs: Any,
+) -> Any:
+    """REST preflight 같은 sync phase를 요청 absolute deadline 안에서 실행한다."""
+    remaining = budget.remaining_until(budget.request_deadline_at_mono)
+    if remaining <= 0:
+        budget.stop("deadline")
+        raise SnapshotDeadlineExceeded(getattr(function, "__name__", "sync_phase"))
+    deadline_cm = asyncio.timeout(remaining)
+    try:
+        async with deadline_cm:
+            return await asyncio.to_thread(
+                _run_budgeted_sync_call, function, args, kwargs, budget
+            )
+    except asyncio.CancelledError:
+        budget.stop("caller_cancelled")
+        raise
+    except asyncio.TimeoutError as exc:
+        if not deadline_cm.expired():
+            raise
+        budget.stop("deadline")
+        raise SnapshotDeadlineExceeded(
+            getattr(function, "__name__", "sync_phase")
+        ) from exc
+    except SnapshotWorkerStopped as exc:
+        raise SnapshotDeadlineExceeded(
+            getattr(function, "__name__", "sync_phase")
+        ) from exc
 
 
 def supported_snapshot_topics() -> tuple:
@@ -132,7 +328,11 @@ def _assert_snapshot_entitlement_policy_supported() -> None:
 
 
 def resolve_snapshot_topic_access_sync(
-    topic: str, user_id: str, *, premium_active: bool
+    topic: str,
+    user_id: str,
+    *,
+    premium_active: bool,
+    checkpoint: Optional[Callable[[], None]] = None,
 ) -> SnapshotTopicAccess:
     """topic 접근 판정 — `asyncio.to_thread` 전용 (ADR-039 §8.1 E3).
 
@@ -155,19 +355,29 @@ def resolve_snapshot_topic_access_sync(
     소관이고 이 값은 `compute_krx_visible`에 그대로 전달될 뿐이다. shortcut이 이 값을 보지 않는 건
     비-KRX topic의 판정이 premium과 무관하기 때문이다(어느 값이든 결과 동일).
     """
+    if checkpoint is not None:
+        checkpoint()
     _assert_snapshot_entitlement_policy_supported()
 
     global_topics = supported_snapshot_topics()
     if topic in global_topics and topic not in per_user_gated_snapshot_topics():
         return SnapshotTopicAccess(True, None)
 
-    visible = visible_snapshot_topics_sync(user_id, premium_active=premium_active)
+    visible_kwargs = {"checkpoint": checkpoint} if checkpoint is not None else {}
+    visible = visible_snapshot_topics_sync(
+        user_id, premium_active=premium_active, **visible_kwargs
+    )
     if topic in visible:
         return SnapshotTopicAccess(True, None)
     return SnapshotTopicAccess(False, visible)
 
 
-def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple:
+def visible_snapshot_topics_sync(
+    user_id: str,
+    *,
+    premium_active: bool,
+    checkpoint: Optional[Callable[[], None]] = None,
+) -> tuple:
     """**per-user** 노출 topic 목록 = 전역 지원 집합 ∧ KRX 가시성 — `asyncio.to_thread` 전용
     (ADR-039 §8.1 E3).
 
@@ -190,6 +400,8 @@ def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple
     전역 게이트가 닫혀 있으면 세션을 **아예 열지 않는다** — 결과가 같은데 장애 표면만 늘기 때문.
     반대로 열려 있으면 반드시 조회한다(fail-closed: 조회 실패는 예외로 전파 → 5xx, 조용한 False 아님).
     """
+    if checkpoint is not None:
+        checkpoint()
     _assert_snapshot_entitlement_policy_supported()
 
     from app import entitlements
@@ -200,10 +412,20 @@ def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple
         return topics
 
     from app.database import SessionLocal
+    if checkpoint is not None:
+        checkpoint()
     db = SessionLocal()
     try:
+        if checkpoint is not None:
+            checkpoint()
         visible = entitlements.compute_krx_visible(
             db, user_id, premium_active=premium_active)
+    except BaseException:
+        try:
+            db.rollback()
+        except Exception:
+            logger.warning("snapshot entitlement session rollback 실패", exc_info=True)
+        raise
     finally:
         db.close()
     if visible:
@@ -211,7 +433,9 @@ def visible_snapshot_topics_sync(user_id: str, *, premium_active: bool) -> tuple
     return tuple(t for t in topics if t != KRX_TOPIC)
 
 
-async def build_snapshot_observed(topic: str) -> Optional[Dict[str, Any]]:
+async def build_snapshot_observed(
+    topic: str, *, budget: Optional[SnapshotRequestBudget] = None
+) -> Optional[Dict[str, Any]]:
     """WS subscribe 와 REST twin 이 **공유하는** snapshot build 관측 경로.
 
     ⛔ 두 진입점이 각자 배선하면 축이 갈린다 — 같은 default executor 와 같은 I/O 를 쓰므로
@@ -219,19 +443,51 @@ async def build_snapshot_observed(topic: str) -> Optional[Dict[str, Any]]:
     ⛔ 계측은 `_build_snapshot_sync` **본문이 아니라** 이 async 래퍼에 둔다. queue_wait 은
        (worker 시작 − caller 제출)이라 caller 쪽 시각이 있어야 하고, 본문은 worker 시작
        이후만 볼 수 있다. 본문 무계측은 별도 trip-wire 가 잠근다.
-    ⛔ 예외를 삼키지 않는다 — 격리 정책은 호출부가 소유한다(WS 는 topic 단위 continue,
-       REST twin 은 TRANSIENT_DB_ERRORS → 503). 여기서 잡으면 두 계약이 뭉개진다.
+    ⛔ 예외를 삼키지 않는다 — 종결 정책은 호출부가 소유한다(WS 는 transient/deadline 1013,
+       fatal 1011; REST twin 은 retryable deadline/DB 장애를 503으로 변환). 여기서 잡으면 두
+       계약이 뭉개진다.
     """
-    async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
-        # ⛔ **to_thread 직전에** 찍는다. CM 진입 시점에 찍으면 그 사이 caller 작업이
-        #    큐 대기로 잘못 계상된다.
-        load.mark_submitted()
-        payload = await asyncio.to_thread(
-            subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
-            _build_snapshot_sync, topic,
-        )
-        load.finish("none_payload" if payload is None else "built")
-        return payload
+    request_budget = budget or SnapshotRequestBudget()
+    remaining = request_budget.remaining_snapshot_seconds()
+    if remaining <= 0:
+        request_budget.stop("deadline")
+        raise SnapshotDeadlineExceeded(topic)
+
+    deadline_cm = None
+    try:
+        async with subscribe_load.observe(subscribe_load.SNAPSHOT_BUILD) as load:
+            # ⛔ **to_thread 직전에** 찍는다. CM 진입 시점에 찍으면 그 사이 caller 작업이
+            #    큐 대기로 잘못 계상된다.
+            load.mark_submitted()
+            deadline_cm = asyncio.timeout(remaining)
+            try:
+                async with deadline_cm:
+                    payload = await asyncio.to_thread(
+                        subscribe_load.timed_call, subscribe_load.SNAPSHOT_BUILD, load,
+                        _run_snapshot_worker, topic, request_budget,
+                    )
+            except asyncio.CancelledError:
+                # 계측 context를 정리하기 **전에** worker에 알린다. 반대 순서면 현재 I/O가
+                # 그 짧은 창에서 끝나 다음 phase checkpoint를 통과할 수 있다.
+                request_budget.stop("caller_cancelled")
+                raise
+            except asyncio.TimeoutError as exc:
+                if not deadline_cm.expired():
+                    raise
+                request_budget.stop("deadline")
+                raise SnapshotDeadlineExceeded(topic) from exc
+            load.finish("none_payload" if payload is None else "built")
+            return payload
+    except asyncio.CancelledError:
+        # caller task 취소와 worker 중단은 별개다. worker가 다음 I/O를 시작하지 않도록 신호만
+        # 보내고, Session/connection은 worker 자신이 rollback/close한다.
+        request_budget.stop("caller_cancelled")
+        raise
+    except asyncio.TimeoutError:
+        # worker/socket이 스스로 던진 TimeoutError는 deadline으로 오분류하지 않는다.
+        raise
+    except SnapshotWorkerStopped as exc:
+        raise SnapshotDeadlineExceeded(topic) from exc
 
 
 def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
@@ -244,6 +500,8 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
         payload dict (publisher와 동일하게 ``topic`` 필드 inject) — 빈 데이터도 schema-valid면 반환.
         None — 미지원 topic(매핑 없음) 또는 enable-gate off.
     """
+    _worker_checkpoint()
+
     # 토픽 이름 single source: publisher 상수 재사용(하드코딩 "fx:"/"usdt:krw" 회피). lazy import로
     # dispatcher import 그래프 경량 유지(첫 subscribe 시에만 builder 체인 로드).
     from app.fx_topic_publisher import FX_TOPICS  # {asset: "fx:{asset}"}
@@ -263,10 +521,21 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
             load_and_build_fx_topic_payload,
         )
 
+        _worker_checkpoint()
         db = SessionLocal()
         try:
             # public fx:* snapshot도 Citi 제외 8-bank (publish 경로와 동일). atomic/legacy는 기본 9.
-            payload = load_and_build_fx_topic_payload(db, asset, bank_order=FX_TOPIC_BANK_ORDER)
+            checkpoint = _active_worker_checkpoint()
+            kwargs = {"checkpoint": checkpoint} if checkpoint is not None else {}
+            payload = load_and_build_fx_topic_payload(
+                db, asset, bank_order=FX_TOPIC_BANK_ORDER, **kwargs
+            )
+        except BaseException:
+            try:
+                db.rollback()
+            except Exception:
+                logger.warning("FX snapshot session rollback 실패", exc_info=True)
+            raise
         finally:
             db.close()
         payload["topic"] = topic
@@ -276,10 +545,19 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
         from app.database import SessionLocal
         from app.usdt_topic_payload import load_and_build_tether_tab_payload
 
+        _worker_checkpoint()
         db = SessionLocal()
         try:
             # ADR-038 Decision 2 — usd_krw_futures group 제거: KRX는 독립 topic 전용
-            payload = load_and_build_tether_tab_payload(db)
+            checkpoint = _active_worker_checkpoint()
+            kwargs = {"checkpoint": checkpoint} if checkpoint is not None else {}
+            payload = load_and_build_tether_tab_payload(db, **kwargs)
+        except BaseException:
+            try:
+                db.rollback()
+            except Exception:
+                logger.warning("USDT snapshot session rollback 실패", exc_info=True)
+            raise
         finally:
             db.close()
         payload["topic"] = topic
@@ -291,9 +569,18 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
         if not config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE:
             return None
         from app.database import SessionLocal
+        _worker_checkpoint()
         db = SessionLocal()
         try:
-            entry = load_krx_topic_entry(db)   # Redis-first + DB fallback
+            checkpoint = _active_worker_checkpoint()
+            kwargs = {"checkpoint": checkpoint} if checkpoint is not None else {}
+            entry = load_krx_topic_entry(db, **kwargs)  # Redis-first + DB fallback
+        except BaseException:
+            try:
+                db.rollback()
+            except Exception:
+                logger.warning("KRX snapshot session rollback 실패", exc_info=True)
+            raise
         finally:
             db.close()
         if entry is None:
@@ -304,7 +591,11 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
 
 
 async def send_initial_snapshots(
-    websocket: "WebSocket", topics: List[str], *, channel: str = "unattributed"
+    websocket: "WebSocket",
+    topics: List[str],
+    *,
+    channel: str = "unattributed",
+    budget: Optional[SnapshotRequestBudget] = None,
 ) -> int:
     """subscribe 직후 요청 topic들의 현재 snapshot을 이 ws에 즉시 전송.
 
@@ -315,8 +606,9 @@ async def send_initial_snapshots(
     handle_client_message subscribe 분기에서 registry.register 직후 호출 — 이 시점은
     TOPIC_DISPATCHER_ENABLED를 이미 통과한 상태.
 
-    격리 정책 (codex 019efdb3):
-    - build 실패(to_thread 예외) → 해당 topic만 skip, 다음 topic 계속.
+    종결 정책 (R-HAND-2 / LOAD-S3):
+    - build deadline·transient 실패 → terminal payload 없이 close 1013.
+    - 프로그래밍·직렬화 fatal 실패 → terminal payload 없이 close 1011.
     - send 실패 = connection 실패 → registry에서 ws 제거 + 남은 snapshot 중단(반환).
       (publish_topic의 stale-entry 정리 패턴과 일관.)
     - 요청 내 중복 topic은 de-dupe(같은 subscribe에서 같은 topic 1회만). 재구독(별 요청)은
@@ -336,6 +628,8 @@ async def send_initial_snapshots(
     #    바뀌는 순간 부분 초기화 오류가 된다.
     from app.topic_dispatcher import leased_subscribers
 
+    request_budget = budget or SnapshotRequestBudget()
+    request_budget.start_snapshot_phase()
     subscribe_load.record_snapshot_call(channel)
     sent = 0
     seen: set = set()
@@ -348,29 +642,37 @@ async def send_initial_snapshots(
         subscribe_load.record_snapshot_topic()
 
         try:
-            # ⛔ 관측 CM 은 기존 except **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
-            #    `build_failed` 로 파생 기록된 뒤 기존 격리(continue)로 잡힌다.
+            # ⛔ 관측 CM 은 종결 분류 **안**이다 — build 예외는 `__aexit__` 를 먼저 통과해
+            #    `build_failed` 로 파생 기록된 뒤 1013/1011 경계에서 분류된다.
             #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
-            payload = await build_snapshot_observed(topic)
-        except subscribe_load.SubscribeLoadContractError:
-            # 계측 배선 오류를 snapshot build 실패로 격리하면 wiring bug가 조용히 살아남고
-            # build_failed도 오염된다. 계약 오류만 fail-fast, 실제 builder 오류는 아래서 격리한다.
-            raise
-        except Exception:
-            logger.warning(
-                "initial snapshot build 실패 (격리)",
+            payload = await build_snapshot_observed(topic, budget=request_budget)
+        except SnapshotDeadlineExceeded as exc:
+            await _close_snapshot_connection(websocket, code=1013)
+            raise InitialSnapshotDeadlineExceeded(topic) from exc
+        except Exception as exc:
+            if _is_transient_snapshot_error(exc):
+                logger.warning(
+                    "initial snapshot 일시 장애 — 1013 종료",
+                    extra={"topic": topic},
+                    exc_info=True,
+                )
+                await _close_snapshot_connection(websocket, code=1013)
+                raise InitialSnapshotTransientFailure(topic) from exc
+            logger.error(
+                "initial snapshot fatal build 오류 — 1011 종료",
                 extra={"topic": topic},
                 exc_info=True,
             )
-            continue
+            await _close_snapshot_connection(websocket, code=1011)
+            raise InitialSnapshotFatalFailure(topic) from exc
 
         if payload is None:
             continue  # 미지원 topic / enable-gate off
 
         # ⛔ **build 뒤, send 직전**에 본다. 위험한 창이 그 구간이기 때문이다 —
-        #    `_build_snapshot_sync` 는 `to_thread` 로 돌고 **인증 wire deadline 밖**이라
-        #    상한이 없다. 발급 시점 검사만으로는 S5 의 15분 revoke 상한이 이 경로에서
-        #    보증이 되지 않는다(발행 경로는 전송 직전에 다시 보는데 여기만 안 봤다).
+        #    `_build_snapshot_sync` 는 `to_thread` 로 돌고 인증 wire deadline 밖이다. LOAD-S3가
+        #    snapshot 총예산을 두더라도 build 사이에 lease가 만료될 수 있으므로 발급 시점 검사만으론
+        #    S5의 15분 revoke 상한이 보증되지 않는다(발행 경로처럼 전송 직전에 다시 본다).
         # ⛔ `registry.get_lease(...) is None` 으로 자체 판정하지 말 것 — 그 `None` 은
         #    **"무토큰(§E1) 구독"과 "등록이 사라짐"을 구분하지 못한다**. 그렇게 짜면 방금
         #    취소된 구독에 데이터를 보내는 fail-open 이 된다. `leased_subscribers` 는
@@ -388,9 +690,27 @@ async def send_initial_snapshots(
             continue
 
         try:
-            await websocket.send_json(payload)
+            remaining = request_budget.remaining_snapshot_seconds()
+            if remaining <= 0:
+                request_budget.stop("deadline")
+                raise SnapshotDeadlineExceeded(topic)
+            send_cm = asyncio.timeout(remaining)
+            try:
+                async with send_cm:
+                    await websocket.send_json(payload)
+            except asyncio.TimeoutError as exc:
+                if not send_cm.expired():
+                    raise
+                request_budget.stop("deadline")
+                raise SnapshotDeadlineExceeded(topic) from exc
             sent += 1
             subscribe_load.record_snapshot_send("sent")
+        except asyncio.CancelledError:
+            request_budget.stop("caller_cancelled")
+            raise
+        except SnapshotDeadlineExceeded:
+            await _close_snapshot_connection(websocket, code=1013)
+            raise InitialSnapshotDeadlineExceeded(topic)
         except WebSocketDisconnect as exc:
             # ⛔ **삼키고 반환하지 않는다.** 여기서 정상 반환하면 endpoint 의 `while True` 가
             #    **닫힌 소켓에 `receive_text()` 를 다시 호출**해 `RuntimeError` → `except
