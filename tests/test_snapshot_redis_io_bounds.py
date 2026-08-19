@@ -139,6 +139,14 @@ class TestSnapshotRedisClientConfiguration(unittest.TestCase):
                     imported_modules.update(alias.name for alias in node.names)
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     imported_modules.add(node.module)
+                    # ⛔ `from app import cache` 는 node.module 이 "app" 뿐이라 위 한 줄만으로는
+                    #    "app.cache" 를 절대 만들지 않는다 — 가드가 그 형태를 통째로 놓쳤다
+                    #    (변이 실측: 그 import 를 주입해도 green). alias 를 붙여 dotted 이름을
+                    #    함께 기록한다. 이 리포는 `from app import latest_rates_cache, ...` 형태를
+                    #    실제로 쓰므로 가정 가능한 형태다.
+                    imported_modules.update(
+                        f"{node.module}.{alias.name}" for alias in node.names
+                    )
 
         self.assertFalse(
             {name for name in imported_modules if name == "redis" or name.startswith("redis.")},
@@ -167,6 +175,37 @@ class TestSnapshotRedisClientConfiguration(unittest.TestCase):
                 expected <= called_by_file[filename],
                 f"snapshot Redis 호출 그래프가 갈렸다: {filename} missing={expected - called_by_file[filename]}",
             )
+
+
+class TestBypassGuardCollectsBothImportForms(unittest.TestCase):
+    """가드가 **두 import 형태를 모두** 기록하는지 잠근다.
+
+    `from app.cache import redis_cache` 만 잡고 `from app import cache` 를 놓치면,
+    가드는 통과하는데 우회는 실재한다 — 이 세션에서 변이로 실측된 구멍이다.
+    """
+
+    @staticmethod
+    def _modules(source: str) -> set[str]:
+        found: set[str] = set()
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node, ast.Import):
+                found.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                found.add(node.module)
+                found.update(f"{node.module}.{alias.name}" for alias in node.names)
+        return found
+
+    def test_both_forms_yield_the_dotted_module_name(self) -> None:
+        for label, source in (
+            ("from app.cache import", "from app.cache import redis_cache\n"),
+            ("from app import", "from app import cache\n"),
+            ("import app.cache", "import app.cache\n"),
+        ):
+            with self.subTest(form=label):
+                self.assertIn("app.cache", self._modules(source))
+
+    def test_unrelated_app_import_is_not_flagged(self) -> None:
+        self.assertNotIn("app.cache", self._modules("from app import crud, models\n"))
 
 
 class TestSnapshotRedisCancellation(unittest.IsolatedAsyncioTestCase):
