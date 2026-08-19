@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4fee0470afdbdc23e82ea70a0cb330cbec9bb552`
+- server 기준 commit: `c28dd22ac825953094654190a5447c156469eef0`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0`
-- baseline SHA: `86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c`
+- manifest SHA: `ca85f8a6409f5aa197c158bbdd6bccb29e97b1148c8c615fb342c04b51d7ce1f`
+- baseline SHA: `c2fe85b7f53d42a763be1b02caf2521e3f085cb9ab9629afbb2e7ddc6857cbbe`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -246,7 +246,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 | `request_too_large` | 위 1009 행 참조 | — | — | 실제 운영 경로는 **frame 이 아니라 close** |
 
 ⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의
-`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3239-3246`)
+`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3265-3272`)
 클라는 셋을 구별할 수 없다.
 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.
 
@@ -275,7 +275,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는
 **두 경우를 모두** 다뤄야 한다
 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330`
-(stage 별 partition) · `app/topic_dispatcher.py:769-809`(per-topic 거부 코드).
+(stage 별 partition) · `app/topic_dispatcher.py:829-870`(per-topic 거부 코드).
 상태 서술은 `DECISIONS.md` ADR-041
 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11).
 전이표는 Stage A 완료를 전제로 한다.
@@ -388,7 +388,7 @@ access 는 *받을 자격/가능성이 있는가* 다.
 ### R-CLI-9 — 사유는 tagged enum 두 개로 저장한다
 
 ⛔ **사유를 _문자열만_ 저장하면 정보가 사라진다.** `temporarily_unavailable` 은 `retry_after_seconds`
-를 함께 싣는데([R-CLI-6](#r-cli-6) · `app/topic_wire.py:51` · `app/topic_wire.py:185-207`),
+를 함께 싣는데([R-CLI-6](#r-cli-6) · `app/topic_wire.py:51` · `app/topic_wire.py:205-227`),
 문자열만 남기면 `serverDelay(seconds)` 를 **재구성할 수 없다**.
 
 ⛔ **그렇다고 optional 필드 구조체(`rejection(reason, retryAfter)`)도 안 된다** — `invalid_token` +
@@ -430,7 +430,7 @@ enum TopicRejection {
 **이 축 하나를 공유**해 판정이 갈리지 않게 한다.
 
 ⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) ·
-`app/main.py:3239-3246`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
+`app/main.py:3265-3272`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
 표의 두 행이 구현된다.
 
 ⛔ **`unknown_topic` 에서 `desired` 를 지우면 안 된다.** 버전 스큐나 순차 배포가 끝나도 **자동 복구할

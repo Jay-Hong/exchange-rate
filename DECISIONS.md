@@ -4034,7 +4034,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:2502](app/main.py#L2502))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:2512](app/main.py#L2512))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -6528,11 +6528,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4fee0470afdbdc23e82ea70a0cb330cbec9bb552`
+- server 기준 commit: `c28dd22ac825953094654190a5447c156469eef0`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0`
-- baseline SHA: `86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c`
+- manifest SHA: `ca85f8a6409f5aa197c158bbdd6bccb29e97b1148c8c615fb342c04b51d7ce1f`
+- baseline SHA: `c2fe85b7f53d42a763be1b02caf2521e3f085cb9ab9629afbb2e7ddc6857cbbe`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6591,7 +6591,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1201-1251` · `app/main.py:1065-1109`).
+(`app/main.py:1211-1261` · `app/main.py:1065-1109`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6617,10 +6617,10 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 ### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 활성화 미확인**
 
 **(a)** `0cfe474`에서 WS FX/USDT premium 강제 경로가 추가됐다
-(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:691-833`). 적용 여부는
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:747-903`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
-코드 기본값은 `compatibility` 다(`app/config.py:709-711`). production 의 실제 값은 아래 표가
+코드 기본값은 `compatibility` 다(`app/config.py:743-745`). production 의 실제 값은 아래 표가
 아니라 운영 직접 측정으로 확정한다.
 
 | stage | 익명 FX | 익명 USDT | 식별 FX/USDT | 식별 KRX |
@@ -6634,13 +6634,13 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe
 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
-근거: `app/config.py:668-711`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
+근거: `app/config.py:702-745`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
-구현 근거: `app/config.py:668-711`(stage) · `app/topic_policy.py:87-93`(정책표) ·
+구현 근거: `app/config.py:702-745`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
-`app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:691-833`(배선·등록) ·
-`app/main.py:3157-3160`(REST twin).
+`app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:747-903`(배선·등록) ·
+`app/main.py:3172-3175`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
@@ -6712,7 +6712,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
   코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다.
   그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2).
   근거: baseline B3 · B3-op · `app/latest_rates_cache.py:787-793` ·
-  `app/latest_rates_cache.py:662-667` · `app/config.py:390`.
+  `app/latest_rates_cache.py:662-667` · `app/config.py:392`.
 <!-- /evidence: E-B-2 -->
 
 <!-- evidence: E-B-3 supports=R-DEC-1 -->

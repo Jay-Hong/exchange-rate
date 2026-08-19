@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1255` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1265` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
 
 ## B. publish 의미론
 
@@ -54,9 +54,9 @@
 
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
-  stage 정의·엄격 파서·코드 기본값 `app/config.py:668-711` · **정책 정본**
+  stage 정의·엄격 파서·코드 기본값 `app/config.py:702-745` · **정책 정본**
   `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
-  `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:556-578` ·
+  `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:597-625` ·
   production 주입 `app/main.py:313-321`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
   모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
@@ -64,20 +64,20 @@
   - `compatibility` — 무료 topic 등록 + snapshot, ack 없음(구 동작 보존).
   - `reject_anonymous_fx` — 무료 집합에서 **canonical FX 만** 조용히 제외. USDT 는 유지되고
     FX-only 요청은 등록·응답 모두 0이다. 익명 unsubscribe 는 stage 와 무관하게 기존 경로를
-    그대로 탄다(`app/topic_dispatcher.py:834-860`).
+    그대로 탄다(`app/topic_dispatcher.py:905-930`).
   - `enforce_authenticated_premium` — 익명 subscribe topic 을 전부 조용히 제외. unsubscribe 는 유지.
   ⚠️ 세 stage 모두 **익명 subscribe 시도**와 형식 검증을 통과한 **미검증 token-bearing 후보**를
      서로 다른 축으로 계측한다. 두 계측은 `TOPIC_DISPATCHER_ENABLED` 검사보다 앞이라
-     (`app/topic_dispatcher.py:510-526`) flag-off 운영 상태에서도 값이 쌓인다. token-bearing 축은
+     (`app/topic_dispatcher.py:547-563`) flag-off 운영 상태에서도 값이 쌓인다. token-bearing 축은
      Firebase 검증 전 관측이라 인증 사용자나 실제 RevenueCat 호출 수가 아니다
      (`app/topic_auth_rollout.py:254-296` · snapshot `app/topic_auth_rollout.py:339-400`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
      (`app/main.py:303-321`).
-- **C2 [코드]** `app/topic_initial_snapshot.py:97` — `per_user_gated_snapshot_topics()`.
+- **C2 [코드]** `app/topic_initial_snapshot.py:293` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3121` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3157` `verify_firebase_token(request)` → `app/main.py:3160`
+- **C3 [코드]** `exchange-rate/app/main.py:3131` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3172` `verify_firebase_token(request)` → `app/main.py:3175`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -92,23 +92,24 @@
 
 ## D. 실패 경로
 
-- **D1 [코드]** `app/topic_dispatcher.py:152` `remove_websocket` — docstring:
+- **D1 [코드]** `app/topic_dispatcher.py:187` `remove_websocket` — docstring:
   *"publish 송신 실패 격리에서 호출된다 … '연결이 죽었다'의 동의어가 아니다"*.
-- **D2 [코드]** `app/topic_dispatcher.py:212` `leased_subscribers` — 만료 lease 를
+- **D2 [코드]** `app/topic_dispatcher.py:247` `leased_subscribers` — 만료 lease 를
   **전송 직전에만** 필터. registry 제거·클라 통지 없음.
   ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
   이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
   그 경로를 같은 함수에 태운다.
-- **D3 [코드]** `app/topic_initial_snapshot.py:359-368` — build 실패를 `logger.warning` 후 **격리**,
-  연결 유지. `None`(flag off)도 조용히 skip.
-- **D4 [결정]** `app/topic_dispatcher.py:368` §8-B-term —
+- **D3 [코드]** `app/topic_initial_snapshot.py:644-670` — build deadline·transient 실패는 연결을
+  **1013**, fatal 실패는 **1011**로 닫는다. `None`(미지원/flag off/데이터 없음)은 여전히 조용히 skip한다.
+- **D4 [결정]** `app/topic_dispatcher.py:403` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
-- **D6 [코드]** `app/topic_initial_snapshot.py:381-388` — initial snapshot 도 **전송 직전**에
+- **D6 [코드]** `app/topic_initial_snapshot.py:683-690` — initial snapshot 도 **전송 직전**에
   `leased_subscribers(topic)` 멤버십을 다시 본다(`882d92b`). 게이트에 걸리면 **해당 topic skip**
   이고 연결 실패가 아니다.
   **D6-inf [추론]** ⇒ 검사가 build **뒤**여야 하는 이유는 `_build_snapshot_sync` 가 `to_thread`
-  로 돌고 **인증 wire deadline 밖**(상한 없음)이라, 위험한 창이 build→send 구간이기 때문이다.
+  로 도는 동안 lease가 만료될 수 있기 때문이다. LOAD-S3가 build/send 총예산을 두더라도 그 창 자체는
+  사라지지 않으므로 전송 직전 재검증이 필요하다.
   ⛔ `registry.get_lease(...) is None` 으로 자체 판정하면 **무토큰(§E1) 구독**과 **등록 소멸**이
   구분되지 않아 취소된 구독에 데이터가 나간다 — 그래서 구독자 집합에서 출발하는 함수를 쓴다.
 
@@ -123,10 +124,11 @@
   구 상태는 **SQLAlchemy 기본 30초**였다. 즉 최대 5 커넥션이 찬 뒤 대기하던 요청이 이제
   10초에 접힌다(`sqlalchemy.exc.TimeoutError` → 503). 같은 파일 `:118` 의 online
   `statement_timeout = 60초`도 구 상태가 **0(무제한)** 이었다 — 운영 실측 근거는 그 모듈 docstring.
-- **E2 [코드]** `app/topic_initial_snapshot.py:342-354` —
-  `for topic in topics: ... payload = await build_snapshot_observed(topic)`. 그 공유 래퍼가
-  `app/topic_initial_snapshot.py:214-234` 에서 `await asyncio.to_thread(subscribe_load.timed_call,
-  …, _build_snapshot_sync, topic)` 한다 — **REST twin 도 같은 래퍼를 쓴다**(`app/main.py:3175`).
+- **E2 [코드]** `app/topic_initial_snapshot.py:636-648` —
+  `for topic in topics: ... payload = await build_snapshot_observed(topic, budget=request_budget)`. 그 공유 래퍼가
+  `app/topic_initial_snapshot.py:436-490` 에서 남은 총예산으로 `asyncio.to_thread(...,
+  _run_snapshot_worker, topic, request_budget)`를 감싼다 — **REST twin도 같은 예산·래퍼를 쓴다**
+  (`app/main.py:3196-3197`).
   **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
   (코드가 이렇게 적어 두지는 않았다 — 루프 구조에서 도출)
 - **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:

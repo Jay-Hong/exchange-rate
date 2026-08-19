@@ -259,25 +259,25 @@
   "reviewed_at": "2026-08-16",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0",
-    "baseline_sha256": "86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c",
-    "lock_sha256": "e8faa849e1e8aec5cb193ac3c68ded062cc644b79d7ffb1df6ebbd0e1eca275f",
-    "server_commit": "4fee0470afdbdc23e82ea70a0cb330cbec9bb552",
+    "manifest_sha256": "ca85f8a6409f5aa197c158bbdd6bccb29e97b1148c8c615fb342c04b51d7ce1f",
+    "baseline_sha256": "c2fe85b7f53d42a763be1b02caf2521e3f085cb9ab9629afbb2e7ddc6857cbbe",
+    "lock_sha256": "2fc73c044d7881339f94f925d284a8e1ab187cf9efce80d678580968be195343",
+    "server_commit": "c28dd22ac825953094654190a5447c156469eef0",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "bd90907e326fa2077c3e3c7105c4fde2bc8cba5e86ab7dcdad1385b7876db203",
-    "CLIENT": "07a807a257af16cb33d912481d31df80027ed4560a96652d25714b33090d1636",
-    "CUT": "94c9b9efa5d5eb742cfbacbe5e2c3006350466e4a8f3d17feb08d6413cbebbae",
-    "HAND": "469e3d653a172e01628f47b6e3cfd0a746fbe8d2d34f3368f71c6fe75c31d8bf",
-    "HEALTH": "d7f652c424b089efdbbca8b9ae6656dd26e5fb72b0e3d11c3b9207c628762c85",
-    "LOAD": "16c01e9bc45b28565dcb4e892b7ae4eb0c4eeb9e152ede67133d7dfa560dedbc"
+    "ADR": "8ef3cfc37a99e16ae39c5ca7efdb90ce7ca6285d0a0b6473810a0f809f86493d",
+    "CLIENT": "fdd2ca1ddf4dd62aaba9a13847e4bde2e33de26949b012f10f8f44f6284f7e3a",
+    "CUT": "8c581ba268212edc7a8229974b1b7516a36d2ba199ba463fd57fe7458b5d0215",
+    "HAND": "5b1fb8255b769f26d0d2b2f937669c991904c9b5952d7c185241fbe45bfb5582",
+    "HEALTH": "c2e319845b62cef6f2aa3518f900d0adc5c0ebc62264f248991c088af5bdf26b",
+    "LOAD": "fa6b15898fbc968be8a0da2d9afc01520474fab1c92049d527a6f2e827c9bfab"
   },
-  "claim_ledger_sha256": "ee576b244fb3d8edfdfc7c42cf583eb9ae4b86ab672aec01d6b6a03fdd6dd693",
+  "claim_ledger_sha256": "b3cf917ee7a0badb69a32be351637f44895862b5fec54d8a63e712bc007a91e2",
   "scope": {
     "manifest_output_requirements": 86,
-    "claim_candidates": 61,
-    "code_fact_entries": 50,
+    "claim_candidates": 65,
+    "code_fact_entries": 54,
     "normative_entries": 11,
     "candidate_outside_reverse_audit": true,
     "archive_normative_preservation_review": true,

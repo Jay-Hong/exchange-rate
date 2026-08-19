@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4fee0470afdbdc23e82ea70a0cb330cbec9bb552`
+- server 기준 commit: `c28dd22ac825953094654190a5447c156469eef0`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0`
-- baseline SHA: `86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c`
+- manifest SHA: `ca85f8a6409f5aa197c158bbdd6bccb29e97b1148c8c615fb342c04b51d7ce1f`
+- baseline SHA: `c2fe85b7f53d42a763be1b02caf2521e3f085cb9ab9629afbb2e7ddc6857cbbe`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -89,10 +89,11 @@ I/O 상한 · 서버 실패 cooldown).
 **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본
 30초). 아래 "그대로 쌓인다" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤
 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이
-서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:342-354`
-— `for topic in topics: ... await asyncio.to_thread(subscribe_load.timed_call, …, _build_snapshot_sync, topic)` /
-**E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈ 연결 수 N, 총작업량 N×M.
-⇒ 흡수 장치가 없으면 동시 도착 N 이 최대 5 커넥션 앞에 그대로 쌓인다.
+서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:636-648`은 요청 topic을
+순차 순회하고, 공유 래퍼 `app/topic_initial_snapshot.py:436-490`은 전체 snapshot 예산 안에서
+`to_thread` worker를 실행한다. caller 취소/deadline 뒤 새 I/O phase 진입은 checkpoint가 막지만,
+topic별 single-flight/cache는 아직 없다. **E2-inf [추론]** ⇒ 연결당 **순차**이므로 순간 동시 job ≈
+연결 수 N, 총작업량 N×M. 동시 도착 N은 유한 DB/Redis pool 앞에 쌓이므로 S5~S7 흡수 장치가 필요하다.
 <!-- /rid: R-LOAD-3 -->
 
 ---

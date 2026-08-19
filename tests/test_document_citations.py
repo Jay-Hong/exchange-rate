@@ -100,7 +100,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     "ADR": 32,
     "CLIENT": 24,
     "CUT": 36,
-    "HAND": 19,
+    # 2026-08-19 LOAD-S3 C2: 실패 close/None 잔여, worker checkpoint, live publish close 잔여를
+    #                현재 코드에 결속하면서 server locator 5건 증가 (19 → 24).
+    "HAND": 24,
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
@@ -108,7 +110,8 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     #                `app/database.py:36-38` 둘로 갈리고(풀·timeout 도출이 별 모듈로 이동 —
     #                **값 불변, 소유자만 이동**), E1-b(`…:105` online pool_timeout 10초)가
     #                신설되며 +3 (7 → 10).
-    "LOAD": 10,
+    # 2026-08-19 LOAD-S3 C2: 순차 loop와 요청 전체 budget wrapper를 분리 인용해 +1 (10 → 11).
+    "LOAD": 11,
 }
 
 
@@ -373,16 +376,17 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
         repo_key: sum(_repo_path(path)[0] == repo_key for _dest, path in references)
         for repo_key in ("server", "ios")
     }
-        # 2026-08-16 S1a: R-LOAD-4 의 E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue
+    # 2026-08-16 S1a: R-LOAD-4 의 E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue
     #                무제한(:34-36) **둘로 갈리며** locator 1건 증가 (125 → 126).
     # 2026-08-17 S2: LOAD 의 E1 이 `app/database.py:30` 하나에서
     #                `app/database_settings.py:77-78` + `app/database.py:36-38` **둘로 갈리고**
     #                (풀·timeout 도출이 별 모듈로 이동 — **값 불변, 소유자만 이동**),
     #                E1-b(`app/database_settings.py:105`, online pool_timeout 10초)가 신설되며
     #                server locator 3건 증가 (126 → 129 / server 62 → 65).
-    assert len(references) == 129
+    # 2026-08-19 LOAD-S3 C2: HAND +5, LOAD +1 (129 → 135 / server 65 → 71).
+    assert len(references) == 135
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 65, "ios": 64}
+    assert by_repo == {"server": 71, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
