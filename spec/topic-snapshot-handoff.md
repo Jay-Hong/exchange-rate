@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `d3d29c1e37a459f14972c83ea9856b911db387fd`
+- server 기준 commit: `32c70e0f055863c836b432ea9636a65cb0966d0b`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `d43e77eaf745ddd59c354838490629e06dbf5b262569f9f27251ad94c1b4d1ad`
-- baseline SHA: `2e63117e73d07cf4b3bfb80bc870ed6d494ee81a66e6e7c933f10692d0b4eb23`
+- manifest SHA: `783fb18f263aea8620481699207a4148daf52046ffe175da3c60b144dc70847e`
+- baseline SHA: `b1de60aa050b64d4f7398883eccebe288aa718c3e13bd8cfee77f2a2ce9bc48e`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -103,8 +103,8 @@ DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 
 서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다
 (`app/topic_dispatcher.py:836-926`; baseline D5).
 LOAD-S3 구현 뒤 snapshot deadline·transient build 실패는 **1013**, fatal 실패는 **1011**로 닫힌다
-(`app/topic_initial_snapshot.py:843-866`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채
-조용히 skip한다(`app/topic_initial_snapshot.py:868-869`). FX publisher도 build/publish **전** 예외를
+(`app/topic_initial_snapshot.py:923-946`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채
+조용히 skip한다(`app/topic_initial_snapshot.py:946-947`). FX publisher도 build/publish **전** 예외를
 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).
 
 → build **실패**의 조용한 구멍은 닫혔지만, `None` 경로에는 여전히 **연결·pong·ack·lease가 전부
@@ -123,7 +123,7 @@ LOAD-S3 구현 뒤 snapshot deadline·transient build 실패는 **1013**, fatal 
 ⛔ **"ack 전에 전부 build 한다"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 —
 ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다),
 ② **"지원되지만 아직 데이터가 없음"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을
-유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:785-787`), iOS 모델은
+유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:863-864`), iOS 모델은
 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`).
 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**
 
@@ -280,12 +280,14 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 <a id="r-hand-4"></a>
 ### R-HAND-4
 
-- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5 wrapper는 waiter마다
-  요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build를
-  취소하지 않지만 마지막 waiter가 사라지면 shared task를 취소하고, worker는 각 phase 앞 checkpoint에서
-  다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:102-198` ·
-  `app/topic_initial_snapshot.py:201-225` · `app/topic_initial_snapshot.py:572-689`). 그러나 이미 시작한
-  I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡으므로 그 상한도 함께 필요하다.
+- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5/S6 wrapper는
+  waiter마다 요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는
+  build나 그 admission permit을 반환하지 않지만, 마지막 waiter가 사라지면 shared task를 취소한다
+  (`app/topic_initial_snapshot.py:619-710`). worker는 각 phase 앞 checkpoint에서 다음 Redis/DB I/O
+  진입을 막는다(`app/topic_initial_snapshot.py:102-198` · `app/topic_initial_snapshot.py:201-225` ·
+  `app/topic_initial_snapshot.py:713-769`). 그러나 이미 시작한 I/O의 종료는 협력 신호가 아니라
+  **DB/Redis 자체 timeout**이 맡는다. 따라서 permit 반환 뒤에도 취소된 worker가 다음 checkpoint까지
+  잠시 executor를 점유할 수 있다.
 <!-- /rid: R-HAND-4 -->
 
 ---
@@ -314,7 +316,7 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 '연결이 죽었다'의 동의어가 아니다."*
 앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:747`)뿐 아니라 snapshot 실패의
 `1013`/`1011`도 있다(`app/topic_initial_snapshot.py:79-87` ·
-`app/topic_initial_snapshot.py:843-866`). 그러나 **live publish
+`app/topic_initial_snapshot.py:923-946`). 그러나 **live publish
 send 실패 경로**는 여전히 registry만 제거하고 소켓은 닫지 않는다
 (`app/topic_dispatcher.py:397-407`). 16KB 초과의 transport `1009`는 별도 축이다.
 

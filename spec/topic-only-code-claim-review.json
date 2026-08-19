@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "d43e77eaf745ddd59c354838490629e06dbf5b262569f9f27251ad94c1b4d1ad",
-    "baseline_sha256": "2e63117e73d07cf4b3bfb80bc870ed6d494ee81a66e6e7c933f10692d0b4eb23",
-    "lock_sha256": "d1d994896dfd64daa7a8ec2a66e837d1c54d2d05bcc2124b5a5481f0949a3a23",
-    "server_commit": "d3d29c1e37a459f14972c83ea9856b911db387fd",
+    "manifest_sha256": "783fb18f263aea8620481699207a4148daf52046ffe175da3c60b144dc70847e",
+    "baseline_sha256": "b1de60aa050b64d4f7398883eccebe288aa718c3e13bd8cfee77f2a2ce9bc48e",
+    "lock_sha256": "e36105d06c86452c005fc6e07b5cbbbfd370d3da416fd63214f66165c996c34b",
+    "server_commit": "32c70e0f055863c836b432ea9636a65cb0966d0b",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "063d389809e85741695bcae1d9658164677a52897aef521ac4c26249daaca6a9",
-    "CLIENT": "32c0065a9b97205b85b2d4f8af11e299194f8600da97e03420b853e5ca2e8af0",
-    "CUT": "3ff7f1b1944ab935c509da83610486518428b207fc1214fc2568f90a9be0b957",
-    "HAND": "32cb16f10f8f92bf6de3ce9e41cdef6dfc480ceae0da8391bbf2b2c65a76d6a8",
-    "HEALTH": "b1be57eb60202c4da4b62a94067044b745f82d4ca438ce3526b721126e7ba886",
-    "LOAD": "1be5c0daaca5bb8a0322e6264d14d7400bdac9e074a2e6aafb0dd23502da91e5"
+    "ADR": "e2f4592f0cd9fc292ed4283e6739adf41b9aedc3b732726cdd0044dff12b0f74",
+    "CLIENT": "e2203bb2729f977bcb5c7f0383ee23e78182469565761d8fee4b224d329d305a",
+    "CUT": "dd9a5ae5ab6c81072ebb77ea532dcf5aae5a487d03954aa34de137918f1b07ca",
+    "HAND": "64eb62913a2f850055ae1c68388c8f492a74c248921597fc4d41626e680463ec",
+    "HEALTH": "4c671143532eee9697173d4a0c9f502a6ca6cce5e46516b5c3e9d24f5bf9e613",
+    "LOAD": "5eadfb353ae9bb0e5d76a1d0e8c8b2748e3e4bf1d7b1bbad9b15da295727f4cf"
   },
   "entries": [
     {
@@ -47,23 +47,23 @@
     {
       "destination": "ADR",
       "rid": "R-INV-2",
-      "unit_sha256": "3b1c67d6615875029b2450eca48c1b1177e9d0b585e4d087da04029c3def23ad",
-      "unit_text": "코드 기본값은 `compatibility` 다(`app/config.py:755-757`). production 의 실제 값은 아래 표가 아니라 운영 직접 측정으로 확정한다.",
+      "unit_sha256": "fd92642f7084b36b5de3f2931bed6910f1e4f8c5f038347cd0e5f813e88fe2df",
+      "unit_text": "코드 기본값은 `compatibility` 다(`app/config.py:770-772`). production 의 실제 값은 아래 표가 아니라 운영 직접 측정으로 확정한다.",
       "classification": "code_fact",
       "detail": "고정 config가 compatibility를 코드 기본값으로 파싱해 저장하는 사실만 확인한다. production의 실제 값은 별도 운영 측정 대상이며 이 항목은 그 값을 주장하지 않는다.",
       "provenance": [
-        "file:app/config.py:755-757"
+        "file:app/config.py:770-772"
       ]
     },
     {
       "destination": "ADR",
       "rid": "R-INV-2",
-      "unit_sha256": "023ec89393dbba33637d9f471bbbd5b9249bd24751fe9d800f0e5b54e0f064b8",
-      "unit_text": "⛔ **코드 구현과 운영 활성화를 분리한다.** 이 문서 재검토에서는 production env 를 직접 측정하지 않았으므로 현재 운영 stage 나 과거 활성화 이력을 단정하지 않는다. 활성화 GO 직전에 실행 중인 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)). 근거: `app/config.py:714-757`(기본값 `compatibility`) · `app/topic_authorization.py:278-315` (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).",
+      "unit_sha256": "bde945b30ee809c8dea2e0438cd3b93925ff87110a2dccc5c37c465a2cbcfd4a",
+      "unit_text": "⛔ **코드 구현과 운영 활성화를 분리한다.** 이 문서 재검토에서는 production env 를 직접 측정하지 않았으므로 현재 운영 stage 나 과거 활성화 이력을 단정하지 않는다. 활성화 GO 직전에 실행 중인 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)). 근거: `app/config.py:729-772`(기본값 `compatibility`) · `app/topic_authorization.py:278-315` (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).",
       "classification": "code_fact",
       "detail": "고정 코드는 compatibility 기본값과 최종 stage의 cache-free RevenueCat 경로, REST 전용 stale fallback을 증명한다. production의 현재 stage와 활성화 이력은 코드에서 추론하지 않고 직접 측정 대상으로 남겼다.",
       "provenance": [
-        "file:app/config.py:714-757",
+        "file:app/config.py:729-772",
         "file:app/subscription.py:403-464",
         "file:app/topic_authorization.py:278-315"
       ]
@@ -583,12 +583,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
-      "unit_sha256": "c6cd4eca9da5b6b198e170097690b3192c477ca37c244ad97849ad616c401e06",
-      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:785-787`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
+      "unit_sha256": "aad97d0b9c27f576f25f0d686dc1f6abb9bb0e03067e4368205047e6734880f3",
+      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:863-864`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
       "classification": "code_fact",
       "detail": "초안 철회라는 결정과 함께 현행 코드 단정 둘이 근거로 들어가 있다 — KRX 는 entry 가 없어도 snapshot 만 skip 하고 register 를 유지하며, iOS KrxTopicData 의 usdKrwFutures 가 optional 이라 빈 snapshot 을 이미 표현한다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:785-787",
+        "file:app/topic_initial_snapshot.py:863-864",
         "file:ios/FXi/Models/TopicMessage.swift:100-101"
       ]
     },
@@ -617,8 +617,8 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-6",
-      "unit_sha256": "9df2969949fac8f6aaaf1e0955f494f6830560b2018f6ace904453a7194fc485",
-      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* 앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:747`)뿐 아니라 snapshot 실패의 `1013`/`1011`도 있다(`app/topic_initial_snapshot.py:79-87` · `app/topic_initial_snapshot.py:843-866`). 그러나 **live publish send 실패 경로**는 여전히 registry만 제거하고 소켓은 닫지 않는다 (`app/topic_dispatcher.py:397-407`). 16KB 초과의 transport `1009`는 별도 축이다.",
+      "unit_sha256": "003dae76e8d962313e0dfb963ae12b1a05f403716d90add920b8802e38956b06",
+      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* 앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:747`)뿐 아니라 snapshot 실패의 `1013`/`1011`도 있다(`app/topic_initial_snapshot.py:79-87` · `app/topic_initial_snapshot.py:923-946`). 그러나 **live publish send 실패 경로**는 여전히 registry만 제거하고 소켓은 닫지 않는다 (`app/topic_dispatcher.py:397-407`). 16KB 초과의 transport `1009`는 별도 축이다.",
       "classification": "code_fact",
       "detail": "pinned C1에는 인증 1008과 snapshot 실패 1013/1011 close가 존재한다. 별개인 live publish send 실패 경로는 예외 시 registry.remove_websocket만 호출하고 소켓을 닫지 않아 R-HAND-6 잔여가 유지된다.",
       "provenance": [
@@ -626,7 +626,7 @@
         "file:app/topic_dispatcher.py:397-407",
         "file:app/topic_dispatcher.py:747",
         "file:app/topic_initial_snapshot.py:79-87",
-        "file:app/topic_initial_snapshot.py:843-866"
+        "file:app/topic_initial_snapshot.py:923-946"
       ]
     },
     {
@@ -733,8 +733,8 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
-      "unit_sha256": "a1f1fc2d4bac1e5994dc2029df438579681611f93cb03d2b93cb2193ed92a245",
-      "unit_text": "서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다 (`app/topic_dispatcher.py:836-926`; baseline D5). LOAD-S3 구현 뒤 snapshot deadline·transient build 실패는 **1013**, fatal 실패는 **1011**로 닫힌다 (`app/topic_initial_snapshot.py:843-866`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:868-869`). FX publisher도 build/publish **전** 예외를 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).",
+      "unit_sha256": "eed8764dd3c789acbf888d30c904ad84b1fafc1bb03d17060b1d29fc3f57f5c0",
+      "unit_text": "서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다 (`app/topic_dispatcher.py:836-926`; baseline D5). LOAD-S3 구현 뒤 snapshot deadline·transient build 실패는 **1013**, fatal 실패는 **1011**로 닫힌다 (`app/topic_initial_snapshot.py:923-946`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:946-947`). FX publisher도 build/publish **전** 예외를 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).",
       "classification": "code_fact",
       "detail": "pinned C1에서 dispatcher가 register→ack→snapshot 순서를 유지하고, snapshot module이 deadline/transient를 1013, fatal을 1011로 닫는 반면 None은 skip함을 확인했다. FX publisher의 선행 build 예외 격리는 별도 잔여다.",
       "provenance": [
@@ -742,8 +742,8 @@
         "baseline:D5",
         "file:app/fx_topic_publisher.py:291-323",
         "file:app/topic_dispatcher.py:836-926",
-        "file:app/topic_initial_snapshot.py:843-866",
-        "file:app/topic_initial_snapshot.py:868-869"
+        "file:app/topic_initial_snapshot.py:923-946",
+        "file:app/topic_initial_snapshot.py:946-947"
       ]
     },
     {
@@ -760,14 +760,15 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-4",
-      "unit_sha256": "5284dd57c8098fe9b79c009c53d83038d662c8f7a022a588da76c04c24c923d7",
-      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5 wrapper는 waiter마다 요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build를 취소하지 않지만 마지막 waiter가 사라지면 shared task를 취소하고, worker는 각 phase 앞 checkpoint에서 다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:102-198` · `app/topic_initial_snapshot.py:201-225` · `app/topic_initial_snapshot.py:572-689`). 그러나 이미 시작한 I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡으므로 그 상한도 함께 필요하다.",
+      "unit_sha256": "cb6256b2f233cd42ec339267c21d11b1cc4b58e076bca0e91f64079e4e4f82f1",
+      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5/S6 wrapper는 waiter마다 요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build나 그 admission permit을 반환하지 않지만, 마지막 waiter가 사라지면 shared task를 취소한다 (`app/topic_initial_snapshot.py:619-710`). worker는 각 phase 앞 checkpoint에서 다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:102-198` · `app/topic_initial_snapshot.py:201-225` · `app/topic_initial_snapshot.py:713-769`). 그러나 이미 시작한 I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡는다. 따라서 permit 반환 뒤에도 취소된 worker가 다음 checkpoint까지 잠시 executor를 점유할 수 있다.",
       "classification": "code_fact",
-      "detail": "pinned C1에서도 asyncio.to_thread의 in-flight I/O는 caller 취소로 즉시 멈추지 않는다. LOAD-S5 wrapper는 waiter마다 자기 요청 budget으로 shield(task)를 기다리고, shared build는 fork_for_shared_build()가 만든 독립 budget을 쓴다. 그래서 leader 취소는 build로 전파되지 않고, waiters가 0이 될 때만 shared task를 cancel한다. worker는 각 phase 앞 checkpoint()에서 다음 Redis/DB I/O 진입을 막으며, 이미 시작한 I/O의 종료는 LOAD-S2 DB/Redis timeout이 맡는다.",
+      "detail": "고정 server commit에서 LOAD-S5/S6 shared task가 admission permit을 소유하므로 leader caller 취소는 permit을 조기 반환하지 않는다. 마지막 waiter가 사라질 때 shared task를 cancel하고 worker checkpoint가 다음 Redis/DB I/O 진입을 막는다. 이미 시작한 I/O와 취소 뒤 다음 checkpoint까지의 executor 점유는 DB/Redis timeout과 협력 중단이 맡으므로 admission 수를 실제 thread 점유의 순간 상한으로 읽지 않는다.",
       "provenance": [
         "file:app/topic_initial_snapshot.py:102-198",
         "file:app/topic_initial_snapshot.py:201-225",
-        "file:app/topic_initial_snapshot.py:572-689"
+        "file:app/topic_initial_snapshot.py:619-710",
+        "file:app/topic_initial_snapshot.py:713-769"
       ]
     },
     {
@@ -786,22 +787,23 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-3",
-      "unit_sha256": "1b974d3f08b85abc564e3261762d3237a6b98095217e81120e220c07e096429b",
-      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:835-847`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:456-632`의 LOAD-S5 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 실제 worker는 `app/topic_initial_snapshot.py:635-689`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 순간 실제 job은 연결 수 N이 아니라 활성 key 수에 가까워졌다. bounded waiter와 실패 cooldown은 아직 없으므로 동시 도착의 대기·실패 재동기화를 닫으려면 S6~S7이 필요하다.",
+      "unit_sha256": "62478c6a1d3628654f70996aa99fe558cbe895b6708c31bfc6de59d16fc1ccc8",
+      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:913-925`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:456-710`의 LOAD-S5/S6 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:713-769`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 대기 **시간**은 bounded지만 queue 개수 hard cap과 실패 cooldown은 아직 없으므로, 동시 도착의 메모리 상한·실패 재동기화를 닫으려면 S7과 별도 admission 결정이 필요하다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
       "classification": "code_fact",
-      "detail": "고정 server commit에서 요청 topic 순회는 연결 내부에서 순차지만, LOAD-S5 래퍼가 (topic, generation, supported, enabled) key별 shared build와 최대 1초 성공 cache를 사용함을 확인했다. 실제 worker는 독립된 S3 budget과 bounded Redis/DB I/O를 유지한다. bounded waiter와 실패 cooldown은 아직 없어 R-LOAD-3 전체 완료를 뜻하지 않는다.",
+      "detail": "고정 server commit에서 연결 내부 topic 순회는 순차이고, LOAD-S5가 key별 shared build/cache를 제공하며 LOAD-S6가 새 shared flight를 기본 4-slot FIFO admission에서 남은 S3 예산까지만 기다리게 함을 확인했다. admission wait, executor queue wait, worker execution은 별도 계측된다. 대기 시간은 bounded지만 queue 개수 hard cap과 실패 cooldown은 아직 없어 R-LOAD-3 전체 완료를 뜻하지 않는다.",
       "provenance": [
         "baseline:E1",
         "baseline:E1-b",
         "baseline:E2",
         "baseline:E2-inf",
+        "file:app/config.py:650-660",
         "file:app/database.py:30",
         "file:app/database.py:36-38",
         "file:app/database_settings.py:113",
         "file:app/database_settings.py:85-86",
-        "file:app/topic_initial_snapshot.py:456-632",
-        "file:app/topic_initial_snapshot.py:635-689",
-        "file:app/topic_initial_snapshot.py:835-847"
+        "file:app/topic_initial_snapshot.py:456-710",
+        "file:app/topic_initial_snapshot.py:713-769",
+        "file:app/topic_initial_snapshot.py:913-925"
       ]
     }
   ]

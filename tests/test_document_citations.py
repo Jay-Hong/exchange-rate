@@ -105,7 +105,8 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 "각 phase 앞 checkpoint" 를 실제 worker 결속
     #                (`_worker_checkpoint`/`_run_snapshot_worker`)으로 입증하는 locator 를
     #                더해 +1 (24 → 25). 기존 두 locator 는 정의와 wrapper 만 보여줬다.
-    "HAND": 25,
+    # 2026-08-20 LOAD-S6 C2: shared task/permit 소유와 실제 worker를 분리 인용해 +1 (25 → 26).
+    "HAND": 26,
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
@@ -116,7 +117,8 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-19 LOAD-S3 C2: 순차 loop와 요청 전체 budget wrapper를 분리 인용해 +1 (10 → 11).
     # 2026-08-19 LOAD-S5 C2: single-flight/cache wrapper와 실제 S3 worker를 분리 인용해 +1
     #                (11 → 12).
-    "LOAD": 12,
+    # 2026-08-20 LOAD-S6 C2: admission 기본값·잔여 한계를 config에 직접 결속해 +1 (12 → 13).
+    "LOAD": 13,
 }
 
 
@@ -391,9 +393,10 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-19 LOAD-S3 C2: HAND +5, LOAD +1 (129 → 135 / server 65 → 71).
     # 2026-08-19 LOAD-S5 C2: LOAD +1 (135 → 136 / server 71 → 72).
     # 2026-08-20 LOAD-S5 후속: HAND +1 (136 → 137 / server 72 → 73).
-    assert len(references) == 137
+    # 2026-08-20 LOAD-S6 C2: HAND +1, LOAD +1 (137 → 139 / server 73 → 75).
+    assert len(references) == 139
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 73, "ios": 64}
+    assert by_repo == {"server": 75, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -436,8 +439,9 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
     # 2026-08-17 S2: baseline 의 E1 도 같은 이유로 둘로 갈리고 E1-b 가 신설되며
     #                server locator 3건 증가 (42 → 45).
     # 2026-08-19 LOAD-S5 C2: shared single-flight와 실제 worker 인용을 분리해 server +1.
-    assert len(references) == 46
-    assert by_repo == {"server": 36, "ios": 10}
+    # 2026-08-20 LOAD-S6 C2: admission 기본값·잔여 한계의 config 근거를 더해 server +1.
+    assert len(references) == 47
+    assert by_repo == {"server": 37, "ios": 10}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():

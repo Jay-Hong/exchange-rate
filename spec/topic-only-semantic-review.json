@@ -55,7 +55,8 @@
           "genesis 가 승인한 baseline 을 저널에 명시: genesis edge 목록이 지목하는 최신 커밋과, S1b 이후 genesis 까지 이름이 남지 않은 채 land 된 작업들을 이름 기준으로 재측정해 residual limit 으로 기록한다. work unit 그룹화 규칙이 없어 총수는 단정하지 않고 비포괄 목록으로 적었으며, 이번 전이는 marker 만이 아니라 산문 work unit 과 함께 append 해 퇴화형 사용례를 남기지 않는다.",
           "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=Claude Code:reviewer=OpenAI Codex",
           "epoch 이 산문 work unit 을 동반하도록 요구하는 게이트: binding 직후 marker 만 append 해도 `_semantic_binding_errors` 와 `review_errors` 가 모두 비는 것을 직접 재현한 뒤, genesis 이후 각 epoch 이 직전 marker 와 사이에 산문 scope 를 **한 방향 이상** 갖도록 강제한다. 양방향 강제는 기각했다 — work unit 은 (author→reviewer) 한 edge 소유라 없는 검토를 지어내게 만든다. 반례 헬퍼도 기본값을 올바른 사용례로 바꿔 퇴화형을 조용히 모델링하지 않게 했고, validator 배선 제거 변이로 판별력을 확인했다.",
-          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -92,7 +93,9 @@
           "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code",
           "LOAD-S5 후속 semantic input binding 게이트 0797c90 검토: marker 를 fingerprint 에서 제외해 순환을 피한 canonical 해시, 4개 스키마 소유 목록으로 좁힌 strip, 방향·연속성·parent chain·genesis 4축 검사와 validator 실배선을 읽고, 산문 1글자 변경 후 기존 epoch 재사용 red · 단방향 append red · 양방향 append green · genesis 교체 red 를 각각 직접 재현. 한계로 marker 가 산문 work unit 을 요구하지 않아 퇴화형 append 가 통과한다는 점을 확인했다.",
           "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=OpenAI Codex:reviewer=Claude Code",
+          "LOAD-S6 C1 32c70e0 및 C2 재결속 독립 검토: flight를 registry에 먼저 게시한 뒤 새 shared task만 FIFO admission을 기다려 같은 key follower가 중복 대기하지 않는 순서, shared task의 permit 소유와 caller 취소·deadline·builder 오류의 gauge 반환, admission wait/executor queue wait/worker execution 분리, queue 개수 hard cap 부재와 취소된 sync worker의 checkpoint 전 잔류 한계를 코드·테스트·문서에서 대조했다. C2에서 다른 locator는 일치했지만 R-HAND-1의 KRX 데이터 없음 분기를 865-867로 옮긴 것은 실제 863-864와 어긋난다고 지적했고, handoff와 claim 원장을 863-864로 교정했다. semantic journal 미결속도 blocker로 지적했다.",
+          "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -136,7 +139,9 @@
           "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code",
           "LOAD-S5 후속 semantic input binding 게이트 0797c90 검토: marker 를 fingerprint 에서 제외해 순환을 피한 canonical 해시, 4개 스키마 소유 목록으로 좁힌 strip, 방향·연속성·parent chain·genesis 4축 검사와 validator 실배선을 읽고, 산문 1글자 변경 후 기존 epoch 재사용 red · 단방향 append red · 양방향 append green · genesis 교체 red 를 각각 직접 재현. 한계로 marker 가 산문 work unit 을 요구하지 않아 퇴화형 append 가 통과한다는 점을 확인했다.",
           "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=OpenAI Codex:reviewer=Claude Code",
+          "LOAD-S6 C1 32c70e0 및 C2 재결속 독립 검토: flight를 registry에 먼저 게시한 뒤 새 shared task만 FIFO admission을 기다려 같은 key follower가 중복 대기하지 않는 순서, shared task의 permit 소유와 caller 취소·deadline·builder 오류의 gauge 반환, admission wait/executor queue wait/worker execution 분리, queue 개수 hard cap 부재와 취소된 sync worker의 checkpoint 전 잔류 한계를 코드·테스트·문서에서 대조했다. C2에서 다른 locator는 일치했지만 R-HAND-1의 KRX 데이터 없음 분기를 865-867로 옮긴 것은 실제 863-864와 어긋난다고 지적했고, handoff와 claim 원장을 863-864로 교정했다. semantic journal 미결속도 blocker로 지적했다.",
+          "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -183,7 +188,8 @@
           "genesis 가 승인한 baseline 을 저널에 명시: genesis edge 목록이 지목하는 최신 커밋과, S1b 이후 genesis 까지 이름이 남지 않은 채 land 된 작업들을 이름 기준으로 재측정해 residual limit 으로 기록한다. work unit 그룹화 규칙이 없어 총수는 단정하지 않고 비포괄 목록으로 적었으며, 이번 전이는 marker 만이 아니라 산문 work unit 과 함께 append 해 퇴화형 사용례를 남기지 않는다.",
           "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=Claude Code:reviewer=OpenAI Codex",
           "epoch 이 산문 work unit 을 동반하도록 요구하는 게이트: binding 직후 marker 만 append 해도 `_semantic_binding_errors` 와 `review_errors` 가 모두 비는 것을 직접 재현한 뒤, genesis 이후 각 epoch 이 직전 marker 와 사이에 산문 scope 를 **한 방향 이상** 갖도록 강제한다. 양방향 강제는 기각했다 — work unit 은 (author→reviewer) 한 edge 소유라 없는 검토를 지어내게 만든다. 반례 헬퍼도 기본값을 올바른 사용례로 바꿔 퇴화형을 조용히 모델링하지 않게 했고, validator 배선 제거 변이로 판별력을 확인했다.",
-          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -236,7 +242,8 @@
           "genesis 가 승인한 baseline 을 저널에 명시: genesis edge 목록이 지목하는 최신 커밋과, S1b 이후 genesis 까지 이름이 남지 않은 채 land 된 작업들을 이름 기준으로 재측정해 residual limit 으로 기록한다. work unit 그룹화 규칙이 없어 총수는 단정하지 않고 비포괄 목록으로 적었으며, 이번 전이는 marker 만이 아니라 산문 work unit 과 함께 append 해 퇴화형 사용례를 남기지 않는다.",
           "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=Claude Code:reviewer=OpenAI Codex",
           "epoch 이 산문 work unit 을 동반하도록 요구하는 게이트: binding 직후 marker 만 append 해도 `_semantic_binding_errors` 와 `review_errors` 가 모두 비는 것을 직접 재현한 뒤, genesis 이후 각 epoch 이 직전 marker 와 사이에 산문 scope 를 **한 방향 이상** 갖도록 강제한다. 양방향 강제는 기각했다 — work unit 은 (author→reviewer) 한 edge 소유라 없는 검토를 지어내게 만든다. 반례 헬퍼도 기본값을 올바른 사용례로 바꿔 퇴화형을 조용히 모델링하지 않게 했고, validator 배선 제거 변이로 판별력을 확인했다.",
-          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -278,7 +285,9 @@
           "semantic-input-binding/v1:0001:GENESIS:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:author=OpenAI Codex:reviewer=Claude Code",
           "LOAD-S5 후속 semantic input binding 게이트 0797c90 검토: marker 를 fingerprint 에서 제외해 순환을 피한 canonical 해시, 4개 스키마 소유 목록으로 좁힌 strip, 방향·연속성·parent chain·genesis 4축 검사와 validator 실배선을 읽고, 산문 1글자 변경 후 기존 epoch 재사용 red · 단방향 append red · 양방향 append green · genesis 교체 red 를 각각 직접 재현. 한계로 marker 가 산문 work unit 을 요구하지 않아 퇴화형 append 가 통과한다는 점을 확인했다.",
           "semantic-input-binding/v1:0002:7b648ec1a84bbbc7dbc5f2283bf9cbeb366430789ebe7c825719c449351f47f7:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=OpenAI Codex:reviewer=Claude Code",
+          "LOAD-S6 C1 32c70e0 및 C2 재결속 독립 검토: flight를 registry에 먼저 게시한 뒤 새 shared task만 FIFO admission을 기다려 같은 key follower가 중복 대기하지 않는 순서, shared task의 permit 소유와 caller 취소·deadline·builder 오류의 gauge 반환, admission wait/executor queue wait/worker execution 분리, queue 개수 hard cap 부재와 취소된 sync worker의 checkpoint 전 잔류 한계를 코드·테스트·문서에서 대조했다. C2에서 다른 locator는 일치했지만 R-HAND-1의 KRX 데이터 없음 분기를 865-867로 옮긴 것은 실제 863-864와 어긋난다고 지적했고, handoff와 claim 원장을 863-864로 교정했다. semantic journal 미결속도 blocker로 지적했다.",
+          "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -292,21 +301,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "d43e77eaf745ddd59c354838490629e06dbf5b262569f9f27251ad94c1b4d1ad",
-    "baseline_sha256": "2e63117e73d07cf4b3bfb80bc870ed6d494ee81a66e6e7c933f10692d0b4eb23",
-    "lock_sha256": "d1d994896dfd64daa7a8ec2a66e837d1c54d2d05bcc2124b5a5481f0949a3a23",
-    "server_commit": "d3d29c1e37a459f14972c83ea9856b911db387fd",
+    "manifest_sha256": "783fb18f263aea8620481699207a4148daf52046ffe175da3c60b144dc70847e",
+    "baseline_sha256": "b1de60aa050b64d4f7398883eccebe288aa718c3e13bd8cfee77f2a2ce9bc48e",
+    "lock_sha256": "e36105d06c86452c005fc6e07b5cbbbfd370d3da416fd63214f66165c996c34b",
+    "server_commit": "32c70e0f055863c836b432ea9636a65cb0966d0b",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "063d389809e85741695bcae1d9658164677a52897aef521ac4c26249daaca6a9",
-    "CLIENT": "32c0065a9b97205b85b2d4f8af11e299194f8600da97e03420b853e5ca2e8af0",
-    "CUT": "3ff7f1b1944ab935c509da83610486518428b207fc1214fc2568f90a9be0b957",
-    "HAND": "32cb16f10f8f92bf6de3ce9e41cdef6dfc480ceae0da8391bbf2b2c65a76d6a8",
-    "HEALTH": "b1be57eb60202c4da4b62a94067044b745f82d4ca438ce3526b721126e7ba886",
-    "LOAD": "1be5c0daaca5bb8a0322e6264d14d7400bdac9e074a2e6aafb0dd23502da91e5"
+    "ADR": "e2f4592f0cd9fc292ed4283e6739adf41b9aedc3b732726cdd0044dff12b0f74",
+    "CLIENT": "e2203bb2729f977bcb5c7f0383ee23e78182469565761d8fee4b224d329d305a",
+    "CUT": "dd9a5ae5ab6c81072ebb77ea532dcf5aae5a487d03954aa34de137918f1b07ca",
+    "HAND": "64eb62913a2f850055ae1c68388c8f492a74c248921597fc4d41626e680463ec",
+    "HEALTH": "4c671143532eee9697173d4a0c9f502a6ca6cce5e46516b5c3e9d24f5bf9e613",
+    "LOAD": "5eadfb353ae9bb0e5d76a1d0e8c8b2748e3e4bf1d7b1bbad9b15da295727f4cf"
   },
-  "claim_ledger_sha256": "ab206755da13e2b618f6472f6a047fd032811036f46677e9f03a12b19b361236",
+  "claim_ledger_sha256": "84080371ec630018ae1d3edfc9f064cfd6f79f84035b8a309348f66ff6f5ca78",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 65,
