@@ -280,6 +280,8 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         self.assertLess(stop, collect)
         self.assertIn('--old-container-log "$D/02-old-container.log"', self.script)
         self.assertNotIn('follower rc=', self.script)
+        self.assertIn('echo "rc=$logs_rc" > "$D/13-new-container.rc"', self.script)
+        self.assertNotIn('echo "rc=$logs_rc" >> "$D/13-new-container.log"', self.script)
 
     def test_dead_follower_is_rejected_by_the_runbook_helper(self):
         start = self.script.index("stop_follower()")

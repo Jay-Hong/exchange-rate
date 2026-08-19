@@ -1224,7 +1224,9 @@ if docker logs --timestamps --since "$T0" exchange-rate-app \
 then logs_rc=0
 else logs_rc=$?
 fi
-echo "rc=$logs_rc" >> "$D/13-new-container.log"
+# 로그 본문은 Docker timestamp가 붙은 원문만 유지한다. rc를 같은 파일에 붙이면
+# 사후 재판정기가 그 줄을 timestamp 배치 불가로 보고 UNVERIFIED로 내린다.
+echo "rc=$logs_rc" > "$D/13-new-container.rc"
 
 # 14) payload manifest + 종결 상태 — 모든 로그가 닫힌 **뒤** 실행한다. 차단 소견도
 #     증거와 상태를 남기되 최종 rc=1로 반환해 성공처럼 끝나지 않는다.
