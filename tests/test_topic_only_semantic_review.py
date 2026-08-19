@@ -203,11 +203,83 @@ def _semantic_binding_errors(data: dict) -> list[str]:
     return errors
 
 
-def _append_synthetic_binding_epoch(data: dict) -> dict:
-    """Append a valid epoch for validator counterexamples without rewriting genesis."""
+def _semantic_epoch_work_unit_errors(data: dict) -> list[str]:
+    """genesis 뒤 각 epoch 은 산문 work unit 을 최소 하나 동반해야 한다.
+
+    ⛔ binding 은 bytes 만 묶는다 — marker 만 append 해도 chain 은 성립하므로(실측) 무엇을
+       검토했는지가 아무데도 남지 않는 전이가 통과했다. residual_limits[0] 이 요구하는 것은
+       "work unit 을 명시한 edge" 지 fingerprint 영수증이 아니다.
+    ⛔ **양방향을 요구하지 않는다.** work unit 하나는 (author→reviewer) 한 edge 에만 들어가므로
+       양쪽을 강제하면 없는 검토를 지어내게 만든다. 게이트가 거짓을 유도해서는 안 된다.
+    ⛔ 마지막 marker 뒤에 산문만 추가하는 경우는 여기서 보지 않는다 — fingerprint 가 바뀌어
+       `_semantic_binding_errors` 가 이미 red 로 만든다.
+    """
+    process = data.get("review_process")
+    if not isinstance(process, dict):
+        return []
+    edges = process.get("review_edges")
+    if not isinstance(edges, list):
+        return []
+
+    segments_by_edge = []
+    for edge in edges:
+        if not isinstance(edge, dict) or not isinstance(edge.get("scope"), list):
+            continue
+        positions = [
+            index
+            for index, value in enumerate(edge["scope"])
+            if isinstance(value, str)
+            and SEMANTIC_BINDING_RE.fullmatch(value) is not None
+        ]
+        if len(positions) < 2:
+            continue
+        segments_by_edge.append([
+            edge["scope"][previous + 1:current]
+            for previous, current in zip(positions, positions[1:])
+        ])
+    if not segments_by_edge:
+        return []
+    depth = min(len(segments) for segments in segments_by_edge)
+    if depth != max(len(segments) for segments in segments_by_edge):
+        # chain 길이가 갈린 상태다 — `_semantic_binding_errors` 가 보고할 몫이다.
+        return []
+
+    errors = []
+    for index in range(depth):
+        if not any(segments[index] for segments in segments_by_edge):
+            errors.append(
+                f"semantic input binding epoch {index + 2:04d} carries no prose work unit "
+                "in either direction"
+            )
+    return errors
+
+
+def _append_synthetic_binding_epoch(data: dict, *, with_work_unit: bool = True) -> dict:
+    """Append a valid epoch for validator counterexamples without rewriting genesis.
+
+    ⛔ 기본값은 **산문 work unit 을 동반한 올바른 사용례**다. marker 만 붙이는 퇴화형이 필요한
+       반례는 `with_work_unit=False` 로 명시해서 만든다 — 헬퍼가 조용히 퇴화형을 모델링하면
+       그걸 쓰는 모든 반례의 양성 대조군이 계약을 어긴 상태가 된다.
+    ⛔ work unit 은 **한 방향에만** 넣는다. 규칙이 요구하는 최소치가 그것이고, 양방향을 넣으면
+       한 방향만으로 충분한지를 이 헬퍼를 쓰는 테스트들이 더는 보여주지 못한다.
+    """
     rebound = copy.deepcopy(data)
-    fingerprint = _semantic_review_fingerprint(rebound)
     people = {person["name"]: person for person in rebound["review_process"]["participants"]}
+    if with_work_unit:
+        edge = rebound["review_process"]["review_edges"][0]
+        markers = [
+            value
+            for value in edge["scope"]
+            if isinstance(value, str) and SEMANTIC_BINDING_RE.fullmatch(value) is not None
+        ]
+        unit = (
+            f"synthetic counterexample work unit for epoch "
+            f"{len(markers) + 1:04d} ({edge['author']} -> {edge['reviewer']})"
+        )
+        edge["scope"].append(unit)
+        people[edge["author"]]["authored_or_modified"].append(unit)
+        people[edge["reviewer"]]["independently_reviewed"].append(unit)
+    fingerprint = _semantic_review_fingerprint(rebound)
     for edge in rebound["review_process"]["review_edges"]:
         prior = [
             SEMANTIC_BINDING_RE.fullmatch(value)
@@ -392,6 +464,7 @@ def review_errors(data: object) -> list[str]:
             errors.append("review_process limitations are missing")
 
     errors.extend(_semantic_binding_errors(data))
+    errors.extend(_semantic_epoch_work_unit_errors(data))
 
     scope = data.get("scope")
     if not isinstance(scope, dict):
@@ -517,6 +590,53 @@ def test_semantic_change_requires_a_new_reciprocal_binding_epoch():
     assert "reciprocal semantic input binding chains differ" in _semantic_binding_errors(
         one_sided
     )
+
+
+def test_binding_epoch_requires_a_prose_work_unit_in_at_least_one_direction():
+    """epoch 이 fingerprint 영수증만 남기고 지나가지 못하게 한다.
+
+    ⛔ 실측(2026-08-20): binding 도입 직후에는 산문 없이 양방향 marker 만 append 해도
+       `_semantic_binding_errors` 와 `review_errors` 가 모두 비었다. chain 은 성립하는데
+       무엇을 검토했는지는 아무데도 남지 않는 전이였다.
+    ⛔ 요구는 **한 방향 이상**이다 — work unit 하나는 (author→reviewer) 한 edge 에만 들어가므로
+       양방향을 강제하면 없는 검토를 지어내게 만든다.
+    """
+    changed = copy.deepcopy(_review())
+    changed["residual_limits"][0] += " Work-unit counterexample."
+
+    marker_only = _append_synthetic_binding_epoch(changed, with_work_unit=False)
+    # ⛔ epoch 번호를 상수로 박지 않는다 — chain 이 자라면 그 상수가 먼저 거짓이 된다(실측).
+    next_epoch = 1 + sum(
+        1
+        for value in changed["review_process"]["review_edges"][0]["scope"]
+        if isinstance(value, str) and SEMANTIC_BINDING_RE.fullmatch(value) is not None
+    )
+    expected = (
+        f"semantic input binding epoch {next_epoch:04d} carries no prose work unit "
+        "in either direction"
+    )
+    assert _semantic_epoch_work_unit_errors(marker_only) == [expected]
+    # ⛔ helper 존재가 아니라 **validator 배선**을 본다.
+    assert expected in review_errors(marker_only)
+
+    one_direction = _append_synthetic_binding_epoch(changed)
+    assert not _semantic_epoch_work_unit_errors(one_direction)
+    assert not review_errors(one_direction)
+    edges = one_direction["review_process"]["review_edges"]
+    prose_added = [
+        sum(
+            1
+            for value in edge["scope"]
+            if isinstance(value, str) and SEMANTIC_BINDING_RE.fullmatch(value) is None
+        )
+        - sum(
+            1
+            for value in changed["review_process"]["review_edges"][index]["scope"]
+            if isinstance(value, str) and SEMANTIC_BINDING_RE.fullmatch(value) is None
+        )
+        for index, edge in enumerate(edges)
+    ]
+    assert sorted(prose_added) == [0, 1], prose_added
 
 
 def test_semantic_binding_genesis_cannot_be_replaced_during_reseal():
