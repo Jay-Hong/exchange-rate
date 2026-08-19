@@ -40,7 +40,7 @@
   → **0건**.
   ⚠️ **범위 한정**: 이 두 파일 안에 없다는 뜻이다. 외부(scheduler 등)가 이들을 주기 호출하는
   가능성까지 배제하려면 호출자 검사가 추가로 필요하다. transport ping/pong 은 별개로 존재.
-- **B2 [코드]** `app/latest_rates_cache.py:480` — USDT coalesce = `same rate + same 5s bucket → skip`.
+- **B2 [코드]** `app/latest_rates_cache.py:496` — USDT coalesce = `same rate + same 5s bucket → skip`.
   ⇒ 가격이 평평해도 새 5초 버킷 tick 이면 SET → publish.
 - **B3 [코드]** 같은 파일 — KRX 는 위 coalesce 를 **tick writer 경로에서만** 적용.
   `KRX_REDIS_TICK_WRITE_ENABLED` 코드 기본값 false.

@@ -3732,7 +3732,7 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 - [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): Redis-first broadcast hot path (latest:index 도입 결정)
 - [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback): USDT direct write (mirror cycle 미경유)
 - [USDT_TOPIC_MIGRATION_PLAN.md Z-2f](USDT_TOPIC_MIGRATION_PLAN.md): 본 ADR 구현 PR 추적
-- [app/latest_rates_cache.py:1993-2016](app/latest_rates_cache.py#L1993-L2016): 현재 per-key freshness 판정과 fallback 위치
+- [app/latest_rates_cache.py:2009-2032](app/latest_rates_cache.py#L2009-L2032): 현재 per-key freshness 판정과 fallback 위치
 
 ---
 
@@ -6528,11 +6528,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `3ff84d156fd159e7e8616a7bf140daa59db690fa`
+- server 기준 commit: `4fee0470afdbdc23e82ea70a0cb330cbec9bb552`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `23bc87cdd76610b793d94605d24fd55e381443dbc4312e212eadef3cfcb24a0c`
-- baseline SHA: `e5fda896f3686cef8cf33044725acfb11bfd6ef846ef8079aaba4ec0a1c0b34e`
+- manifest SHA: `29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0`
+- baseline SHA: `86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6711,8 +6711,8 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 - **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`,
   코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다.
   그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2).
-  근거: baseline B3 · B3-op · `app/latest_rates_cache.py:771-777` ·
-  `app/latest_rates_cache.py:646-651` · `app/config.py:390`.
+  근거: baseline B3 · B3-op · `app/latest_rates_cache.py:787-793` ·
+  `app/latest_rates_cache.py:662-667` · `app/config.py:390`.
 <!-- /evidence: E-B-2 -->
 
 <!-- evidence: E-B-3 supports=R-DEC-1 -->

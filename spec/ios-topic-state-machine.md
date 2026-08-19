@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `3ff84d156fd159e7e8616a7bf140daa59db690fa`
+- server 기준 commit: `4fee0470afdbdc23e82ea70a0cb330cbec9bb552`
 - iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `23bc87cdd76610b793d94605d24fd55e381443dbc4312e212eadef3cfcb24a0c`
-- baseline SHA: `e5fda896f3686cef8cf33044725acfb11bfd6ef846ef8079aaba4ec0a1c0b34e`
+- manifest SHA: `29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0`
+- baseline SHA: `86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -591,7 +591,7 @@ topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영�
 **"N분 전" 라벨을 새로 만들지 않는다.** 클라에 일관된 per-source 관측 나이가 저장되지 않는다.
 
 - 서버는 rate 가 같으면 **`rate_changed_at` 을 보존**한다 — `seen_at` 만 전진
-  (`app/latest_rates_cache.py:480-500`).
+  (`app/latest_rates_cache.py:496-516`).
 - 클라 `TopicSnapshotMerger` 는 `mergeAt = rateChangedAt ?? timestamp` 로 비교해
   `mergeAt <= existing.mergeAt` 이면 **entry 를 통째로 버린다**
   (`ios/FXi/Services/TopicSnapshotMerger.swift:31-46`).

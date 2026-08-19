@@ -498,7 +498,7 @@ def test_reviewed_adr_030_and_031_targets_do_not_regress_to_stale_worktree_lines
         "https://github.com/Jay-Hong/exchange-rate/blob/"
         "a499a08d210ab1e6b8c5309357eab3bcf1283fa5/"
         "app/latest_rates_cache.py#L885-L890",
-        "app/latest_rates_cache.py#L1993-L2016",
+        "app/latest_rates_cache.py#L2009-L2032",
         "https://github.com/Jay-Hong/exchange-rate/blob/"
         "2d5c8adfd7a46944617c854d8221a5535bb1a95b/"
         "app/usdt_topic_payload.py#L326-L330",

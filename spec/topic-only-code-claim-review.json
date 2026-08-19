@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "23bc87cdd76610b793d94605d24fd55e381443dbc4312e212eadef3cfcb24a0c",
-    "baseline_sha256": "e5fda896f3686cef8cf33044725acfb11bfd6ef846ef8079aaba4ec0a1c0b34e",
-    "lock_sha256": "bbe27446baaaffaf812e770ce358cb45308bb11a6f52a0914b08d4528ecf261e",
-    "server_commit": "3ff84d156fd159e7e8616a7bf140daa59db690fa",
+    "manifest_sha256": "29dc0be743882093c8e8839d76eaa3cbfb2efbec683e8730c702c25792f732d0",
+    "baseline_sha256": "86789189de00c01ccda65db1b12d138f54f81f8b17fed571604cf0b0a94c122c",
+    "lock_sha256": "e8faa849e1e8aec5cb193ac3c68ded062cc644b79d7ffb1df6ebbd0e1eca275f",
+    "server_commit": "4fee0470afdbdc23e82ea70a0cb330cbec9bb552",
     "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
   },
   "documents": {
-    "ADR": "50ee64e69fad91eea74d8fdbf2a3d59e2e4644548fed74bf1d46d893ae4fdaba",
-    "CLIENT": "20442ea612edd45685bec0b26111399b79fffacac39540cd4f3e4be57ec2edb9",
-    "CUT": "a7fdc62efbd66cde8dc17c63487220e6e3d94a501e2f3fd95b24eb4075a55f90",
-    "HAND": "1842537191402b78ac3b6af905316d222841cef6f66e9b26392d6b26cb8e091b",
-    "HEALTH": "d8a8381c07bfffb57270cef4c8ab7cddb7c8c430c03d71c477a6c14284e8e658",
-    "LOAD": "cf61076bf43aa6e3a518f560a0b068d592e9a0d2b901d4fc4d93a562e69fab40"
+    "ADR": "bd90907e326fa2077c3e3c7105c4fde2bc8cba5e86ab7dcdad1385b7876db203",
+    "CLIENT": "07a807a257af16cb33d912481d31df80027ed4560a96652d25714b33090d1636",
+    "CUT": "94c9b9efa5d5eb742cfbacbe5e2c3006350466e4a8f3d17feb08d6413cbebbae",
+    "HAND": "469e3d653a172e01628f47b6e3cfd0a746fbe8d2d34f3368f71c6fe75c31d8bf",
+    "HEALTH": "d7f652c424b089efdbbca8b9ae6656dd26e5fb72b0e3d11c3b9207c628762c85",
+    "LOAD": "16c01e9bc45b28565dcb4e892b7ae4eb0c4eeb9e152ede67133d7dfa560dedbc"
   },
   "entries": [
     {
@@ -94,8 +94,8 @@
     {
       "destination": "ADR",
       "rid": "R-DEC-1",
-      "unit_sha256": "a88ae7f5040ad5a3406d89da475913d7dc8c4cdf5bccb058f259d338f70dc9d3",
-      "unit_text": "- **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`, 코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다. 그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2). 근거: baseline B3 · B3-op · `app/latest_rates_cache.py:771-777` · `app/latest_rates_cache.py:646-651` · `app/config.py:390`.",
+      "unit_sha256": "d4970f898b2adf75259eff0acbd6c844ff68fddfd747333f385e514d7e45c63b",
+      "unit_text": "- **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`, 코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다. 그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2). 근거: baseline B3 · B3-op · `app/latest_rates_cache.py:787-793` · `app/latest_rates_cache.py:662-667` · `app/config.py:390`.",
       "classification": "code_fact",
       "detail": "tick writer의 coalesce와 일반 writer의 매회 SET, 코드 기본 OFF는 pinned code와 baseline B3가 뒷받침한다. 2026-05-26 운영 활성 기록은 코드 사실과 분리된 baseline B3-op로 명시했다.",
       "provenance": [
@@ -103,8 +103,8 @@
         "baseline:B3-op",
         "baseline:D2",
         "file:app/config.py:390",
-        "file:app/latest_rates_cache.py:646-651",
-        "file:app/latest_rates_cache.py:771-777"
+        "file:app/latest_rates_cache.py:662-667",
+        "file:app/latest_rates_cache.py:787-793"
       ]
     },
     {
