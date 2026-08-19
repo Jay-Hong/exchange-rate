@@ -1270,12 +1270,21 @@ tag와 image가 일치하지 않으면 실행하지 않는다.
 > 재복원했다. 신 image에서 같은 기능 축과 REST/DB 5개 hard gate를 모두 통과했고, 최종
 > container/image/latest·healthy·restart 0을 재확인했다. 봉인 증거는
 > `~/logs/krx-drill-20260819T071207Z/` (`FINAL_STATUS=DRILL_OK`, `SHA256SUMS` 13/13 OK)에 있다.
+> 원본 closure 뒤 실행본도 같은 디렉터리의 `FOLLOWUP_EXECUTOR-20260819T093436Z.*`로 별도
+> 보존했다(`sha256=d7d3012cea6a9900a80bcbce679a511495132e2bc59f00a1cb1067253fe6f5d3`,
+> 원본 13파일 closure는 불변).
 > 17:05~17:11 KST 사후 cron 4종도 정상 완료됐으며, 17:50 CM 재구독 ACK 후 18:00:01~18:00:17
 > 사이 신규 KRX tick 12건이 적재돼 실시간 복귀까지 확인했다(18:14 재조회 123건).
 >
-> ⚠️ **CM 개장(17:50)과 첫 체결(18:00) 사이 ~10분은 호가만 흐른다** — 실측으로 17:52 시점에
-> 호가 frame 145건·체결 0건이었다. 이 구간의 `source_rates` 신규 tick 0건은 연결 장애가
-> **아니다**. 복귀 판정은 `connected`+구독 ACK 로 하고, 신규 tick 은 첫 체결 이후에 본다.
+> ⚠️ [KRX 공식 야간거래 시간](https://global.krx.co.kr/contents/GLB/02/0201/0201041004/GLB0201041004.jsp)상
+> **17:50~18:00은 CM 시가단일가 호가접수 구간**이고 18:00에 시가를
+> 결정한 뒤 연속거래가 시작된다. 같은 계약이 이 리포에도 이미 적혀 있다 —
+> [app/sources/kis_futures.py:288-289](app/sources/kis_futures.py#L288-L289)
+> (`17:50 야간 개장 단일가 시작` / `18:00 야간거래 시작`). 코드가 `CM: 17:50-06:00`으로
+> 단일가를 세션에 통합한 것은 같은 파일 :292 의 **의도된 단순화**이지 개장 시각의 정의가 아니다. 2026-08-19 실측도 17:52에 호가 frame 145건·체결 0건이었다.
+> 따라서 이 구간의 `source_rates` 신규 tick 0건만으로 연결 장애를 판정하면 안 된다. 18:00 전
+> 복귀는 `connected` + 체결·호가 채널 구독 ACK + **호가 frame freshness**로 판정하고, 18:00
+> 이후에는 실제 체결 frame과 신규 tick을 추가로 요구한다.
 
 ```bash
 set -o pipefail
