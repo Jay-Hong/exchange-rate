@@ -280,11 +280,11 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 <a id="r-hand-4"></a>
 ### R-HAND-4
 
-- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** LOAD-S5 wrapper는 waiter마다
+- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5 wrapper는 waiter마다
   요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build를
   취소하지 않지만 마지막 waiter가 사라지면 shared task를 취소하고, worker는 각 phase 앞 checkpoint에서
   다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:102-198` ·
-  `app/topic_initial_snapshot.py:572-689`). 그러나 이미 시작한
+  `app/topic_initial_snapshot.py:201-225` · `app/topic_initial_snapshot.py:572-689`). 그러나 이미 시작한
   I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡으므로 그 상한도 함께 필요하다.
 <!-- /rid: R-HAND-4 -->
 

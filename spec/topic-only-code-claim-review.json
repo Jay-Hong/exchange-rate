@@ -12,7 +12,7 @@
     "ADR": "063d389809e85741695bcae1d9658164677a52897aef521ac4c26249daaca6a9",
     "CLIENT": "32c0065a9b97205b85b2d4f8af11e299194f8600da97e03420b853e5ca2e8af0",
     "CUT": "3ff7f1b1944ab935c509da83610486518428b207fc1214fc2568f90a9be0b957",
-    "HAND": "9a8f71a2b527168bb669dfe9e39826a195e15fd5fbdd347b06ee265abb715737",
+    "HAND": "32cb16f10f8f92bf6de3ce9e41cdef6dfc480ceae0da8391bbf2b2c65a76d6a8",
     "HEALTH": "b1be57eb60202c4da4b62a94067044b745f82d4ca438ce3526b721126e7ba886",
     "LOAD": "1be5c0daaca5bb8a0322e6264d14d7400bdac9e074a2e6aafb0dd23502da91e5"
   },
@@ -755,6 +755,19 @@
       "detail": "pinned C1은 build 실패의 조용한 경로를 close로 바꿨지만 baseline D3의 None skip은 유지한다. send가 시작되지 않는 None 경로에는 publish send-failure close 정책이 개입할 수 없다.",
       "provenance": [
         "baseline:D3"
+      ]
+    },
+    {
+      "destination": "HAND",
+      "rid": "R-HAND-4",
+      "unit_sha256": "5284dd57c8098fe9b79c009c53d83038d662c8f7a022a588da76c04c24c923d7",
+      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5 wrapper는 waiter마다 요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build를 취소하지 않지만 마지막 waiter가 사라지면 shared task를 취소하고, worker는 각 phase 앞 checkpoint에서 다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:102-198` · `app/topic_initial_snapshot.py:201-225` · `app/topic_initial_snapshot.py:572-689`). 그러나 이미 시작한 I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡으므로 그 상한도 함께 필요하다.",
+      "classification": "code_fact",
+      "detail": "pinned C1에서도 asyncio.to_thread의 in-flight I/O는 caller 취소로 즉시 멈추지 않는다. LOAD-S5 wrapper는 waiter마다 자기 요청 budget으로 shield(task)를 기다리고, shared build는 fork_for_shared_build()가 만든 독립 budget을 쓴다. 그래서 leader 취소는 build로 전파되지 않고, waiters가 0이 될 때만 shared task를 cancel한다. worker는 각 phase 앞 checkpoint()에서 다음 Redis/DB I/O 진입을 막으며, 이미 시작한 I/O의 종료는 LOAD-S2 DB/Redis timeout이 맡는다.",
+      "provenance": [
+        "file:app/topic_initial_snapshot.py:102-198",
+        "file:app/topic_initial_snapshot.py:201-225",
+        "file:app/topic_initial_snapshot.py:572-689"
       ]
     },
     {

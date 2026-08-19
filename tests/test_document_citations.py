@@ -102,7 +102,10 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     "CUT": 36,
     # 2026-08-19 LOAD-S3 C2: 실패 close/None 잔여, worker checkpoint, live publish close 잔여를
     #                현재 코드에 결속하면서 server locator 5건 증가 (19 → 24).
-    "HAND": 24,
+    # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 "각 phase 앞 checkpoint" 를 실제 worker 결속
+    #                (`_worker_checkpoint`/`_run_snapshot_worker`)으로 입증하는 locator 를
+    #                더해 +1 (24 → 25). 기존 두 locator 는 정의와 wrapper 만 보여줬다.
+    "HAND": 25,
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
@@ -387,9 +390,10 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     #                server locator 3건 증가 (126 → 129 / server 62 → 65).
     # 2026-08-19 LOAD-S3 C2: HAND +5, LOAD +1 (129 → 135 / server 65 → 71).
     # 2026-08-19 LOAD-S5 C2: LOAD +1 (135 → 136 / server 71 → 72).
-    assert len(references) == 136
+    # 2026-08-20 LOAD-S5 후속: HAND +1 (136 → 137 / server 72 → 73).
+    assert len(references) == 137
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 72, "ios": 64}
+    assert by_repo == {"server": 73, "ios": 64}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -612,6 +616,22 @@ REASONS = {
     "future-work",          # 아직 없는 것을 하겠다는 서술
 }
 
+# ⛔ 후보 집합이 보수적이라는 사실은 위에서 인정했다. 못 박는 대상은 **완전성이 아니라 축소의 가시성**이다.
+#    `topic-only-semantic-review.json` 의 scope 는 `_expected_scope` 가 현재 상태에서 **재계산**하므로,
+#    문장을 고쳐 쓰다 CURRENT_CUE 토큰(예: "현재")이 사라지면 code claim 이 리뷰 대상에서 조용히 빠지고
+#    게이트는 전부 통과한다. 보상 통제인 "후보 밖 역방향 감사"는 실행되는 검사가 아니라 **기록**이라
+#    hash 만 갱신돼도 통과한다 — 즉 아무도 다시 보지 않는다.
+#    실측(2026-08-19 LOAD-S5 C2): R-HAND-4 재작성이 "현재"를 지우며 65 → 64 로 줄었는데
+#    문서 게이트 206건과 preflight 가 모두 green 이었다.
+#    이 상수는 후보 집합을 완전하게 만들지 **않는다**. 축소를 **시끄럽게** 만들 뿐이다 —
+#    값을 바꾸려면 locator inventory 와 같은 규율(날짜 + 이유)을 함께 적는다.
+CLAIM_LEDGER_INVENTORY = {
+    # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 CURRENT_CUE 를 복원해 64 → 65 (code_fact 53 → 54).
+    "claim_candidates": 65,
+    "code_fact_entries": 54,
+    "normative_entries": 11,
+}
+
 
 def _norm(unit: str) -> str:
     return re.sub(r"\s+", " ", unit).strip()
@@ -824,6 +844,21 @@ def _ledger_unit_text_errors(
                 f"{entry.get('destination')}/{entry.get('rid')}: unit_text 가 문서 후보 원문과 다름"
             )
     return errors
+
+
+def test_claim_ledger_inventory_makes_review_surface_shrinkage_loud():
+    """문장 재작성이 code claim 을 조용히 리뷰 대상에서 떨어뜨리지 못하게 한다.
+
+    ⛔ 이 검사는 후보 집합이 **완전함을 증명하지 않는다**(보수적 lint 는 그대로다).
+       증명하는 것은 하나뿐이다 — 후보/분류 수가 바뀌면 **누군가 그 값을 손으로 고쳐야 한다**.
+    """
+    entries = json.loads(LEDGER_PATH.read_text())["entries"]
+    actual = {
+        "claim_candidates": len(_candidates()),
+        "code_fact_entries": sum(e["classification"] == "code_fact" for e in entries),
+        "normative_entries": sum(e["classification"] == "normative" for e in entries),
+    }
+    assert actual == CLAIM_LEDGER_INVENTORY
 
 
 def test_ledger_covers_exactly_the_candidate_set():
