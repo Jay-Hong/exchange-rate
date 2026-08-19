@@ -27,17 +27,32 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
                 # ⛔ 캡처기가 subscribe_load 계약도 검증한다 — 없으면 그 창의 분석이
                 #    필드 누락을 모른 채 계산된다.
                 "subscribe_load": {
-                    "contract_version": "subscribe-load/7",
+                    "contract_version": "subscribe-load/8",
                     "krx_entitlement": {"queue_wait_observed_total": 0,
-                                        "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0},
+                                        "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0,
+                                        "execution_observed_total": 0,
+                                        "execution_ms_sum": 0.0, "execution_ms_max": 0.0},
                     "snapshot_build": {"queue_wait_observed_total": 0,
-                                       "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0},
+                                       "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0,
+                                       "execution_observed_total": 0,
+                                       "execution_ms_sum": 0.0, "execution_ms_max": 0.0},
                     "snapshot_singleflight": {
                         "requests_total": 0,
                         "leaders_total": 0,
                         "joined_total": 0,
                         "cache_hits_total": 0,
                         "successes_cached_total": 0,
+                        "waiters_now": 0,
+                        "waiters_max": 0,
+                    },
+                    "snapshot_admission": {
+                        "queued_now": 0,
+                        "queued_max": 0,
+                        "wait_observed_total": 0,
+                        "wait_ms_sum": 0.0,
+                        "wait_ms_max": 0.0,
+                        "in_flight": 0,
+                        "in_flight_max": 0,
                     },
                 },
                 "topic_auth_rollout": {
@@ -580,6 +595,8 @@ class TestSubscribeLoadValidationStaysWired(unittest.TestCase):
             "joined_total": 3,
             "cache_hits_total": 2,
             "successes_cached_total": 2,
+            "waiters_now": 0,
+            "waiters_max": 3,
         })
         raw = json.dumps(body).encode()
         self.assertEqual(capture._subscribe_load_schema_errors(raw), [])
@@ -592,6 +609,25 @@ class TestSubscribeLoadValidationStaysWired(unittest.TestCase):
         block.pop("joined_total")
         errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
         self.assertTrue(any("joined_total" in error for error in errors))
+
+        body = json.loads(response())
+        body["metrics"]["subscribe_load"]["snapshot_admission"]["queued_now"] = -1
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("snapshot_admission.queued_now" in error for error in errors))
+
+        body = json.loads(response())
+        body["metrics"]["subscribe_load"]["snapshot_admission"].update(
+            queued_now=2, queued_max=1
+        )
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("queued_now exceeds queued_max" in error for error in errors))
+
+        body = json.loads(response())
+        body["metrics"]["subscribe_load"]["snapshot_singleflight"].update(
+            waiters_now=2, waiters_max=1
+        )
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("waiters_now exceeds waiters_max" in error for error in errors))
 
 if __name__ == "__main__":
     unittest.main()

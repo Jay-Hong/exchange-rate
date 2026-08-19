@@ -280,16 +280,23 @@ def _arrival_schema_errors(rollout: Mapping[str, object]) -> list[str]:
     return errors
 
 
-SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/7"
+SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/8"
 # ⛔ worker 축에만 있어야 한다 — caller-only 축에 생기면 제출 시각이 없는 자리에서 0 이 쌓여
 #    "대기 없음"으로 읽힌다. 축 목록은 **여기 literal** 이다(원본 파생을 쓰면 함께 줄어든다).
 SUBSCRIBE_LOAD_WORKER_AXES = ("krx_entitlement", "snapshot_build")
 SUBSCRIBE_LOAD_QUEUE_WAIT_FIELDS = (
     "queue_wait_observed_total", "queue_wait_ms_sum", "queue_wait_ms_max",
+    "execution_observed_total", "execution_ms_sum", "execution_ms_max",
 )
 SUBSCRIBE_LOAD_SINGLEFLIGHT_FIELDS = (
     "requests_total", "leaders_total", "joined_total", "cache_hits_total",
-    "successes_cached_total",
+    "successes_cached_total", "waiters_now", "waiters_max",
+)
+SUBSCRIBE_LOAD_ADMISSION_COUNT_FIELDS = (
+    "queued_now", "queued_max", "wait_observed_total", "in_flight", "in_flight_max",
+)
+SUBSCRIBE_LOAD_ADMISSION_DURATION_FIELDS = (
+    "wait_ms_sum", "wait_ms_max",
 )
 
 
@@ -348,6 +355,33 @@ def _subscribe_load_schema_errors(raw_body: bytes) -> list[str]:
                 errors.append(
                     "subscribe_load.snapshot_singleflight cached successes must not exceed leaders"
                 )
+            if counts["waiters_now"] > counts["waiters_max"]:
+                errors.append(
+                    "subscribe_load.snapshot_singleflight waiters_now exceeds waiters_max"
+                )
+    admission = block.get("snapshot_admission")
+    if not isinstance(admission, dict):
+        errors.append("subscribe_load.snapshot_admission must be an object")
+    else:
+        for field in SUBSCRIBE_LOAD_ADMISSION_COUNT_FIELDS:
+            if _safe_count(admission, field) is None:
+                errors.append(
+                    f"subscribe_load.snapshot_admission.{field} must be a non-negative integer"
+                )
+        for field in SUBSCRIBE_LOAD_ADMISSION_DURATION_FIELDS:
+            value = admission.get(field)
+            if not isinstance(value, (int, float, Decimal)) or isinstance(value, bool) or value < 0:
+                errors.append(
+                    f"subscribe_load.snapshot_admission.{field} must be non-negative"
+                )
+        queued_now = _safe_count(admission, "queued_now")
+        queued_max = _safe_count(admission, "queued_max")
+        in_flight = _safe_count(admission, "in_flight")
+        in_flight_max = _safe_count(admission, "in_flight_max")
+        if queued_now is not None and queued_max is not None and queued_now > queued_max:
+            errors.append("subscribe_load.snapshot_admission queued_now exceeds queued_max")
+        if in_flight is not None and in_flight_max is not None and in_flight > in_flight_max:
+            errors.append("subscribe_load.snapshot_admission in_flight exceeds in_flight_max")
     return errors
 
 

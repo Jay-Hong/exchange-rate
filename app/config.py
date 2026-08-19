@@ -647,6 +647,19 @@ WS_TOPIC_REQUEST_DEADLINE_SECONDS = float(
     os.getenv("WS_TOPIC_REQUEST_DEADLINE_SECONDS", "25")
 )
 
+# ── LOAD-S6 — shared snapshot build admission ────────────────────────────────
+# 새 single-flight leader만 이 동시 실행 상한을 쓴다. 기존 flight join과 성공 cache hit는 slot을
+# 소비하지 않는다. 4는 dormant 메커니즘 기본값이지 운영 승인값이 아니다 — 최소 default executor
+# 용량(1 CPU여도 cpu+4=5)보다 하나 낮아 새 shared build의 executor 진입을 제한한다.
+# 단, 취소된 to_thread worker는 다음 협력 checkpoint까지 잠시 남을 수 있으므로 이 값은 실제
+# executor thread 점유의 순간 상한이 아니라 admission permit을 가진 shared task 수의 상한이다.
+# 실제 운영값은 LOAD-S4 부하 리허설에서 admission wait와 executor queue wait를 따로 보고 정한다.
+# ⚠️ waiter queue 자체는 hard cap이 없다. 각 waiter의 S3 deadline만 대기 시간을 자르므로
+# "메모리까지 bounded"라고 주장하지 않는다.
+WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS = int(
+    os.getenv("WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", "4")
+)
+
 # ── LOAD-S5 — topic snapshot 성공 cache freshness ceiling ───────────────────
 # 이 값은 용량 튜닝값이 아니라 v1 live 최신성 계약(서버 수신 뒤 1초 이내 반영)의 **상한**이다.
 # 실제 invalidation은 `topic_dispatcher.publish_topic*`가 올리는 topic generation이 맡고, TTL은
@@ -672,6 +685,8 @@ if WS_TOPIC_SNAPSHOT_BUDGET_SECONDS > WS_TOPIC_REQUEST_DEADLINE_SECONDS:
     raise ValueError("WS topic snapshot budget must not exceed the request deadline")
 if WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS > 1.0:
     raise ValueError("WS topic snapshot cache TTL must not exceed the 1s live freshness contract")
+if not 1 <= WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS <= 32:
+    raise ValueError("WS topic snapshot concurrent builds must be between 1 and 32")
 
 # §8-C `temporarily_unavailable` 동반값 (일시 장애).
 WS_AUTH_RETRY_AFTER_SECONDS = 5

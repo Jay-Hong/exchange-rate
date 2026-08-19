@@ -469,6 +469,72 @@ class _SnapshotFlight:
     waiters: int = 0
 
 
+class _SnapshotAdmissionPermit:
+    """Shared build에 소유권을 넘기는 LOAD-S6 slot."""
+
+    def __init__(self, semaphore: asyncio.Semaphore, *, metric_tracked: bool) -> None:
+        self._semaphore = semaphore
+        self._metric_tracked = metric_tracked
+        self._released = False
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        self._semaphore.release()
+        subscribe_load.record_snapshot_admission_released(
+            tracked=self._metric_tracked
+        )
+
+
+class _SnapshotAdmission:
+    """새 shared build만 제한하는 FIFO admission.
+
+    `asyncio.Semaphore.acquire()`는 지원 Python 3.13에서 기존 waiter를 FIFO로 깨운다. locked 상태를
+    즉시거절에 쓰지 않고 항상 caller의 남은 S3 예산 안에서 기다린다. 대기열 개수에는 hard cap이
+    없으므로 이 클래스가 보장하는 것은 admission permit을 가진 shared task 수와 대기 **시간**의
+    상한뿐이다. 취소된 sync worker는 다음 협력 checkpoint까지 executor에서 잠시 남을 수 있다.
+    """
+
+    def __init__(self, max_concurrent: int) -> None:
+        if max_concurrent <= 0:
+            raise ValueError("snapshot admission max_concurrent must be positive")
+        self.max_concurrent = max_concurrent
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+
+    async def acquire(
+        self, topic: str, budget: SnapshotRequestBudget
+    ) -> _SnapshotAdmissionPermit:
+        remaining = budget.remaining_snapshot_seconds()
+        if remaining <= 0:
+            budget.stop("deadline")
+            raise SnapshotDeadlineExceeded(topic)
+
+        queued = self._semaphore.locked()
+        wait_started = (
+            subscribe_load.begin_snapshot_admission_wait() if queued else None
+        )
+        deadline_cm = asyncio.timeout(remaining)
+        try:
+            try:
+                async with deadline_cm:
+                    await self._semaphore.acquire()
+            except asyncio.TimeoutError as exc:
+                if not deadline_cm.expired():
+                    raise
+                budget.stop("deadline")
+                raise SnapshotDeadlineExceeded(topic) from exc
+        finally:
+            if queued:
+                subscribe_load.finish_snapshot_admission_wait(wait_started)
+
+        # acquire 이후 다음 await 전에는 cancellation이 주입되지 않으므로 permit 소유권이 갈리지 않는다.
+        metric_tracked = subscribe_load.record_snapshot_admission_acquired()
+        return _SnapshotAdmissionPermit(
+            self._semaphore, metric_tracked=metric_tracked
+        )
+
+
 @dataclass(frozen=True)
 class _SnapshotSuccessCacheEntry:
     # cache-owned dict는 caller에게 직접 노출하지 않는다. 모든 반환은 deepcopy다.
@@ -483,6 +549,11 @@ class _SnapshotSingleflightState:
     flights: Dict[SnapshotBuildKey, _SnapshotFlight] = field(default_factory=dict)
     success_cache: Dict[SnapshotBuildKey, _SnapshotSuccessCacheEntry] = field(
         default_factory=dict
+    )
+    admission: _SnapshotAdmission = field(
+        default_factory=lambda: _SnapshotAdmission(
+            config.WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS
+        )
     )
 
 
@@ -552,7 +623,11 @@ async def _run_shared_snapshot_build(
 ) -> Optional[Dict[str, Any]]:
     """registry entry의 유일한 정리 소유자. 실패/취소는 성공 cache에 넣지 않는다."""
     task = asyncio.current_task()
+    permit: Optional[_SnapshotAdmissionPermit] = None
     try:
+        # Flight를 registry에 먼저 게시한 뒤 shared task가 slot을 기다린다. 반대 순서면 같은 key의
+        # 후속 요청도 각각 admission에 줄을 서서 이미 생긴 flight를 build 완료 전까지 join 못 한다.
+        permit = await state.admission.acquire(key.topic, budget)
         payload = await _build_snapshot_once_observed(key.topic, budget=budget)
         if payload is not None and _snapshot_build_key(key.topic) == key:
             state.success_cache[key] = _SnapshotSuccessCacheEntry(
@@ -564,6 +639,8 @@ async def _run_shared_snapshot_build(
             subscribe_load.record_snapshot_success_cached()
         return payload
     finally:
+        if permit is not None:
+            permit.release()
         current = state.flights.get(key)
         if current is not None and current.task is task:
             state.flights.pop(key, None)
@@ -609,7 +686,7 @@ async def build_snapshot_observed(
     else:
         disposition = "joined"
     flight.waiters += 1
-    subscribe_load.record_snapshot_singleflight(disposition)
+    waiter_metric_tracked = subscribe_load.record_snapshot_singleflight(disposition)
 
     deadline_cm = asyncio.timeout(remaining)
     try:
@@ -627,6 +704,7 @@ async def build_snapshot_observed(
         raise
     finally:
         flight.waiters -= 1
+        subscribe_load.record_snapshot_waiter_released(tracked=waiter_metric_tracked)
         if flight.waiters == 0 and not flight.task.done():
             # waiter는 취소 요청만 한다. registry 제거는 shared task의 finally 한 곳이 소유한다.
             flight.task.cancel()

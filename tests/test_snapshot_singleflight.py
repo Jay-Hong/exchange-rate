@@ -12,15 +12,16 @@ from unittest.mock import patch
 from app import config, subscribe_load_metrics as slm, topic_dispatcher
 from app import topic_initial_snapshot as snapshot
 from app.topic_initial_snapshot import (
+    SnapshotDeadlineExceeded,
     SnapshotRequestBudget,
     build_snapshot_observed,
 )
 
 
-def _budget() -> SnapshotRequestBudget:
+def _budget(*, snapshot_seconds: float = 10.0) -> SnapshotRequestBudget:
     return SnapshotRequestBudget(
         ack_deadline_seconds=5.0,
-        snapshot_budget_seconds=10.0,
+        snapshot_budget_seconds=snapshot_seconds,
         request_deadline_seconds=20.0,
     )
 
@@ -60,7 +61,7 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
                 "data": {"rates": [{"rate": 1400.0}]},
             }
 
-        with patch(
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 1), patch(
             "app.topic_initial_snapshot._build_snapshot_once_observed",
             side_effect=build,
         ):
@@ -88,6 +89,12 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metrics["leaders_total"], 1)
         self.assertEqual(metrics["joined_total"], 19)
         self.assertEqual(metrics["successes_cached_total"], 1)
+        self.assertEqual(metrics["waiters_max"], 20)
+        self.assertEqual(
+            slm.subscribe_load_metrics()["snapshot_admission"]["queued_max"],
+            0,
+            "기존 flight join이 admission queue를 다시 탔다",
+        )
 
         cached = await build_snapshot_observed("usdt:krw", budget=_budget())
         self.assertEqual(cached["data"]["rates"][0]["rate"], 1400.0)
@@ -136,6 +143,14 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
                 await leader
             self.assertEqual(leader_budget.stop_reason, "caller_cancelled")
             self.assertFalse(cancelled.is_set(), "leader 취소가 shared task까지 전파됐다")
+            self.assertEqual(
+                slm.subscribe_load_metrics()["snapshot_admission"]["in_flight"],
+                1,
+                "leader caller 취소가 shared task의 permit을 조기 반환했다",
+            )
+            self.assertEqual(
+                slm.subscribe_load_metrics()["snapshot_singleflight"]["waiters_now"], 1
+            )
             self.assertIsNot(shared_budgets[0], leader_budget)
             self.assertIsNot(shared_budgets[0], follower_budget)
 
@@ -145,6 +160,9 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
                 {"type": "snapshot", "topic": "usdt:krw", "data": {}},
             )
             self.assertIsNone(shared_budgets[0].stop_reason)
+            self.assertEqual(
+                slm.subscribe_load_metrics()["snapshot_admission"]["in_flight"], 0
+            )
 
     async def test_failure_and_last_waiter_cancellation_remove_flight_for_retry(self):
         entered = asyncio.Event()
@@ -321,6 +339,9 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSnapshotCacheConfig(unittest.TestCase):
+    def test_admission_capacity_has_a_finite_dormant_default(self):
+        self.assertEqual(config.WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS, 4)
+
     def test_cache_ttl_is_positive_and_no_more_than_live_freshness_contract(self):
         self.assertGreater(config.WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS, 0)
         self.assertLessEqual(config.WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS, 1.0)
@@ -341,6 +362,203 @@ class TestSnapshotCacheConfig(unittest.TestCase):
                 )
                 self.assertNotEqual(proc.returncode, 0)
                 self.assertIn("TTL", proc.stderr)
+
+    def test_invalid_admission_capacity_fails_at_config_import(self):
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        for value in ("0", "33", "not-an-int"):
+            with self.subTest(value=value):
+                env = os.environ.copy()
+                env["WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS"] = value
+                proc = subprocess.run(
+                    [sys.executable, "-c", "import app.config"],
+                    cwd=repo,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertNotEqual(proc.returncode, 0)
+
+
+class TestSnapshotAdmission(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        topic_dispatcher._topic_payload_generations.clear()
+        with slm._lock:
+            slm._metrics.clear()
+            slm._metrics.update(slm._blank())
+
+    async def test_fifo_queue_absorbs_short_predecessors_without_rejection(self):
+        entered = {topic: asyncio.Event() for topic in ("test:a", "test:b", "test:c")}
+        release = {topic: asyncio.Event() for topic in entered}
+        order = []
+
+        async def build(topic, *, budget):
+            order.append(topic)
+            entered[topic].set()
+            await release[topic].wait()
+            return {"type": "snapshot", "topic": topic, "data": {}}
+
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 1), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed", side_effect=build
+        ):
+            first = asyncio.create_task(build_snapshot_observed("test:a", budget=_budget()))
+            await entered["test:a"].wait()
+            second = asyncio.create_task(build_snapshot_observed("test:b", budget=_budget()))
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_admission"]["queued_now"] == 1
+            )
+            third = asyncio.create_task(build_snapshot_observed("test:c", budget=_budget()))
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_admission"]["queued_now"] == 2
+            )
+
+            release["test:a"].set()
+            await entered["test:b"].wait()
+            self.assertFalse(entered["test:c"].is_set(), "FIFO 앞의 request를 건너뛰었다")
+            release["test:b"].set()
+            await entered["test:c"].wait()
+            release["test:c"].set()
+            await asyncio.gather(first, second, third)
+
+        self.assertEqual(order, ["test:a", "test:b", "test:c"])
+        admission = slm.subscribe_load_metrics()["snapshot_admission"]
+        self.assertEqual(admission["queued_now"], 0)
+        self.assertEqual(admission["in_flight"], 0)
+        self.assertEqual(admission["queued_max"], 2)
+        self.assertEqual(admission["wait_observed_total"], 2)
+        self.assertEqual(
+            slm.subscribe_load_metrics()["snapshot_singleflight"]["waiters_now"], 0
+        )
+
+    async def test_queued_deadline_never_starts_builder_and_releases_gauges(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = []
+
+        async def build(topic, *, budget):
+            calls.append(topic)
+            entered.set()
+            await release.wait()
+            return {"type": "snapshot", "topic": topic, "data": {}}
+
+        waiting_budget = _budget(snapshot_seconds=0.05)
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 1), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed", side_effect=build
+        ):
+            holder = asyncio.create_task(build_snapshot_observed("test:holder", budget=_budget()))
+            await entered.wait()
+            with self.assertRaises(SnapshotDeadlineExceeded):
+                await build_snapshot_observed("test:expired", budget=waiting_budget)
+            self.assertEqual(calls, ["test:holder"])
+            self.assertEqual(waiting_budget.stop_reason, "deadline")
+            release.set()
+            await holder
+
+        metrics = slm.subscribe_load_metrics()
+        self.assertEqual(metrics["snapshot_admission"]["queued_now"], 0)
+        self.assertEqual(metrics["snapshot_admission"]["in_flight"], 0)
+        self.assertEqual(metrics["snapshot_singleflight"]["waiters_now"], 0)
+
+    async def test_same_key_joins_a_flight_that_is_still_waiting_for_admission(self):
+        holder_entered = asyncio.Event()
+        holder_release = asyncio.Event()
+        same_entered = asyncio.Event()
+        calls = []
+
+        async def build(topic, *, budget):
+            calls.append(topic)
+            if topic == "test:holder":
+                holder_entered.set()
+                await holder_release.wait()
+            else:
+                same_entered.set()
+            return {"type": "snapshot", "topic": topic, "data": {}}
+
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 1), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed", side_effect=build
+        ):
+            holder = asyncio.create_task(build_snapshot_observed("test:holder", budget=_budget()))
+            await holder_entered.wait()
+            leader = asyncio.create_task(build_snapshot_observed("test:same", budget=_budget()))
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_admission"]["queued_now"] == 1
+            )
+            follower = asyncio.create_task(build_snapshot_observed("test:same", budget=_budget()))
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_singleflight"]["joined_total"] == 1
+            )
+            self.assertEqual(
+                slm.subscribe_load_metrics()["snapshot_admission"]["queued_now"], 1,
+                "같은 key follower가 기존 queued flight를 join하지 않고 admission에 중복 진입했다",
+            )
+            holder_release.set()
+            await same_entered.wait()
+            await asyncio.gather(holder, leader, follower)
+
+        self.assertEqual(calls.count("test:same"), 1)
+        admission = slm.subscribe_load_metrics()["snapshot_admission"]
+        self.assertEqual((admission["queued_now"], admission["in_flight"]), (0, 0))
+        self.assertEqual(
+            slm.subscribe_load_metrics()["snapshot_singleflight"]["waiters_now"], 0
+        )
+
+    async def test_queued_cancel_and_builder_error_both_release_admission_state(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold(topic, *, budget):
+            entered.set()
+            await release.wait()
+            return {"type": "snapshot", "topic": topic, "data": {}}
+
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 1), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed", side_effect=hold
+        ):
+            holder = asyncio.create_task(build_snapshot_observed("test:holder", budget=_budget()))
+            await entered.wait()
+            queued = asyncio.create_task(build_snapshot_observed("test:cancel", budget=_budget()))
+            await _wait_until(
+                lambda: slm.subscribe_load_metrics()["snapshot_admission"]["queued_now"] == 1
+            )
+            queued.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await queued
+            release.set()
+            await holder
+
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 1), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                await build_snapshot_observed("test:error", budget=_budget())
+
+        metrics = slm.subscribe_load_metrics()
+        self.assertEqual(metrics["snapshot_admission"]["queued_now"], 0)
+        self.assertEqual(metrics["snapshot_admission"]["in_flight"], 0)
+        self.assertEqual(metrics["snapshot_singleflight"]["waiters_now"], 0)
+
+    async def test_different_topics_are_not_serialized_by_registry_lock(self):
+        entered = {"test:slow": asyncio.Event(), "test:fast": asyncio.Event()}
+        release = asyncio.Event()
+
+        async def build(topic, *, budget):
+            entered[topic].set()
+            if topic == "test:slow":
+                await release.wait()
+            return {"type": "snapshot", "topic": topic, "data": {}}
+
+        with patch.object(config, "WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", 2), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed", side_effect=build
+        ):
+            slow = asyncio.create_task(build_snapshot_observed("test:slow", budget=_budget()))
+            await entered["test:slow"].wait()
+            fast = asyncio.create_task(build_snapshot_observed("test:fast", budget=_budget()))
+            await asyncio.wait_for(entered["test:fast"].wait(), timeout=0.2)
+            self.assertTrue(slow.done() is False)
+            self.assertEqual((await fast)["topic"], "test:fast")
+            release.set()
+            await slow
 
 
 if __name__ == "__main__":

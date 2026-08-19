@@ -50,12 +50,44 @@ TEST_TARGETS = [
     "tests/test_subscribe_load_terminal_wiring.py",
     "tests/test_topic_authorization.py",
     "tests/test_topic_initial_snapshot.py",
+    "tests/test_snapshot_singleflight.py",
 ]
 
 # (라벨, 대상 파일, old, new). old/new 가 tuple 이면 **다중 pair 를 순차 적용**하는 한 변이다
 # — "이동"(제거+이식)은 반드시 다중 pair 로 표현한다(단일 pair 로 나누면 각각이 제거/중복
 # 변이가 되어 라벨과 불일치 — 실측 2회 반복된 실수). 각 old 는 정확히 1회 등장해야 한다.
 MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 같은 길이의 tuple
+    # ── LOAD-S6: FIFO admission + 별도 execution 계측 ───────────────────────
+    ("LOAD-S6-01 admission acquire 우회", SNAPSHOT,
+     "        permit = await state.admission.acquire(key.topic, budget)",
+     "        permit = _SnapshotAdmissionPermit(asyncio.Semaphore(0), metric_tracked=False)"),
+    ("LOAD-S6-02 포화 시 즉시거절 복귀", SNAPSHOT,
+     "        permit = await state.admission.acquire(key.topic, budget)",
+     '''        if state.admission._semaphore.locked():
+            raise SnapshotDeadlineExceeded(key.topic)
+        permit = await state.admission.acquire(key.topic, budget)'''),
+    ("LOAD-S6-03 shared task permit 소유권 제거", SNAPSHOT,
+     '''        permit = await state.admission.acquire(key.topic, budget)
+        payload = await _build_snapshot_once_observed(key.topic, budget=budget)''',
+     '''        permit = await state.admission.acquire(key.topic, budget)
+        permit.release()  # mutation: shared build 전에 slot을 조기 반환
+        payload = await _build_snapshot_once_observed(key.topic, budget=budget)'''),
+    ("LOAD-S6-04 cross-topic 용량을 1로 축소", SNAPSHOT,
+     '''        default_factory=lambda: _SnapshotAdmission(
+            config.WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS
+        )''',
+     "        default_factory=lambda: _SnapshotAdmission(1)"),
+    ("LOAD-S6-05 worker execution 관측 제거", MODULE,
+     '''                    if execution_ms is not None:
+                        block["execution_observed_total"] += 1
+                        block["execution_ms_sum"] += execution_ms
+                        block["execution_ms_max"] = max(
+                            block["execution_ms_max"], execution_ms
+                        )''',
+     "                    pass  # mutation: execution timing dropped"),
+    ("LOAD-S6-06 waiter gauge 반환 제거", SNAPSHOT,
+     "        subscribe_load.record_snapshot_waiter_released(tracked=waiter_metric_tracked)",
+     "        pass  # mutation: waiter gauge leaked"),
     # ── S1c: 저장 스키마 ≠ 제출 allowlist ──────────────────────────────
     ("S1c-01 _resolve_outcome 검증 → 저장 스키마 복귀", MODULE,
      "if not isinstance(candidate, str) or candidate not in SUBMITTABLE_OUTCOMES[axis]:",
@@ -75,7 +107,7 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
      '        "calls_by_channel": {name: 0 for name in CHANNELS},'),
     # ⚠️ 앵커는 현행 버전을 따라간다 — 버전이 오를 때마다 이 변이도 함께 갱신(S1c-07 계보).
     ("S1c-07 CONTRACT_VERSION 롤백", MODULE,
-     'CONTRACT_VERSION = "subscribe-load/7"', 'CONTRACT_VERSION = "subscribe-load/6"'),
+     'CONTRACT_VERSION = "subscribe-load/8"', 'CONTRACT_VERSION = "subscribe-load/7"'),
     ("S1c-08 premium 제출 집합 축소(unavailable_persistent)", MODULE,
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),\n    KRX_ENTITLEMENT:',
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient"}),\n    KRX_ENTITLEMENT:'),

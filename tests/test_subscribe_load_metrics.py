@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/7")
+        self.assertEqual(snap["contract_version"], "subscribe-load/8")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -69,8 +69,12 @@ class TestFieldContract(SubscribeLoadTestCase):
         """⛔ worker 축에만 queue_wait 이 있어야 한다 — caller-only 축에 생기면 제출 시각이
         없는 자리에서 0 이 쌓여 '대기 없음'으로 읽힌다."""
         snap = self._snapshot()
+        worker_timing_fields = {
+            "queue_wait_ms_sum", "queue_wait_ms_max", "queue_wait_observed_total",
+            "execution_ms_sum", "execution_ms_max", "execution_observed_total",
+        }
         for axis in slm.AXIS_OUTCOMES:
-            has = {"queue_wait_ms_sum", "queue_wait_ms_max", "queue_wait_observed_total"} <= set(snap[axis])
+            has = worker_timing_fields <= set(snap[axis])
             self.assertEqual(has, axis in slm.WORKER_AXES, f"{axis}: queue_wait 필드 배치가 틀렸다")
 
     def test_queue_wait_is_unobserved_without_a_submit_stamp(self):
@@ -223,14 +227,15 @@ class TestFieldContract(SubscribeLoadTestCase):
         self.assertEqual(sorted(snap), sorted(
              ["contract_version", "scope", "caveat", "metrics_internal_errors_total",
              slm.PREMIUM_RC, slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD, "snapshot_send",
-             "snapshot_singleflight", "terminal"]))
+             "snapshot_singleflight", "snapshot_admission", "terminal"]))
         self.assertEqual(sorted(snap["terminal"]), sorted(
             ["auth_wire_deadline_expired_by_stage", "subscribe_auth_failed_by_error"]))
         caller_fields = ["started_total", "by_outcome", "duration_ms_sum", "duration_ms_max",
                          "callers_awaiting", "callers_awaiting_max"]
         worker_fields = ["worker_started_total", "worker_finished_total",
                          "worker_in_flight", "worker_in_flight_max",
-                         "queue_wait_observed_total", "queue_wait_ms_sum", "queue_wait_ms_max"]
+                         "queue_wait_observed_total", "queue_wait_ms_sum", "queue_wait_ms_max",
+                         "execution_observed_total", "execution_ms_sum", "execution_ms_max"]
         self.assertEqual(sorted(snap[slm.PREMIUM_RC]), sorted(caller_fields),
                          "premium 에 worker 축이 생기면 '정상 0' 과 '고장 0' 이 섞인다")
         for axis in (slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD):
@@ -239,7 +244,11 @@ class TestFieldContract(SubscribeLoadTestCase):
                          sorted(["calls_by_channel", "topics_deduped_total", "sends_by_outcome"]))
         self.assertEqual(sorted(snap["snapshot_singleflight"]), sorted([
             "requests_total", "leaders_total", "joined_total", "cache_hits_total",
-            "successes_cached_total",
+            "successes_cached_total", "waiters_now", "waiters_max",
+        ]))
+        self.assertEqual(sorted(snap["snapshot_admission"]), sorted([
+            "queued_now", "queued_max", "wait_observed_total", "wait_ms_sum",
+            "wait_ms_max", "in_flight", "in_flight_max",
         ]))
 
     def test_unknown_axis_is_refused(self):
@@ -827,6 +836,26 @@ class TestWorkerAxis(SubscribeLoadTestCase):
         snap = self._snapshot()[slm.SNAPSHOT_BUILD]
         self.assertEqual((snap["worker_started_total"], snap["worker_finished_total"]), (1, 1))
         self.assertEqual(snap["worker_in_flight"], 0)
+        self.assertEqual(snap["execution_observed_total"], 1)
+
+    def test_worker_execution_time_is_separate_from_executor_queue_wait(self):
+        from unittest.mock import patch
+
+        class _Clock:
+            def __init__(self):
+                self.values = iter((10.0, 10.25))
+
+            def monotonic(self):
+                return next(self.values)
+
+        handle = slm.WorkHandle(slm.SNAPSHOT_BUILD)
+        with patch.object(slm, "time", _Clock()):
+            slm.timed_call(slm.SNAPSHOT_BUILD, handle, lambda: None)
+        snap = self._snapshot()[slm.SNAPSHOT_BUILD]
+        self.assertEqual(snap["queue_wait_observed_total"], 0)
+        self.assertEqual(snap["execution_observed_total"], 1)
+        self.assertAlmostEqual(snap["execution_ms_sum"], 250.0, places=3)
+        self.assertAlmostEqual(snap["execution_ms_max"], 250.0, places=3)
 
     def test_positional_only_protects_targets_that_share_parameter_names(self):
         """⛔ positional-only 가 없으면 대상 함수의 `axis`/`handle`/`fn` 키워드가 wrapper 의

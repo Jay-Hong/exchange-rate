@@ -178,6 +178,29 @@ phase를 시작하지 않게 한다.
 - timeout·취소·builder 오류 모든 경로에서 waiter/queued gauge가 0으로 복귀한다.
 - 서로 다른 topic의 장시간 작업이 한 topic의 registry lock 때문에 직렬화되지 않는다.
 
+### 구현 결과 (2026-08-20)
+
+- 새 shared flight task만 process-local FIFO admission을 통과한다. flight를 registry에 먼저 게시해
+  같은 key의 후속 요청은 admission에 중복 대기하지 않고 즉시 그 shared task에 join한다. 기존 flight
+  join과 성공 cache hit는 slot을 소비하지 않는다.
+- 동시 build 기본값은 `WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS=4`다. dormant 메커니즘 값이며
+  LOAD-S4 부하 리허설 전 운영 승인값으로 간주하지 않는다. permit은 leader caller가 아니라 shared
+  task가 소유해 caller 하나의 취소가 살아 있는 build의 slot을 조기 반환하지 않는다.
+- 각 leader 후보는 자기 LOAD-S3 남은 예산으로 FIFO slot을 기다린다. 예산 소진 전 즉시거절은 없고,
+  queue에서 만료된 요청은 builder를 시작하지 않은 채 기존 deadline 경로(WS post-ACK 1013 / REST
+  503)로 합류한다.
+- `subscribe-load/8`은 `snapshot_singleflight.waiters_now/max`와 `snapshot_admission`의
+  queued/in-flight gauge·admission wait를 별도로 싣는다. 기존 `snapshot_build.queue_wait`는 executor
+  제출→worker 시작을, `execution_ms`는 worker 본문을 재므로 admission 포화·executor 포화·느린 I/O를
+  섞지 않는다.
+- FIFO 성공, queue deadline의 builder 0회, queue cancel·builder 오류 뒤 gauge 0, 서로 다른 topic의
+  병렬 시작을 행동 테스트로 잠갔다.
+
+⚠️ 대기열 **개수**에는 hard cap이 없다. 이 슬라이스가 유계로 만든 것은 동시 build 수와 각 caller의
+대기 시간뿐이다. 여기서 동시 build 수는 **admission permit을 가진 shared task 수**다. 취소된
+`to_thread` worker는 다음 협력 checkpoint까지 executor thread를 잠시 더 점유할 수 있으므로 실제
+thread 점유의 순간 상한이라고 쓰지 않는다. 메모리 상한이나 ingress 상한 완료라고도 쓰지 않는다.
+
 ## LOAD-S7 — 서버 실패 cooldown
 
 ### 목표

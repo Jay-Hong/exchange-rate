@@ -89,7 +89,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/7"
+CONTRACT_VERSION = "subscribe-load/8"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -170,6 +170,10 @@ CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
     "프로세스 재기동 시 0 · "
     "**snapshot_build 는 WS 와 REST twin 의 합산**(같은 default executor·I/O 를 쓰므로 용량 산정에 합산이 필요) · "
+    "snapshot_singleflight.waiters 는 shared task를 기다리는 caller 수(cache hit 제외) · "
+    "snapshot_admission 은 새 shared flight task만 세며 기존 flight join·cache hit는 제외 · "
+    "admission wait 은 앱 FIFO slot 대기, snapshot_build.queue_wait 은 executor 제출→worker 시작 대기 · "
+    "admission queued 는 시간만 S3 deadline으로 유계이고 개수 hard cap은 없음 · "
     "snapshot_send·terminal 은 WS 전용(REST 는 channel/wire 개념이 없다) · "
     "queue_wait 은 제출→worker 시작이며 **worker 시작 시점에** 기록한다(caller 반환 시점 기록은 취소된 caller 의 대기를 통째로 잃는다 — 폭주에서 가장 흔한 경로) · "
     "mark_submitted 미호출이면 queue_wait 미관측(count 에 안 들어간다) · "
@@ -206,6 +210,10 @@ def _blank() -> dict[str, Any]:
                 "queue_wait_ms_sum": 0.0,
                 "queue_wait_ms_max": 0.0,
                 "queue_wait_observed_total": 0,
+                # worker 본문 시작→종료. caller duration이나 executor queue wait와 섞지 않는다.
+                "execution_ms_sum": 0.0,
+                "execution_ms_max": 0.0,
+                "execution_observed_total": 0,
             })
         axes[axis] = block
     axes["snapshot_send"] = {
@@ -219,6 +227,17 @@ def _blank() -> dict[str, Any]:
         "joined_total": 0,
         "cache_hits_total": 0,
         "successes_cached_total": 0,
+        "waiters_now": 0,
+        "waiters_max": 0,
+    }
+    axes["snapshot_admission"] = {
+        "queued_now": 0,
+        "queued_max": 0,
+        "wait_observed_total": 0,
+        "wait_ms_sum": 0.0,
+        "wait_ms_max": 0.0,
+        "in_flight": 0,
+        "in_flight_max": 0,
     }
     axes["terminal"] = {
         "auth_wire_deadline_expired_by_stage": {name: 0 for name in DEADLINE_STAGE_KEYS},
@@ -569,17 +588,48 @@ def timed_call(axis: str, handle: WorkHandle, fn: Callable[..., T], /, *args: An
     except Exception:  # noqa: BLE001
         _note_internal_error()
         _warn("subscribe-load: worker 진입 부기 실패", axis=axis, exc_info=sys.exc_info())
+    execution_started: Optional[float] = None
+    try:
+        execution_started = time.monotonic()
+    except Exception:  # noqa: BLE001 — 실행시간 미관측이 target을 막지 않는다
+        _note_internal_error()
+        _warn("subscribe-load: worker 실행 시작 시각 기록 실패",
+              axis=axis, exc_info=sys.exc_info())
     try:
         return fn(*args, **kwargs)
     finally:
+        execution_ms: Optional[float] = None
+        execution_clock_failure: Optional[tuple] = None
+        if execution_started is not None:
+            try:
+                execution_ms = max(
+                    0.0, (time.monotonic() - execution_started) * 1000.0
+                )
+            except Exception:  # noqa: BLE001 — worker_finished는 계속 기록한다
+                execution_clock_failure = sys.exc_info()
         # ⚠️ 진입을 못 셌으면 종료도 세지 않는다 — `worker_in_flight` 가 음수가 된다.
         if counted:
             try:
                 with _lock:
-                    _metrics[axis]["worker_finished_total"] += 1
+                    block = _metrics[axis]
+                    block["worker_finished_total"] += 1
+                    if execution_ms is not None:
+                        block["execution_observed_total"] += 1
+                        block["execution_ms_sum"] += execution_ms
+                        block["execution_ms_max"] = max(
+                            block["execution_ms_max"], execution_ms
+                        )
             except Exception:  # noqa: BLE001
                 _note_internal_error()
                 _warn("subscribe-load: worker 종료 부기 실패", axis=axis, exc_info=sys.exc_info())
+            else:
+                if execution_clock_failure is not None:
+                    _note_internal_error()
+                    _warn(
+                        "subscribe-load: worker 실행 종료 시각 기록 실패 — 종료 gauge만 반환",
+                        axis=axis,
+                        exc_info=execution_clock_failure,
+                    )
 
 
 def record_snapshot_call(channel: str) -> None:
@@ -654,8 +704,8 @@ def record_snapshot_send(outcome: str) -> None:
         _warn("subscribe-load: allowlist 밖 send outcome — unclassified 로 접는다", axis="snapshot_send")
 
 
-def record_snapshot_singleflight(disposition: str) -> None:
-    """LOAD-S5 요청 1건을 leader/join/cache-hit 중 하나로 고정 cardinality 기록한다."""
+def record_snapshot_singleflight(disposition: str) -> bool:
+    """요청 분류를 기록하고 shared task waiter면 release용 tracked=True를 반환한다."""
     field_by_disposition = {
         "leader": "leaders_total",
         "joined": "joined_total",
@@ -667,11 +717,121 @@ def record_snapshot_singleflight(disposition: str) -> None:
             block = _metrics["snapshot_singleflight"]
             block["requests_total"] += 1
             block[field] += 1
+            waiter = disposition in {"leader", "joined"}
+            if waiter:
+                block["waiters_now"] += 1
+                block["waiters_max"] = max(block["waiters_max"], block["waiters_now"])
+        return waiter
     except Exception:  # noqa: BLE001 — 관측이 snapshot 결과를 결정하지 않는다
         _note_internal_error()
         _warn(
             "subscribe-load: snapshot single-flight 기록 실패",
             axis="snapshot_singleflight",
+            exc_info=sys.exc_info(),
+        )
+        return False
+
+
+def record_snapshot_waiter_released(*, tracked: bool) -> None:
+    """Shared task 대기의 모든 종결(timeout·cancel·build 결과)에서 waiter gauge를 내린다."""
+    if not tracked:
+        return
+    try:
+        with _lock:
+            _metrics["snapshot_singleflight"]["waiters_now"] -= 1
+    except Exception:  # noqa: BLE001 — 관측이 caller 결과를 바꾸지 않는다
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot waiter 반환 기록 실패",
+            axis="snapshot_singleflight",
+            exc_info=sys.exc_info(),
+        )
+
+
+def begin_snapshot_admission_wait() -> Optional[float]:
+    """FIFO slot을 실제로 기다리기 시작한 leader 후보 1건."""
+    try:
+        started = time.monotonic()
+        with _lock:
+            block = _metrics["snapshot_admission"]
+            block["queued_now"] += 1
+            block["queued_max"] = max(block["queued_max"], block["queued_now"])
+        return started
+    except Exception:  # noqa: BLE001 — 관측 실패가 admission을 막지 않는다
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot admission 대기 시작 기록 실패",
+            axis="snapshot_admission",
+            exc_info=sys.exc_info(),
+        )
+        return None
+
+
+def finish_snapshot_admission_wait(started_at: Optional[float]) -> None:
+    """admit·deadline·cancel 어느 종결이든 queued gauge를 한 번 내린다."""
+    if started_at is None:
+        return
+    wait_ms: Optional[float] = None
+    clock_failure: Optional[tuple] = None
+    try:
+        wait_ms = max(0.0, (time.monotonic() - started_at) * 1000.0)
+    except Exception:  # noqa: BLE001 — gauge 반환은 계속해야 한다
+        clock_failure = sys.exc_info()
+    try:
+        with _lock:
+            block = _metrics["snapshot_admission"]
+            block["queued_now"] -= 1
+            if wait_ms is not None:
+                block["wait_observed_total"] += 1
+                block["wait_ms_sum"] += wait_ms
+                block["wait_ms_max"] = max(block["wait_ms_max"], wait_ms)
+    except Exception:  # noqa: BLE001 — 관측 실패가 admission 결과를 바꾸지 않는다
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot admission 대기 종결 기록 실패",
+            axis="snapshot_admission",
+            exc_info=sys.exc_info(),
+        )
+        return
+    if clock_failure is not None:
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot admission 대기 시간 기록 실패 — gauge만 반환",
+            axis="snapshot_admission",
+            exc_info=clock_failure,
+        )
+
+
+def record_snapshot_admission_acquired() -> bool:
+    """Shared build가 slot을 실제 점유했다. 반환값은 release 부기 여부를 결속한다."""
+    try:
+        with _lock:
+            block = _metrics["snapshot_admission"]
+            block["in_flight"] += 1
+            block["in_flight_max"] = max(block["in_flight_max"], block["in_flight"])
+        return True
+    except Exception:  # noqa: BLE001
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot admission 점유 기록 실패",
+            axis="snapshot_admission",
+            exc_info=sys.exc_info(),
+        )
+        return False
+
+
+def record_snapshot_admission_released(*, tracked: bool) -> None:
+    """Permit을 반환한다. acquire 부기가 실패했으면 음수 gauge를 만들지 않는다."""
+    if not tracked:
+        return
+    try:
+        with _lock:
+            _metrics["snapshot_admission"]["in_flight"] -= 1
+    except Exception:  # noqa: BLE001
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot admission 반환 기록 실패",
+            axis="snapshot_admission",
             exc_info=sys.exc_info(),
         )
 
@@ -773,6 +933,9 @@ def subscribe_load_metrics() -> dict[str, Any]:
                 snap["queue_wait_observed_total"] = block["queue_wait_observed_total"]
                 snap["queue_wait_ms_sum"] = block["queue_wait_ms_sum"]
                 snap["queue_wait_ms_max"] = block["queue_wait_ms_max"]
+                snap["execution_observed_total"] = block["execution_observed_total"]
+                snap["execution_ms_sum"] = block["execution_ms_sum"]
+                snap["execution_ms_max"] = block["execution_ms_max"]
             out[axis] = snap
         send = _metrics["snapshot_send"]
         out["snapshot_send"] = {
@@ -781,6 +944,12 @@ def subscribe_load_metrics() -> dict[str, Any]:
             "sends_by_outcome": dict(send["sends_by_outcome"]),
         }
         out["snapshot_singleflight"] = dict(_metrics["snapshot_singleflight"])
+        admission = _metrics["snapshot_admission"]
+        out["snapshot_admission"] = {
+            **admission,
+            "wait_ms_sum": round(admission["wait_ms_sum"], 3),
+            "wait_ms_max": round(admission["wait_ms_max"], 3),
+        }
         terminal = _metrics["terminal"]
         out["terminal"] = {
             "auth_wire_deadline_expired_by_stage": dict(terminal["auth_wire_deadline_expired_by_stage"]),
@@ -810,6 +979,11 @@ def reset_subscribe_load_metrics() -> None:
             or (axis in WORKER_AXES
                 and _metrics[axis]["worker_started_total"] != _metrics[axis]["worker_finished_total"])
         ]
+        admission = _metrics["snapshot_admission"]
+        if admission["queued_now"] != 0 or admission["in_flight"] != 0:
+            busy.append("snapshot_admission")
+        if _metrics["snapshot_singleflight"]["waiters_now"] != 0:
+            busy.append("snapshot_singleflight")
         if busy:
             raise SubscribeLoadContractError(
                 f"진행 중인 관측이 있어 reset 을 거부한다: {sorted(busy)}"
