@@ -280,7 +280,7 @@ def _arrival_schema_errors(rollout: Mapping[str, object]) -> list[str]:
     return errors
 
 
-SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/8"
+SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/9"
 # ⛔ worker 축에만 있어야 한다 — caller-only 축에 생기면 제출 시각이 없는 자리에서 0 이 쌓여
 #    "대기 없음"으로 읽힌다. 축 목록은 **여기 literal** 이다(원본 파생을 쓰면 함께 줄어든다).
 SUBSCRIBE_LOAD_WORKER_AXES = ("krx_entitlement", "snapshot_build")
@@ -298,6 +298,16 @@ SUBSCRIBE_LOAD_ADMISSION_COUNT_FIELDS = (
 SUBSCRIBE_LOAD_ADMISSION_DURATION_FIELDS = (
     "wait_ms_sum", "wait_ms_max",
 )
+SUBSCRIBE_LOAD_COOLDOWN_COUNT_FIELDS = (
+    "armed_total", "suppressed_total", "expired_total",
+)
+SUBSCRIBE_LOAD_COOLDOWN_FAILURE_CLASSES = (
+    "deadline", "transient_db", "redis", "unclassified",
+)
+SUBSCRIBE_LOAD_COOLDOWN_LAST_FIELDS = frozenset({
+    "topic", "generation", "supported", "enabled", "failure_class",
+    "cooldown_remaining_ms", "suppressed_builds",
+})
 
 
 def _subscribe_load_schema_errors(raw_body: bytes) -> list[str]:
@@ -382,6 +392,80 @@ def _subscribe_load_schema_errors(raw_body: bytes) -> list[str]:
             errors.append("subscribe_load.snapshot_admission queued_now exceeds queued_max")
         if in_flight is not None and in_flight_max is not None and in_flight > in_flight_max:
             errors.append("subscribe_load.snapshot_admission in_flight exceeds in_flight_max")
+    cooldown = block.get("snapshot_failure_cooldown")
+    if not isinstance(cooldown, dict):
+        errors.append("subscribe_load.snapshot_failure_cooldown must be an object")
+    else:
+        cooldown_counts = {
+            field: _safe_count(cooldown, field)
+            for field in SUBSCRIBE_LOAD_COOLDOWN_COUNT_FIELDS
+        }
+        for field, value in cooldown_counts.items():
+            if value is None:
+                errors.append(
+                    f"subscribe_load.snapshot_failure_cooldown.{field} must be a non-negative integer"
+                )
+        classes = cooldown.get("by_failure_class")
+        if not isinstance(classes, dict) or set(classes) != set(SUBSCRIBE_LOAD_COOLDOWN_FAILURE_CLASSES):
+            errors.append(
+                "subscribe_load.snapshot_failure_cooldown.by_failure_class must have fixed keys"
+            )
+        else:
+            class_counts = {
+                key: _safe_count(classes, key)
+                for key in SUBSCRIBE_LOAD_COOLDOWN_FAILURE_CLASSES
+            }
+            if any(value is None for value in class_counts.values()):
+                errors.append(
+                    "subscribe_load.snapshot_failure_cooldown.by_failure_class values must be non-negative integers"
+                )
+            elif cooldown_counts["armed_total"] is not None and sum(class_counts.values()) != cooldown_counts["armed_total"]:
+                errors.append(
+                    "subscribe_load.snapshot_failure_cooldown armed_total must equal failure class sum"
+                )
+        if (
+            cooldown_counts["armed_total"] is not None
+            and cooldown_counts["expired_total"] is not None
+            and cooldown_counts["expired_total"] > cooldown_counts["armed_total"]
+        ):
+            errors.append(
+                "subscribe_load.snapshot_failure_cooldown expired_total exceeds armed_total"
+            )
+        last = cooldown.get("last_suppression")
+        if last is None:
+            if cooldown_counts["suppressed_total"] not in (None, 0):
+                errors.append(
+                    "subscribe_load.snapshot_failure_cooldown last_suppression missing after suppression"
+                )
+        elif not isinstance(last, dict) or set(last) != SUBSCRIBE_LOAD_COOLDOWN_LAST_FIELDS:
+            errors.append(
+                "subscribe_load.snapshot_failure_cooldown.last_suppression must have fixed safe keys"
+            )
+        else:
+            if not isinstance(last.get("topic"), str) or not last["topic"]:
+                errors.append("subscribe_load.snapshot_failure_cooldown last topic must be non-empty")
+            if _safe_count(last, "generation") is None:
+                errors.append("subscribe_load.snapshot_failure_cooldown last generation must be non-negative")
+            if not isinstance(last.get("supported"), bool) or not isinstance(last.get("enabled"), bool):
+                errors.append("subscribe_load.snapshot_failure_cooldown last gates must be booleans")
+            if last.get("failure_class") not in SUBSCRIBE_LOAD_COOLDOWN_FAILURE_CLASSES:
+                errors.append("subscribe_load.snapshot_failure_cooldown last failure class is unknown")
+            remaining = last.get("cooldown_remaining_ms")
+            if (
+                not isinstance(remaining, (int, float, Decimal))
+                or isinstance(remaining, bool)
+                or not _decimal(remaining, field="cooldown_remaining_ms").is_finite()
+                or remaining < 0
+            ):
+                errors.append("subscribe_load.snapshot_failure_cooldown remaining must be finite and non-negative")
+            suppressed_builds = _safe_count(last, "suppressed_builds")
+            if suppressed_builds is None or suppressed_builds < 1:
+                errors.append("subscribe_load.snapshot_failure_cooldown last suppressed_builds must be positive")
+            elif (
+                cooldown_counts["suppressed_total"] is not None
+                and suppressed_builds > cooldown_counts["suppressed_total"]
+            ):
+                errors.append("subscribe_load.snapshot_failure_cooldown key suppression exceeds total")
     return errors
 
 

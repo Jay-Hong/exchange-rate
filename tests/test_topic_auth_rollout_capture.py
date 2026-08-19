@@ -27,7 +27,7 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
                 # ⛔ 캡처기가 subscribe_load 계약도 검증한다 — 없으면 그 창의 분석이
                 #    필드 누락을 모른 채 계산된다.
                 "subscribe_load": {
-                    "contract_version": "subscribe-load/8",
+                    "contract_version": "subscribe-load/9",
                     "krx_entitlement": {"queue_wait_observed_total": 0,
                                         "queue_wait_ms_sum": 0.0, "queue_wait_ms_max": 0.0,
                                         "execution_observed_total": 0,
@@ -53,6 +53,18 @@ def response(*, started=STARTED, attempts=4, first_seen=4):
                         "wait_ms_max": 0.0,
                         "in_flight": 0,
                         "in_flight_max": 0,
+                    },
+                    "snapshot_failure_cooldown": {
+                        "armed_total": 0,
+                        "suppressed_total": 0,
+                        "expired_total": 0,
+                        "by_failure_class": {
+                            "deadline": 0,
+                            "transient_db": 0,
+                            "redis": 0,
+                            "unclassified": 0,
+                        },
+                        "last_suppression": None,
                     },
                 },
                 "topic_auth_rollout": {
@@ -586,6 +598,14 @@ class TestSubscribeLoadValidationStaysWired(unittest.TestCase):
         self.assertIn("metric_schema_errors", src,
                       "결과가 metric_schema_errors 로 합류해야 창이 unverifiable 로 표시된다")
 
+    def test_cooldown_failure_class_copy_matches_runtime_contract(self):
+        from app import subscribe_load_metrics as slm
+
+        self.assertEqual(
+            tuple(capture.SUBSCRIBE_LOAD_COOLDOWN_FAILURE_CLASSES),
+            tuple(slm.SNAPSHOT_FAILURE_CLASS_KEYS),
+        )
+
     def test_singleflight_counts_are_complete_and_arithmetically_bound(self):
         body = json.loads(response())
         block = body["metrics"]["subscribe_load"]["snapshot_singleflight"]
@@ -628,6 +648,48 @@ class TestSubscribeLoadValidationStaysWired(unittest.TestCase):
         )
         errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
         self.assertTrue(any("waiters_now exceeds waiters_max" in error for error in errors))
+
+    def test_failure_cooldown_shape_and_arithmetic_are_locked(self):
+        body = json.loads(response())
+        block = body["metrics"]["subscribe_load"]["snapshot_failure_cooldown"]
+        block.update({
+            "armed_total": 2,
+            "suppressed_total": 7,
+            "expired_total": 1,
+            "by_failure_class": {
+                "deadline": 0,
+                "transient_db": 1,
+                "redis": 1,
+                "unclassified": 0,
+            },
+            "last_suppression": {
+                "topic": "usdt:krw",
+                "generation": 9,
+                "supported": True,
+                "enabled": True,
+                "failure_class": "redis",
+                "cooldown_remaining_ms": 412.5,
+                "suppressed_builds": 3,
+            },
+        })
+        self.assertEqual(
+            capture._subscribe_load_schema_errors(json.dumps(body).encode()), []
+        )
+
+        block["by_failure_class"]["redis"] = 0
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("armed_total must equal" in error for error in errors))
+
+        block["by_failure_class"]["redis"] = 1
+        block["last_suppression"]["sql"] = "SELECT secret"
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("fixed safe keys" in error for error in errors))
+
+        block["last_suppression"].pop("sql")
+        block["last_suppression"] = None
+        errors = capture._subscribe_load_schema_errors(json.dumps(body).encode())
+        self.assertTrue(any("missing after suppression" in error for error in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

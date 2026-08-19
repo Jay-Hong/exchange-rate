@@ -57,6 +57,41 @@ TEST_TARGETS = [
 # — "이동"(제거+이식)은 반드시 다중 pair 로 표현한다(단일 pair 로 나누면 각각이 제거/중복
 # 변이가 되어 라벨과 불일치 — 실측 2회 반복된 실수). 각 old 는 정확히 1회 등장해야 한다.
 MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 같은 길이의 tuple
+    # ── LOAD-S7: key별 transient failure cooldown ────────────────────────────
+    ("LOAD-S7-01 transient cooldown arm 제거", SNAPSHOT,
+     "                _arm_snapshot_failure_cooldown(state, key, failure_class)",
+     "                pass  # mutation: transient failure state dropped"),
+    ("LOAD-S7-02 active cooldown suppression 우회", SNAPSHOT,
+     '''    if cooldown_error is not None:
+        raise cooldown_error''',
+     '''    if False and cooldown_error is not None:
+        raise cooldown_error'''),
+    ("LOAD-S7-03 fatal 오류도 transient 로 오분류", SNAPSHOT,
+     '''    if isinstance(exc, (RedisConnectionError, RedisTimeoutError)):
+        return SNAPSHOT_FAILURE_REDIS
+    return None''',
+     '''    if isinstance(exc, (RedisConnectionError, RedisTimeoutError)):
+        return SNAPSHOT_FAILURE_REDIS
+    return SNAPSHOT_FAILURE_TRANSIENT_DB'''),
+    ("LOAD-S7-04 만료 state prune 제거", SNAPSHOT,
+     "    _prune_snapshot_failure_cooldowns(state, time.monotonic())",
+     "    pass  # mutation: expired cooldown remains active"),
+    ("LOAD-S7-05 generation 을 key 에서 제거", SNAPSHOT,
+     "    entry = state.failure_cooldowns.get(key)",
+     '''    entry = state.failure_cooldowns.get(SnapshotBuildKey(
+        key.topic, 0, key.supported, key.enabled
+    ))  # mutation: cooldown lookup ignores generation'''),
+    ("LOAD-S7-06 suppression 계측 제거", SNAPSHOT,
+     '''    subscribe_load.record_snapshot_failure_cooldown_suppressed(
+        topic=key.topic,
+        generation=key.generation,
+        supported=key.supported,
+        enabled=key.enabled,
+        failure_class=entry.failure_class,
+        remaining_seconds=remaining,
+        suppressed_builds=entry.suppressed_builds,
+    )''',
+     "    pass  # mutation: cooldown suppression unobserved"),
     # ── LOAD-S6: FIFO admission + 별도 execution 계측 ───────────────────────
     ("LOAD-S6-01 admission acquire 우회", SNAPSHOT,
      "        permit = await state.admission.acquire(key.topic, budget)",
@@ -107,7 +142,7 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
      '        "calls_by_channel": {name: 0 for name in CHANNELS},'),
     # ⚠️ 앵커는 현행 버전을 따라간다 — 버전이 오를 때마다 이 변이도 함께 갱신(S1c-07 계보).
     ("S1c-07 CONTRACT_VERSION 롤백", MODULE,
-     'CONTRACT_VERSION = "subscribe-load/8"', 'CONTRACT_VERSION = "subscribe-load/7"'),
+     'CONTRACT_VERSION = "subscribe-load/9"', 'CONTRACT_VERSION = "subscribe-load/8"'),
     ("S1c-08 premium 제출 집합 축소(unavailable_persistent)", MODULE,
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient", "unavailable_persistent"}),\n    KRX_ENTITLEMENT:',
      '    PREMIUM_RC: frozenset({"granted", "denied", "unavailable_transient"}),\n    KRX_ENTITLEMENT:'),
@@ -591,10 +626,15 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
 
 
 def run_tests(cwd: pathlib.Path) -> str:
-    r = subprocess.run(
-        [sys.executable, "-m", "pytest", *TEST_TARGETS, "-q", "-p", "no:asyncio",
-         "--no-header", "--tb=short"],
-        capture_output=True, text=True, timeout=300, cwd=cwd)
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "pytest", *TEST_TARGETS, "-q", "-p", "no:asyncio",
+             "--no-header", "--tb=short"],
+            capture_output=True, text=True, timeout=300, cwd=cwd)
+    except subprocess.TimeoutExpired:
+        # hang도 회귀 신호지만 어느 단언이 잡았는지 모르는 판정 불능이다. 하네스 자체를
+        # traceback으로 끝내지 않고 invalid로 분류해 종료 코드 1과 라벨을 보존한다.
+        return "invalid"
     out = r.stdout + r.stderr
     # ⛔ "ERROR" in out 같은 느슨한 조건은 tearDown ERROR kill 을 가드-kill 로 오분류했다
     #    (실측: S1b-23). 가드-kill 은 **collection 단계** 실패 + 가드 예외명일 때만이다.

@@ -89,7 +89,7 @@ T = TypeVar("T")
 
 # ⛔ 필드 의미가 바뀔 때만 **사람이** 올린다 — delta 도구가 KeyError 대신 "계약이 다르다" 로
 #    빨리 실패하게 하는 값이다.
-CONTRACT_VERSION = "subscribe-load/8"
+CONTRACT_VERSION = "subscribe-load/9"
 
 PREMIUM_RC = "premium_rc"
 KRX_ENTITLEMENT = "krx_entitlement"
@@ -165,6 +165,8 @@ AUTH_FAIL_CODES: tuple[str, ...] = (
     "invalid_token", "temporarily_unavailable", "invalid_request", "request_too_large",
 )
 AUTH_FAIL_KEYS: tuple[str, ...] = AUTH_FAIL_CODES + ("other",)
+SNAPSHOT_FAILURE_CLASSES: tuple[str, ...] = ("deadline", "transient_db", "redis")
+SNAPSHOT_FAILURE_CLASS_KEYS: tuple[str, ...] = SNAPSHOT_FAILURE_CLASSES + (_UNCLASSIFIED,)
 
 CAVEAT = (
     "subscribe-load 이며 reconnect 귀속이 아니다 · max/gauge 는 두 캡처 사이에 빼지 말 것 · "
@@ -172,6 +174,7 @@ CAVEAT = (
     "**snapshot_build 는 WS 와 REST twin 의 합산**(같은 default executor·I/O 를 쓰므로 용량 산정에 합산이 필요) · "
     "snapshot_singleflight.waiters 는 shared task를 기다리는 caller 수(cache hit 제외) · "
     "snapshot_admission 은 새 shared flight task만 세며 기존 flight join·cache hit는 제외 · "
+    "snapshot_failure_cooldown 은 key별 transient build 실패만 세며 auth·fatal·programming error는 제외 · "
     "admission wait 은 앱 FIFO slot 대기, snapshot_build.queue_wait 은 executor 제출→worker 시작 대기 · "
     "admission queued 는 시간만 S3 deadline으로 유계이고 개수 hard cap은 없음 · "
     "snapshot_send·terminal 은 WS 전용(REST 는 channel/wire 개념이 없다) · "
@@ -239,6 +242,15 @@ def _blank() -> dict[str, Any]:
         "in_flight": 0,
         "in_flight_max": 0,
     }
+    axes["snapshot_failure_cooldown"] = {
+        "armed_total": 0,
+        "suppressed_total": 0,
+        "expired_total": 0,
+        "by_failure_class": {
+            name: 0 for name in SNAPSHOT_FAILURE_CLASS_KEYS
+        },
+        "last_suppression": None,
+    }
     axes["terminal"] = {
         "auth_wire_deadline_expired_by_stage": {name: 0 for name in DEADLINE_STAGE_KEYS},
         "subscribe_auth_failed_by_error": {name: 0 for name in AUTH_FAIL_KEYS},
@@ -284,6 +296,8 @@ def _validate_schema() -> None:
         raise SubscribeLoadContractError("terminal: stage 저장 key 가 제출 ⊎ unclassified 와 다르다")
     if "other" in AUTH_FAIL_CODES or set(AUTH_FAIL_KEYS) != set(AUTH_FAIL_CODES) | {"other"}:
         raise SubscribeLoadContractError("terminal: auth-fail 저장 key 가 알려진 코드 ⊎ other 와 다르다")
+    if _UNCLASSIFIED in SNAPSHOT_FAILURE_CLASSES or set(SNAPSHOT_FAILURE_CLASS_KEYS) != set(SNAPSHOT_FAILURE_CLASSES) | {_UNCLASSIFIED}:
+        raise SubscribeLoadContractError("snapshot cooldown: failure class 저장 key 가 제출 ⊎ unclassified 와 다르다")
 
 
 _validate_schema()
@@ -836,6 +850,95 @@ def record_snapshot_admission_released(*, tracked: bool) -> None:
         )
 
 
+def record_snapshot_failure_cooldown_armed(*, failure_class: str) -> None:
+    """Transient shared-build 실패로 key별 cooldown을 새로 만든 1건."""
+    folded = failure_class not in SNAPSHOT_FAILURE_CLASSES
+    key = failure_class if not folded else _UNCLASSIFIED
+    try:
+        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            block = _metrics["snapshot_failure_cooldown"]
+            block["armed_total"] += 1
+            block["by_failure_class"][key] += 1
+    except Exception:  # noqa: BLE001 — cooldown 정책을 관측이 결정하지 않는다
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot failure cooldown arm 기록 실패",
+            axis="snapshot_failure_cooldown",
+            exc_info=sys.exc_info(),
+        )
+        return
+    if folded:
+        _warn(
+            "subscribe-load: allowlist 밖 cooldown failure class — unclassified 로 접는다",
+            axis="snapshot_failure_cooldown",
+        )
+
+
+def record_snapshot_failure_cooldown_suppressed(
+    *,
+    topic: str,
+    generation: int,
+    supported: bool,
+    enabled: bool,
+    failure_class: str,
+    remaining_seconds: float,
+    suppressed_builds: int,
+) -> None:
+    """마지막 suppression의 안전한 key·원인·남은 시간과 누계를 남긴다."""
+    folded = failure_class not in SNAPSHOT_FAILURE_CLASSES
+    key = failure_class if not folded else _UNCLASSIFIED
+    try:
+        last = {
+            "topic": topic,
+            "generation": generation,
+            "supported": supported,
+            "enabled": enabled,
+            "failure_class": key,
+            "cooldown_remaining_ms": round(
+                max(0.0, remaining_seconds) * 1000.0, 3
+            ),
+            "suppressed_builds": suppressed_builds,
+        }
+        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            block = _metrics["snapshot_failure_cooldown"]
+            block["suppressed_total"] += 1
+            block["last_suppression"] = last
+    except Exception:  # noqa: BLE001
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot failure cooldown suppression 기록 실패",
+            axis="snapshot_failure_cooldown",
+            exc_info=sys.exc_info(),
+        )
+        return
+    if folded:
+        _warn(
+            "subscribe-load: allowlist 밖 cooldown failure class — unclassified 로 접는다",
+            axis="snapshot_failure_cooldown",
+        )
+
+
+def record_snapshot_failure_cooldown_expired(*, failure_class: str) -> None:
+    """만료된 key state를 제거한 1건. failure_class는 동적 key 생성 방지 검사용이다."""
+    folded = failure_class not in SNAPSHOT_FAILURE_CLASSES
+    try:
+        with _lock:
+            if folded:
+                _metrics["metrics_internal_errors_total"] += 1
+            _metrics["snapshot_failure_cooldown"]["expired_total"] += 1
+    except Exception:  # noqa: BLE001
+        _note_internal_error()
+        _warn(
+            "subscribe-load: snapshot failure cooldown expiry 기록 실패",
+            axis="snapshot_failure_cooldown",
+            exc_info=sys.exc_info(),
+        )
+
+
 def record_snapshot_success_cached() -> None:
     """generation이 여전히 같아 성공 payload를 cache에 넣은 실제 build 1건."""
     try:
@@ -949,6 +1052,18 @@ def subscribe_load_metrics() -> dict[str, Any]:
             **admission,
             "wait_ms_sum": round(admission["wait_ms_sum"], 3),
             "wait_ms_max": round(admission["wait_ms_max"], 3),
+        }
+        cooldown = _metrics["snapshot_failure_cooldown"]
+        out["snapshot_failure_cooldown"] = {
+            "armed_total": cooldown["armed_total"],
+            "suppressed_total": cooldown["suppressed_total"],
+            "expired_total": cooldown["expired_total"],
+            "by_failure_class": dict(cooldown["by_failure_class"]),
+            "last_suppression": (
+                None
+                if cooldown["last_suppression"] is None
+                else dict(cooldown["last_suppression"])
+            ),
         }
         terminal = _metrics["terminal"]
         out["terminal"] = {

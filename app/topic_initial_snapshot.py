@@ -62,18 +62,41 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("exchange_rate.topic_initial_snapshot")
 
+SNAPSHOT_FAILURE_DEADLINE = "deadline"
+SNAPSHOT_FAILURE_TRANSIENT_DB = "transient_db"
+SNAPSHOT_FAILURE_REDIS = "redis"
+SNAPSHOT_FAILURE_CLASSES = (
+    SNAPSHOT_FAILURE_DEADLINE,
+    SNAPSHOT_FAILURE_TRANSIENT_DB,
+    SNAPSHOT_FAILURE_REDIS,
+)
 
-def _is_transient_snapshot_error(exc: BaseException) -> bool:
+
+def _snapshot_transient_failure_class(exc: BaseException) -> Optional[str]:
+    """Cooldown에 넣어도 되는 snapshot build 실패만 좁게 분류한다."""
+    if isinstance(exc, SnapshotDeadlineExceeded):
+        return SNAPSHOT_FAILURE_DEADLINE
+
     from app.db_errors import TRANSIENT_DB_ERRORS, is_transient_db_error
 
     if isinstance(exc, TRANSIENT_DB_ERRORS):
-        return is_transient_db_error(exc)
+        return (
+            SNAPSHOT_FAILURE_TRANSIENT_DB
+            if is_transient_db_error(exc)
+            else None
+        )
     try:
         from redis.exceptions import ConnectionError as RedisConnectionError
         from redis.exceptions import TimeoutError as RedisTimeoutError
     except ImportError:
-        return False
-    return isinstance(exc, (RedisConnectionError, RedisTimeoutError))
+        return None
+    if isinstance(exc, (RedisConnectionError, RedisTimeoutError)):
+        return SNAPSHOT_FAILURE_REDIS
+    return None
+
+
+def _is_transient_snapshot_error(exc: BaseException) -> bool:
+    return _snapshot_transient_failure_class(exc) is not None
 
 
 async def _close_snapshot_connection(websocket: "WebSocket", *, code: int) -> None:
@@ -89,6 +112,24 @@ async def _close_snapshot_connection(websocket: "WebSocket", *, code: int) -> No
 
 class SnapshotDeadlineExceeded(TimeoutError):
     """topic snapshot 요청의 absolute deadline이 끝났다."""
+
+
+class SnapshotFailureCooldownActive(RuntimeError):
+    """같은 key의 transient build 실패 cooldown이 아직 유효하다."""
+
+    def __init__(
+        self,
+        topic: str,
+        *,
+        failure_class: str,
+        remaining_seconds: float,
+        suppressed_builds: int,
+    ) -> None:
+        super().__init__(f"snapshot transient failure cooldown active: {topic}")
+        self.topic = topic
+        self.failure_class = failure_class
+        self.remaining_seconds = remaining_seconds
+        self.suppressed_builds = suppressed_builds
 
 
 class SnapshotWorkerStopped(RuntimeError):
@@ -543,11 +584,23 @@ class _SnapshotSuccessCacheEntry:
 
 
 @dataclass
+class _SnapshotFailureCooldownEntry:
+    """성공 cache와 분리된 LOAD-S7 transient failure 상태."""
+
+    failure_class: str
+    expires_at_mono: float
+    suppressed_builds: int = 0
+
+
+@dataclass
 class _SnapshotSingleflightState:
     """asyncio 객체와 성공 cache를 event loop 경계 안에 가둔다."""
 
     flights: Dict[SnapshotBuildKey, _SnapshotFlight] = field(default_factory=dict)
     success_cache: Dict[SnapshotBuildKey, _SnapshotSuccessCacheEntry] = field(
+        default_factory=dict
+    )
+    failure_cooldowns: Dict[SnapshotBuildKey, _SnapshotFailureCooldownEntry] = field(
         default_factory=dict
     )
     admission: _SnapshotAdmission = field(
@@ -595,6 +648,67 @@ def _prune_snapshot_success_cache(
         state.success_cache.pop(key, None)
 
 
+def _prune_snapshot_failure_cooldowns(
+    state: _SnapshotSingleflightState, now_mono: float
+) -> None:
+    expired = [
+        key
+        for key, entry in state.failure_cooldowns.items()
+        if entry.expires_at_mono <= now_mono
+    ]
+    for key in expired:
+        entry = state.failure_cooldowns.pop(key)
+        subscribe_load.record_snapshot_failure_cooldown_expired(
+            failure_class=entry.failure_class
+        )
+
+
+def _active_snapshot_failure_cooldown(
+    state: _SnapshotSingleflightState,
+    key: SnapshotBuildKey,
+    now_mono: float,
+) -> Optional[SnapshotFailureCooldownActive]:
+    entry = state.failure_cooldowns.get(key)
+    if entry is None:
+        return None
+    remaining = max(0.0, entry.expires_at_mono - now_mono)
+    if remaining <= 0:
+        return None
+
+    entry.suppressed_builds += 1
+    subscribe_load.record_snapshot_failure_cooldown_suppressed(
+        topic=key.topic,
+        generation=key.generation,
+        supported=key.supported,
+        enabled=key.enabled,
+        failure_class=entry.failure_class,
+        remaining_seconds=remaining,
+        suppressed_builds=entry.suppressed_builds,
+    )
+    return SnapshotFailureCooldownActive(
+        key.topic,
+        failure_class=entry.failure_class,
+        remaining_seconds=remaining,
+        suppressed_builds=entry.suppressed_builds,
+    )
+
+
+def _arm_snapshot_failure_cooldown(
+    state: _SnapshotSingleflightState,
+    key: SnapshotBuildKey,
+    failure_class: str,
+) -> None:
+    state.failure_cooldowns[key] = _SnapshotFailureCooldownEntry(
+        failure_class=failure_class,
+        expires_at_mono=(
+            time.monotonic() + config.WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS
+        ),
+    )
+    subscribe_load.record_snapshot_failure_cooldown_armed(
+        failure_class=failure_class
+    )
+
+
 def _cached_snapshot(
     state: _SnapshotSingleflightState, key: SnapshotBuildKey
 ) -> Optional[Dict[str, Any]]:
@@ -628,7 +742,14 @@ async def _run_shared_snapshot_build(
         # Flight를 registry에 먼저 게시한 뒤 shared task가 slot을 기다린다. 반대 순서면 같은 key의
         # 후속 요청도 각각 admission에 줄을 서서 이미 생긴 flight를 build 완료 전까지 join 못 한다.
         permit = await state.admission.acquire(key.topic, budget)
-        payload = await _build_snapshot_once_observed(key.topic, budget=budget)
+        try:
+            payload = await _build_snapshot_once_observed(key.topic, budget=budget)
+        except Exception as exc:
+            failure_class = _snapshot_transient_failure_class(exc)
+            if failure_class is not None:
+                _arm_snapshot_failure_cooldown(state, key, failure_class)
+            raise
+        state.failure_cooldowns.pop(key, None)
         if payload is not None and _snapshot_build_key(key.topic) == key:
             state.success_cache[key] = _SnapshotSuccessCacheEntry(
                 payload=copy.deepcopy(payload),
@@ -662,10 +783,17 @@ async def build_snapshot_observed(
 
     state = _snapshot_state()
     key = _snapshot_build_key(topic)
+    _prune_snapshot_failure_cooldowns(state, time.monotonic())
     cached = _cached_snapshot(state, key)
     if cached is not None:
         subscribe_load.record_snapshot_singleflight("cache_hit")
         return cached
+
+    cooldown_error = _active_snapshot_failure_cooldown(
+        state, key, time.monotonic()
+    )
+    if cooldown_error is not None:
+        raise cooldown_error
 
     flight = state.flights.get(key)
     if flight is not None and (flight.task.done() or flight.task.cancelling()):
@@ -923,6 +1051,9 @@ async def send_initial_snapshots(
             #    `build_failed` 로 파생 기록된 뒤 1013/1011 경계에서 분류된다.
             #    `_build_snapshot_sync` 본문은 무계측이다(REST twin 이 공유 — trip-wire 로 잠금).
             payload = await build_snapshot_observed(topic, budget=request_budget)
+        except SnapshotFailureCooldownActive as exc:
+            await _close_snapshot_connection(websocket, code=1013)
+            raise InitialSnapshotTransientFailure(topic) from exc
         except SnapshotDeadlineExceeded as exc:
             await _close_snapshot_connection(websocket, code=1013)
             raise InitialSnapshotDeadlineExceeded(topic) from exc

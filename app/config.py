@@ -660,6 +660,15 @@ WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS = int(
     os.getenv("WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS", "4")
 )
 
+# ── LOAD-S7 — shared snapshot transient failure cooldown ────────────────────
+# 한 shared build의 transient 실패가 waiter를 동시에 깨운 직후 같은 key build를 다시 시작하지
+# 않도록 짧게 막는다. 1초는 dormant 메커니즘 기본값이지 운영 승인값이 아니다. 실제 값은
+# R-CLI-24 jitter가 포함된 LOAD-S4 부하 리허설에서 suppression과 정상 회복을 함께 보고 정한다.
+# 성공 cache TTL과 의미가 다르므로 같은 상수를 재사용하지 않는다.
+WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS = float(
+    os.getenv("WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS", "1.0")
+)
+
 # ── LOAD-S5 — topic snapshot 성공 cache freshness ceiling ───────────────────
 # 이 값은 용량 튜닝값이 아니라 v1 live 최신성 계약(서버 수신 뒤 1초 이내 반영)의 **상한**이다.
 # 실제 invalidation은 `topic_dispatcher.publish_topic*`가 올리는 topic generation이 맡고, TTL은
@@ -673,6 +682,7 @@ for _name, _value in (
     ("WS_TOPIC_ACK_DEADLINE_SECONDS", WS_TOPIC_ACK_DEADLINE_SECONDS),
     ("WS_TOPIC_SNAPSHOT_BUDGET_SECONDS", WS_TOPIC_SNAPSHOT_BUDGET_SECONDS),
     ("WS_TOPIC_REQUEST_DEADLINE_SECONDS", WS_TOPIC_REQUEST_DEADLINE_SECONDS),
+    ("WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS", WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS),
     ("WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS", WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS),
 ):
     if not math.isfinite(_value) or _value <= 0:
@@ -685,6 +695,8 @@ if WS_TOPIC_SNAPSHOT_BUDGET_SECONDS > WS_TOPIC_REQUEST_DEADLINE_SECONDS:
     raise ValueError("WS topic snapshot budget must not exceed the request deadline")
 if WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS > 1.0:
     raise ValueError("WS topic snapshot cache TTL must not exceed the 1s live freshness contract")
+if WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS > WS_TOPIC_REQUEST_DEADLINE_SECONDS:
+    raise ValueError("WS topic snapshot failure cooldown must not exceed the request deadline")
 if not 1 <= WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS <= 32:
     raise ValueError("WS topic snapshot concurrent builds must be between 1 and 32")
 

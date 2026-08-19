@@ -19,6 +19,7 @@ from sqlalchemy.pool import QueuePool
 from app import config, subscribe_load_metrics, topic_dispatcher
 from app.topic_initial_snapshot import (
     SnapshotDeadlineExceeded,
+    SnapshotFailureCooldownActive,
     SnapshotRequestBudget,
     SnapshotWorkerStopped,
     _run_snapshot_worker,
@@ -362,6 +363,22 @@ class TestSnapshotWireTermination(unittest.IsolatedAsyncioTestCase):
     async def test_transient_build_failure_is_1013_without_terminal_frame(self):
         exc = OperationalError("SELECT 1", {}, Exception("connection lost"))
         with patch("app.topic_initial_snapshot._build_snapshot_sync", side_effect=exc):
+            with self.assertRaises(InitialSnapshotTransientFailure):
+                await send_initial_snapshots(self.ws, ["fx:usd-krw"])
+        self.ws.close.assert_awaited_once_with(code=1013)
+        self.ws.send_json.assert_not_awaited()
+
+    async def test_failure_cooldown_hit_is_1013_without_starting_a_build(self):
+        cooldown = SnapshotFailureCooldownActive(
+            "fx:usd-krw",
+            failure_class="transient_db",
+            remaining_seconds=0.75,
+            suppressed_builds=4,
+        )
+        with patch(
+            "app.topic_initial_snapshot.build_snapshot_observed",
+            new=AsyncMock(side_effect=cooldown),
+        ):
             with self.assertRaises(InitialSnapshotTransientFailure):
                 await send_initial_snapshots(self.ws, ["fx:usd-krw"])
         self.ws.close.assert_awaited_once_with(code=1013)

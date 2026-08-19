@@ -28,11 +28,11 @@ WRAP_CALL = "        payload = await build_snapshot_observed(topic, budget=reque
 
 MUTANTS = [
     # ── 계약 ──────────────────────────────────────────────────────────
-    ("CONTRACT_VERSION 을 /7 로 되돌림", SLM,
-     'CONTRACT_VERSION = "subscribe-load/8"', 'CONTRACT_VERSION = "subscribe-load/7"'),
-    ("캡처기가 /8 을 수용하지 않음", CAP,
-     'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/8"',
-     'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/7"'),
+    ("CONTRACT_VERSION 을 /8 로 되돌림", SLM,
+     'CONTRACT_VERSION = "subscribe-load/9"', 'CONTRACT_VERSION = "subscribe-load/8"'),
+    ("캡처기가 /9 을 수용하지 않음", CAP,
+     'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/9"',
+     'SUBSCRIBE_LOAD_CONTRACT = "subscribe-load/8"'),
     ("캡처기 subscribe_load 검증 배선 제거", CAP,
      "        metric_schema_errors.extend(_subscribe_load_schema_errors(raw_body))\n", ""),
     # ── 배선 ──────────────────────────────────────────────────────────

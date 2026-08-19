@@ -3154,6 +3154,7 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
     from app import config
     from app.topic_initial_snapshot import (
         SnapshotDeadlineExceeded,
+        SnapshotFailureCooldownActive,
         SnapshotRequestBudget,
         build_snapshot_observed,
         resolve_snapshot_topic_access_sync,
@@ -3195,7 +3196,7 @@ async def get_v2_topic_snapshot(request: Request, topic: str):
         #    (같은 default executor·I/O). 여기서 따로 to_thread 하면 축이 갈린다.
         request_budget.start_snapshot_phase()
         payload = await build_snapshot_observed(topic, budget=request_budget)
-    except SnapshotDeadlineExceeded:
+    except (SnapshotDeadlineExceeded, SnapshotFailureCooldownActive):
         # REST twin은 WS 1013 대신 retryable 503으로 접는다. terminal payload/Retry-After는 없다.
         return JSONResponse(status_code=503, headers=no_store,
                             content={"error": "temporarily_unavailable"})

@@ -189,7 +189,7 @@ phase를 시작하지 않게 한다.
 - 각 leader 후보는 자기 LOAD-S3 남은 예산으로 FIFO slot을 기다린다. 예산 소진 전 즉시거절은 없고,
   queue에서 만료된 요청은 builder를 시작하지 않은 채 기존 deadline 경로(WS post-ACK 1013 / REST
   503)로 합류한다.
-- `subscribe-load/8`은 `snapshot_singleflight.waiters_now/max`와 `snapshot_admission`의
+- `subscribe-load/9`는 `snapshot_singleflight.waiters_now/max`와 `snapshot_admission`의
   queued/in-flight gauge·admission wait를 별도로 싣는다. 기존 `snapshot_build.queue_wait`는 executor
   제출→worker 시작을, `execution_ms`는 worker 본문을 재므로 admission 포화·executor 포화·느린 I/O를
   섞지 않는다.
@@ -223,6 +223,23 @@ single-flight 하나의 transient 실패가 모든 waiter를 동시에 깨운 �
 - cooldown 만료 뒤 정상 build가 가능하다.
 - fatal/auth 오류가 cooldown cache에 들어가지 않는다.
 - 다수 client의 retry가 R-CLI-24 적용 후 시간축에 분산되는 통합 테스트가 있다.
+
+### 서버 구현 결과 (2026-08-20)
+
+- 실제 shared builder가 낸 deadline·transient DB·Redis 실패만
+  `(topic, generation, supported, enabled)` key별 cooldown에 넣는다. admission queue deadline,
+  caller 취소, `None`, fatal/programming error, 영구 DB 오류, 인증·인가는 넣지 않는다.
+- cooldown 중 새 flight·admission·builder는 시작하지 않고 WS는 기존 1013 transient 종결, REST twin은
+  기존 retryable 503으로 합류한다. 성공 payload cache와 failure state는 별도 map이다.
+- `WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS=1.0`은 dormant 메커니즘 기본값일 뿐 운영 승인값이
+  아니다. 실제 값은 R-CLI-24가 포함된 LOAD-S4 부하 리허설에서 정한다.
+- `subscribe-load/9`는 arm/suppression/expiry 누계, 고정 failure class, 마지막 suppression의 안전한
+  key·남은 시간·해당 key suppress 횟수를 노출한다. SQL·토큰·예외 문자열은 싣지 않는다.
+- transient 실패 뒤 동시 retry의 builder 0회, expiry 뒤 회복, generation 격리, fatal·영구 DB 음성
+  분류, WS 1013·REST 503을 행동 테스트와 mutation gate로 잠갔다.
+
+⚠️ 이것은 **서버 절반**이다. R-CLI-24 jitter·retry cap·client cooldown과 다수 client 시간축 통합
+테스트는 아직 없으므로 폭주 완화 전체나 LOAD-S4 activation을 완료라 하지 않는다.
 
 ## LOAD-S4 — 통합 activation
 

@@ -55,7 +55,7 @@ class SubscribeLoadTestCase(unittest.TestCase):
 class TestFieldContract(SubscribeLoadTestCase):
     def test_blank_snapshot_has_fixed_cardinality(self):
         snap = self._snapshot()
-        self.assertEqual(snap["contract_version"], "subscribe-load/8")
+        self.assertEqual(snap["contract_version"], "subscribe-load/9")
         self.assertEqual(snap["scope"], "process")
         for axis, outcomes in slm.AXIS_OUTCOMES.items():
             self.assertEqual(sorted(snap[axis]["by_outcome"]), sorted(outcomes))
@@ -227,7 +227,8 @@ class TestFieldContract(SubscribeLoadTestCase):
         self.assertEqual(sorted(snap), sorted(
              ["contract_version", "scope", "caveat", "metrics_internal_errors_total",
              slm.PREMIUM_RC, slm.KRX_ENTITLEMENT, slm.SNAPSHOT_BUILD, "snapshot_send",
-             "snapshot_singleflight", "snapshot_admission", "terminal"]))
+             "snapshot_singleflight", "snapshot_admission", "snapshot_failure_cooldown",
+             "terminal"]))
         self.assertEqual(sorted(snap["terminal"]), sorted(
             ["auth_wire_deadline_expired_by_stage", "subscribe_auth_failed_by_error"]))
         caller_fields = ["started_total", "by_outcome", "duration_ms_sum", "duration_ms_max",
@@ -250,6 +251,51 @@ class TestFieldContract(SubscribeLoadTestCase):
             "queued_now", "queued_max", "wait_observed_total", "wait_ms_sum",
             "wait_ms_max", "in_flight", "in_flight_max",
         ]))
+        self.assertEqual(sorted(snap["snapshot_failure_cooldown"]), sorted([
+            "armed_total", "suppressed_total", "expired_total",
+            "by_failure_class", "last_suppression",
+        ]))
+        self.assertEqual(
+            sorted(snap["snapshot_failure_cooldown"]["by_failure_class"]),
+            sorted(slm.SNAPSHOT_FAILURE_CLASS_KEYS),
+        )
+
+    def test_failure_cooldown_observation_has_fixed_safe_shape(self):
+        slm.record_snapshot_failure_cooldown_armed(failure_class="transient_db")
+        slm.record_snapshot_failure_cooldown_suppressed(
+            topic="usdt:krw",
+            generation=7,
+            supported=True,
+            enabled=True,
+            failure_class="transient_db",
+            remaining_seconds=0.1254,
+            suppressed_builds=3,
+        )
+        slm.record_snapshot_failure_cooldown_expired(failure_class="transient_db")
+
+        block = self._snapshot()["snapshot_failure_cooldown"]
+        self.assertEqual((block["armed_total"], block["suppressed_total"]), (1, 1))
+        self.assertEqual(block["expired_total"], 1)
+        self.assertEqual(block["by_failure_class"]["transient_db"], 1)
+        self.assertEqual(block["last_suppression"], {
+            "topic": "usdt:krw",
+            "generation": 7,
+            "supported": True,
+            "enabled": True,
+            "failure_class": "transient_db",
+            "cooldown_remaining_ms": 125.4,
+            "suppressed_builds": 3,
+        })
+
+    def test_unknown_failure_class_folds_without_dynamic_key(self):
+        errors_before = self._snapshot()["metrics_internal_errors_total"]
+        with self.assertLogs("exchange_rate.subscribe_load", level="WARNING"):
+            slm.record_snapshot_failure_cooldown_armed(failure_class="programming_bug")
+        snap = self._snapshot()
+        block = snap["snapshot_failure_cooldown"]
+        self.assertEqual(block["by_failure_class"]["unclassified"], 1)
+        self.assertNotIn("programming_bug", block["by_failure_class"])
+        self.assertEqual(snap["metrics_internal_errors_total"], errors_before + 1)
 
     def test_unknown_axis_is_refused(self):
         with self.assertRaises(slm.SubscribeLoadContractError):

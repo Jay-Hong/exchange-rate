@@ -246,6 +246,29 @@ class TestTopicSnapshotRestBootstrap(unittest.TestCase):
         self.assertEqual(r.headers.get("cache-control"), "no-store")
         self.assertNotIn("retry-after", {key.lower() for key in r.headers})
 
+    def test_snapshot_failure_cooldown_is_retryable_503_without_retry_after(self):
+        from app.topic_initial_snapshot import SnapshotFailureCooldownActive
+
+        p_auth, p_prem = self._authed()
+        cooldown = SnapshotFailureCooldownActive(
+            "usdt:krw",
+            failure_class="redis",
+            remaining_seconds=0.5,
+            suppressed_builds=2,
+        )
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), p_auth, p_prem, \
+             patch(
+                 "app.topic_initial_snapshot.build_snapshot_observed",
+                 new=AsyncMock(side_effect=cooldown),
+             ):
+            r = self.client.get(
+                "/api/v2/topics/snapshot", params={"topic": "usdt:krw"}
+            )
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"error": "temporarily_unavailable"})
+        self.assertEqual(r.headers.get("cache-control"), "no-store")
+        self.assertNotIn("retry-after", {key.lower() for key in r.headers})
+
 
 class TestTopicSnapshotRestAuthGate(unittest.TestCase):
     """ADR-039 §8.1 **E3** — REST twin 인증·premium·KRX per-user 게이트.

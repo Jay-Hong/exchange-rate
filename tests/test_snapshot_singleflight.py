@@ -9,10 +9,13 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy.exc import OperationalError
+
 from app import config, subscribe_load_metrics as slm, topic_dispatcher
 from app import topic_initial_snapshot as snapshot
 from app.topic_initial_snapshot import (
     SnapshotDeadlineExceeded,
+    SnapshotFailureCooldownActive,
     SnapshotRequestBudget,
     build_snapshot_observed,
 )
@@ -231,6 +234,126 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
             await build_snapshot_observed("usdt:krw", budget=_budget())
         retry.assert_awaited_once()
 
+    async def test_transient_failure_cooldown_suppresses_rebuilds_then_recovers(self):
+        calls = 0
+        transient = OperationalError("SELECT 1", {}, Exception("connection lost"))
+
+        async def fail_then_succeed(topic, *, budget):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise transient
+            return {"type": "snapshot", "topic": topic, "data": {"call": calls}}
+
+        with patch.object(
+            config, "WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS", 0.04
+        ), patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=fail_then_succeed,
+        ):
+            with self.assertRaises(OperationalError):
+                await build_snapshot_observed("usdt:krw", budget=_budget())
+
+            retries = await asyncio.gather(*[
+                build_snapshot_observed("usdt:krw", budget=_budget())
+                for _ in range(20)
+            ], return_exceptions=True)
+            self.assertTrue(
+                all(isinstance(exc, SnapshotFailureCooldownActive) for exc in retries)
+            )
+            self.assertEqual(calls, 1, "cooldown 중 새 builder가 시작됐다")
+
+            metric = slm.subscribe_load_metrics()["snapshot_failure_cooldown"]
+            self.assertEqual(metric["armed_total"], 1)
+            self.assertEqual(metric["suppressed_total"], 20)
+            self.assertEqual(metric["by_failure_class"]["transient_db"], 1)
+            self.assertEqual(metric["last_suppression"]["topic"], "usdt:krw")
+            self.assertEqual(metric["last_suppression"]["suppressed_builds"], 20)
+            self.assertGreater(metric["last_suppression"]["cooldown_remaining_ms"], 0)
+            self.assertNotIn("sql", metric["last_suppression"])
+            self.assertNotIn("token", metric["last_suppression"])
+
+            await asyncio.sleep(0.05)
+            recovered = await build_snapshot_observed("usdt:krw", budget=_budget())
+
+        self.assertEqual(recovered["data"]["call"], 2)
+        self.assertEqual(calls, 2)
+        self.assertEqual(snapshot._snapshot_state().failure_cooldowns, {})
+        self.assertEqual(
+            slm.subscribe_load_metrics()["snapshot_failure_cooldown"]["expired_total"],
+            1,
+        )
+
+    async def test_deadline_and_redis_failures_are_cooldown_eligible(self):
+        from redis.exceptions import TimeoutError as RedisTimeoutError
+
+        for label, failure, expected_class in (
+            ("deadline", SnapshotDeadlineExceeded("usdt:krw"), "deadline"),
+            ("redis", RedisTimeoutError("stalled"), "redis"),
+        ):
+            with self.subTest(failure=label), patch(
+                "app.topic_initial_snapshot._build_snapshot_once_observed",
+                side_effect=failure,
+            ):
+                topic_dispatcher._advance_topic_payload_generation("usdt:krw")
+                with self.assertRaises(type(failure)):
+                    await build_snapshot_observed("usdt:krw", budget=_budget())
+                with self.assertRaises(SnapshotFailureCooldownActive) as caught:
+                    await build_snapshot_observed("usdt:krw", budget=_budget())
+                self.assertEqual(caught.exception.failure_class, expected_class)
+
+    async def test_new_generation_does_not_reuse_previous_failure_cooldown(self):
+        calls = 0
+        transient = OperationalError("SELECT 1", {}, Exception("connection lost"))
+
+        async def fail_then_succeed(topic, *, budget):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise transient
+            return {"type": "snapshot", "topic": topic, "data": {"call": calls}}
+
+        with patch(
+            "app.topic_initial_snapshot._build_snapshot_once_observed",
+            side_effect=fail_then_succeed,
+        ):
+            with self.assertRaises(OperationalError):
+                await build_snapshot_observed("usdt:krw", budget=_budget())
+            topic_dispatcher._advance_topic_payload_generation("usdt:krw")
+            result = await build_snapshot_observed("usdt:krw", budget=_budget())
+
+        self.assertEqual(result["data"]["call"], 2)
+        self.assertEqual(calls, 2)
+
+    async def test_fatal_and_permanent_db_failures_never_enter_cooldown(self):
+        class _Orig:
+            sqlstate = "28P01"
+
+        failures = (
+            RuntimeError("programming bug"),
+            OperationalError("connect", {}, _Orig()),
+        )
+        for failure in failures:
+            calls = 0
+
+            async def fail_then_succeed(topic, *, budget):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise failure
+                return {"type": "snapshot", "topic": topic, "data": {}}
+
+            with self.subTest(failure=type(failure).__name__), patch(
+                "app.topic_initial_snapshot._build_snapshot_once_observed",
+                side_effect=fail_then_succeed,
+            ):
+                topic_dispatcher._advance_topic_payload_generation("usdt:krw")
+                with self.assertRaises(type(failure)):
+                    await build_snapshot_observed("usdt:krw", budget=_budget())
+                await build_snapshot_observed("usdt:krw", budget=_budget())
+                self.assertEqual(calls, 2)
+                self.assertEqual(snapshot._snapshot_state().failure_cooldowns, {})
+
     async def test_topic_generation_and_gate_are_distinct_keys(self):
         calls = []
 
@@ -339,8 +462,21 @@ class TestSnapshotSingleFlight(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSnapshotCacheConfig(unittest.TestCase):
+    def test_failure_class_copies_do_not_drift(self):
+        self.assertEqual(
+            tuple(snapshot.SNAPSHOT_FAILURE_CLASSES),
+            tuple(slm.SNAPSHOT_FAILURE_CLASSES),
+        )
+
     def test_admission_capacity_has_a_finite_dormant_default(self):
         self.assertEqual(config.WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS, 4)
+
+    def test_failure_cooldown_has_a_finite_dormant_default(self):
+        self.assertEqual(config.WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS, 1.0)
+        self.assertLessEqual(
+            config.WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS,
+            config.WS_TOPIC_REQUEST_DEADLINE_SECONDS,
+        )
 
     def test_cache_ttl_is_positive_and_no_more_than_live_freshness_contract(self):
         self.assertGreater(config.WS_TOPIC_SNAPSHOT_CACHE_TTL_SECONDS, 0)
@@ -378,6 +514,23 @@ class TestSnapshotCacheConfig(unittest.TestCase):
                     timeout=30,
                 )
                 self.assertNotEqual(proc.returncode, 0)
+
+    def test_invalid_failure_cooldown_fails_at_config_import(self):
+        repo = pathlib.Path(__file__).resolve().parent.parent
+        for value in ("0", "nan", "inf", "26"):
+            with self.subTest(value=value):
+                env = os.environ.copy()
+                env["WS_TOPIC_SNAPSHOT_FAILURE_COOLDOWN_SECONDS"] = value
+                proc = subprocess.run(
+                    [sys.executable, "-c", "import app.config"],
+                    cwd=repo,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("cooldown", proc.stderr.lower())
 
 
 class TestSnapshotAdmission(unittest.IsolatedAsyncioTestCase):
@@ -451,8 +604,13 @@ class TestSnapshotAdmission(unittest.IsolatedAsyncioTestCase):
                 await build_snapshot_observed("test:expired", budget=waiting_budget)
             self.assertEqual(calls, ["test:holder"])
             self.assertEqual(waiting_budget.stop_reason, "deadline")
+            self.assertEqual(
+                snapshot._snapshot_state().failure_cooldowns, {},
+                "admission queue deadline이 build failure cooldown으로 오분류됐다",
+            )
             release.set()
             await holder
+            await build_snapshot_observed("test:expired", budget=_budget())
 
         metrics = slm.subscribe_load_metrics()
         self.assertEqual(metrics["snapshot_admission"]["queued_now"], 0)
