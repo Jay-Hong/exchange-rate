@@ -4034,7 +4034,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:2512](app/main.py#L2512))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:2516](app/main.py#L2516))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -4620,7 +4620,7 @@ class SourceDailyRate(Base):
 
 **Proposed** — Phase 2d 구현 진입 순서:
 
-1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `main.py:153`의 `Base.metadata.create_all(bind=engine)`이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
+1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `app/main.py:193`의 `create_all_app_tables(engine)`(실제 `Base.metadata.create_all`은 `app/database.py:65`, control-plane 테이블만 제외하며 `source_daily_rates`는 제외 대상이 아니다)이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
 2. **Backfill dry-run**: 각 source 별 backfill job 작성 + dry-run 모드 (실제 INSERT X, log only)
 3. **Source별 partial backfill**: 1 source씩 (예: KRX 먼저) 일부 date range 실측 적재 → 검증
 4. **전체 backfill**: 3 source 모두 historical 적재
@@ -4694,7 +4694,7 @@ ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규
 
 **Step 1 land 후 운영 상태**:
 
-- 코드 배포 시 `main.py:153` `Base.metadata.create_all(bind=engine)`이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
+- 코드 배포 시 `app/main.py:193` `create_all_app_tables(engine)`(내부 `Base.metadata.create_all` — `app/database.py:65`)이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
 - 운영 영향 거의 0 — read/write 호출자 X (helper module은 import 가능하나 사용자 없음)
 - ADR-034 §14 Rollout step 1 완료. Step 2 (backfill dry-run) 진입 가능.
 
@@ -6047,7 +6047,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 
 ### Decision 3 — 강제선의 현실 (per-user 한계 명시)
 
-`/ws`는 **익명**(main.py:910 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
+`/ws`는 **익명**(main.py:1069 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
 (codex 지적, 코드 확인 2026-07-04). 1차 강제선:
 
 - **인증 있는 REST(알림 API) = G1+G2 서버 강제**: 김프알림 krx 조합 생성/수정 403,
@@ -6219,7 +6219,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 
 ### 요약 (상세는 PLAN 문서)
 
-- **문제**: 비구독=매시간 스냅샷 / 구독=실시간 WS 제품 방향인데, 최신 rate/graph endpoint 대부분 무인증(main.py 890~2620 auth 0건) → 페이월이 UI에만 존재.
+- **문제**: 비구독=매시간 스냅샷 / 구독=실시간 WS 제품 방향인데, 최신 rate/graph endpoint 대부분 무인증(`app/main.py` 894~2624 auth 0건) → 페이월이 UI에만 존재.
 - **결정**: D1 hourly=Firebase 인증만(KRX 항상 제외) / D2 최신 realtime 표면=premium(KRX는 +entitlement, ADR-038 `krx_visible`) / D4 신규 앱 legacy fallback 금지 / D5 무료 그래프=real hourly.
 - **접근 강제**: 무인증 최신-데이터 endpoint 전수(11종) 식별 → **Stage A**(신규 표면 인증, 출시 시) + **Stage B**(legacy REST/WS 종료, 양 플랫폼 <1% + 유예).
 - **양 플랫폼**: iOS reference → Android 이식(Android는 완전 legacy). Stage B는 iOS·Android 양쪽 기준([REALTIME_ARCHITECTURE_PLAN.md:479](REALTIME_ARCHITECTURE_PLAN.md#L479) 계약 승계).
@@ -6528,10 +6528,10 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4849992ac7fa7b1881a2f7bc5100905c5470e890`
-- iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
+- server 기준 commit: `4b58110c85efc844eba990b60fb36d8a4349f720`
+- iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `493783ede2065a9aad47818ad4d089378ab5b2dcf3f40e76edc73c9b8b953093`
+- manifest SHA: `5496af59928c23a2fe03e48a3e318fc780d6fbe682955e0e31b6758f87474510`
 - baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -6591,7 +6591,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1211-1261` · `app/main.py:1065-1109`).
+(`app/main.py:1215-1265` · `app/main.py:1069-1113`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6605,7 +6605,7 @@ doctest 로 못 박는다:
 investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 그보다 더 줄 수 있다
 (`ios/FXi/Models/RateSource.swift:32-91` ·
 `ios/FXi/Services/SourcePreferenceManager.swift:133-161` ·
-`ios/FXi/ViewModels/ExchangeRateViewModel.swift:623-665`). 따라서 이 전환은 fallback 이 아니라
+`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707`). 따라서 이 전환은 fallback 이 아니라
 **거래소 5 + KRX 를 잃고 일부 USD reference 만 남기는 순수 손실 교환**이다.
 근거: `app/legacy_policy.py:35-38` · `app/legacy_policy.py:59-60`.
 <!-- /evidence: E-INV-2 -->
@@ -6617,7 +6617,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 ### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 활성화 미확인**
 
 **(a)** `0cfe474`에서 WS FX/USDT premium 강제 경로가 추가됐다
-(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:770-926`). 적용 여부는
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:792-948`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
 코드 기본값은 `compatibility` 다(`app/config.py:782-784`). production 의 실제 값은 아래 표가
@@ -6639,8 +6639,8 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 
 구현 근거: `app/config.py:741-784`(stage) · `app/topic_policy.py:87-93`(정책표) ·
 `app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
-`app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:770-926`(배선·등록) ·
-`app/main.py:3172-3176`(REST twin).
+`app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:792-948`(배선·등록) ·
+`app/main.py:3176-3180`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
@@ -6653,7 +6653,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 
 `WebSocketService` 가 legacy `rates` 프레임의 `indices` 를 통해 DXY 를 받는다
 (`onIndicesReceived?(response.indices)`).
-근거: `ios/FXi/Services/WebSocketService.swift:1066-1073`.
+근거: `ios/FXi/Services/WebSocketService.swift:1892-1910`.
 
 ⛔ **초안은 여기서 "legacy rate 값만 금지"로 불변식을 좁히고 envelope 예외를 두려 했다. 철회한다.**
 `FREE_TIER_ACCESS_MODEL_PLAN.md` §6 롤아웃이 **이미** 순서를 정해 뒀다 —
@@ -6682,7 +6682,7 @@ topic snapshot/cache 기준 전환 → 4d /api/rates + legacy WS 제거"*.
 근거 — premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` 의 live state 는 없다.
 따라서 futures topic 은 **legacy 이탈에 불필요**하며 phased 로 미룬다.
 (테더 1d 그래프의 DXY_futures 계열은 그래프 데이터 경로이지 live tail 이 아니다.)
-근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:954-956`.
+근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989`.
 <!-- /rid: R-INV-4 -->
 
 <!-- rid: R-DEC-1 -->
@@ -6722,7 +6722,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1402-1412` · `app/main.py:938-961`). 따라서 현재 경로에는
+  (`app/scheduler.py:1402-1412` · `app/main.py:942-965`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.
@@ -7003,7 +7003,7 @@ health 결과를 클라에 전달하는 status signal 이 필요하다(후속).
 1. ~~`dxy:spot` / `dxy:futures` 분리~~ → **확정: 이번 출시는 `dxy:spot` 만**(로드맵 4b 그대로).
    근거: premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` live state 는 없다
    → futures topic 은 legacy 이탈에 **불필요**, phased.
-   근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:954-956`.
+   근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989`.
 
 <!-- relation: references target=R-INV-4 -->
 - references: [R-INV-4](#r-inv-4)

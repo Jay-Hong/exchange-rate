@@ -100,8 +100,17 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     "ADR": 32,
     # 2026-08-20 R-CLI-24 C2: reconnect/stability + reconnect-resubscribe + topic cooldown
     #                구현 근거 7건을 추가해 24 → 31.
-    "CLIENT": 31,
-    "CUT": 36,
+    # 2026-08-21 R-GATE-3 C2: 구현이 요구를 충족하며 "미충족" 서술이 거짓이 된 단위들을 현재
+    #                동작으로 재작성했고, 각 주장에 코드 근거 좌표를 붙였다 —
+    #                CLIENT +11(거부코드 5종 배선 · 45초 revert 제거 · stop() purge · 알림
+    #                fail-closed), CUT +12(R-CUT-9 런북 3행 해소 · freshFxAssets 삭제 ·
+    #                테스트 좌표 재도출), LOAD +7(재검증 jitter 축 신설).
+    #                153 → 183 / ios 74 → 103 / server 79 → 80.
+    # 2026-08-21 codex NO-GO 반영: R-HAND-6 구현 근거(4곳) · R-CLI-11 배너 렌더 근거(3곳) ·
+    #                cutover B5/B8/B9 실제 테스트 좌표(6곳)를 결속해
+    #                183 → 195 / ios 103 → 111 / server 80 → 84.
+    "CLIENT": 44,
+    "CUT": 54,
     # 2026-08-19 LOAD-S3 C2: 실패 close/None 잔여, worker checkpoint, live publish close 잔여를
     #                현재 코드에 결속하면서 server locator 5건 증가 (19 → 24).
     # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 "각 phase 앞 checkpoint" 를 실제 worker 결속
@@ -110,7 +119,7 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-20 LOAD-S6 C2: shared task/permit 소유와 실제 worker를 분리 인용해 +1 (25 → 26).
     # 2026-08-20 LOAD-S7 C2: admission/caller 취소가 cooldown을 arm하지 않는 경계를 shared task
     #                범위에 직접 결속해 +1 (26 → 27).
-    "HAND": 27,
+    "HAND": 31,
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
@@ -126,7 +135,7 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     #                분리 인용해 +3 (13 → 16).
     # 2026-08-20 R-CLI-24 C2: R-LOAD-3 의 남은 client 경계를 구현 사실로 교정하면서
     #                pinned iOS 근거 3건을 추가해 16 → 19.
-    "LOAD": 19,
+    "LOAD": 26,
 }
 
 
@@ -405,9 +414,9 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-20 LOAD-S7 C2: HAND +1, LOAD +3 (139 → 143 / server 75 → 79).
     # 2026-08-20 R-CLI-24 C2: CLIENT +7, LOAD +3
     #                (143 → 153 / ios 64 → 74, server 79 불변).
-    assert len(references) == 153
+    assert len(references) == 195
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 79, "ios": 74}
+    assert by_repo == {"server": 84, "ios": 111}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -647,8 +656,16 @@ CLAIM_LEDGER_INVENTORY = {
     # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 CURRENT_CUE 를 복원해 64 → 65 (code_fact 53 → 54).
     # 2026-08-20 R-CLI-24 C2: reconnect·복구 subscribe·topic retry 현재 구현 단위 3건을
     #                pinned iOS code_fact 로 결속해 65 → 68 (code_fact 54 → 57).
-    "claim_candidates": 68,
-    "code_fact_entries": 57,
+    # 2026-08-21 R-GATE-3 C2: 구현이 요구를 충족하며 "미충족" 서술이 거짓이 돼 4개 문서 단위를
+    #                현재 동작으로 재작성했고, 그 결과 새 code_fact 4건이 생겼다 —
+    #                R-CLI-12 ×2(45초 legacy revert 제거 · purge 후 blank),
+    #                R-CLI-6(다섯 거부 코드 배선), R-CUT-9(런북 MODE 2 문구 해소).
+    #                68 → 72 (code_fact 57 → 61).
+    # 2026-08-21 codex NO-GO 반영: R-HAND-6(서버 close-on-send-failure) 과 R-CLI-11(배너 렌더)
+    #                의 구 "미구현" 서술이 pinned 코드와 정반대라 정정했고, cutover 매트릭스
+    #                B5/B8/B9 도 실제 커버리지로 갈랐다(B8 은 '절반만'). 72 → 74 (code_fact 61 → 63).
+    "claim_candidates": 74,
+    "code_fact_entries": 63,
     "normative_entries": 11,
 }
 

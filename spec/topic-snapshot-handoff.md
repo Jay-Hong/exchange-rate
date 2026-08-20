@@ -3,10 +3,10 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4849992ac7fa7b1881a2f7bc5100905c5470e890`
-- iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
+- server 기준 commit: `4b58110c85efc844eba990b60fb36d8a4349f720`
+- iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `493783ede2065a9aad47818ad4d089378ab5b2dcf3f40e76edc73c9b8b953093`
+- manifest SHA: `5496af59928c23a2fe03e48a3e318fc780d6fbe682955e0e31b6758f87474510`
 - baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -34,14 +34,14 @@
 **(a) WS 인가 경로 — 구현됨, Release arming 전에 활성화·실측한다.**
 
 `0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다
-(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:770-926`, ADR-039 Stage A).
+(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:792-948`, ADR-039 Stage A).
 Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.
 
 격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage
 `enforce_authenticated_premium` 에서 식별된 FX/USDT 는
 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다
 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다.
-REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3172-3176`, ADR-039 §8.1 E3).
+REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3176-3180`, ADR-039 §8.1 E3).
 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`).
 ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행
 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.
@@ -80,7 +80,7 @@ premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + K
 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` ·
 `app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한
 `dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로
-(`app/topic_initial_snapshot.py:323-328` · `ios/FXi/Services/WebSocketService.swift:1066-1073`),
+(`app/topic_initial_snapshot.py:323-328` · `ios/FXi/Services/WebSocketService.swift:1892-1899`),
 DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.
 
 <!-- relation: references target=R-INV-4 -->
@@ -101,7 +101,7 @@ DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 
 **연결·pong·ack·lease 가 전부 정상인데 snapshot 이 한 번도 오지 않는 구멍 (출시 차단)**
 
 서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다
-(`app/topic_dispatcher.py:836-926`; baseline D5).
+(`app/topic_dispatcher.py:858-948`; baseline D5).
 LOAD-S3/S7 구현 뒤 snapshot deadline·transient build 실패와 active cooldown은 **1013**, fatal 실패는
 **1011**로 닫힌다(`app/topic_initial_snapshot.py:1049-1075`; baseline D3). 다만 builder의 `None`은
 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:1077-1078`). FX publisher도 build/publish **전** 예외를
@@ -190,7 +190,7 @@ LOAD-S3/S7 구현 뒤 snapshot deadline·transient build 실패와 active cooldo
 - ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *"build 총예산 < iOS 20초"* 라고 썼는데 **틀렸다** —
   iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라
   그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤
-  `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:900-926`).
+  `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:922-948`).
 
 넷 중 서버가 소유하는 둘은 [R-HAND-13](#r-hand-13)·[R-HAND-14](#r-hand-14) 이고, 클라가 소유하는
 둘은 [R-CLI-17](ios-topic-state-machine.md#r-cli-17)·[R-CLI-20](ios-topic-state-machine.md#r-cli-20) 이다.
@@ -316,16 +316,23 @@ initial-delivery deadline([R-CLI-20](ios-topic-state-machine.md#r-cli-20))과 �
 `topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) —
 *"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는
 '연결이 죽었다'의 동의어가 아니다."*
-앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:747`)뿐 아니라 snapshot 실패의
+앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:769`)뿐 아니라 snapshot 실패의
 `1013`/`1011`도 있다(`app/topic_initial_snapshot.py:75-110` ·
-`app/topic_initial_snapshot.py:1049-1075`). 그러나 **live publish
-send 실패 경로**는 여전히 registry만 제거하고 소켓은 닫지 않는다
-(`app/topic_dispatcher.py:397-407`). 16KB 초과의 transport `1009`는 별도 축이다.
+`app/topic_initial_snapshot.py:1049-1075`). 16KB 초과의 transport `1009`는 별도 축이다.
 
-→ 결과: **연결은 살아 있고 ping/pong 도 정상인데 그 연결의 모든 구독이 사라진다.** 영구 침묵.
+→ 방치했을 때의 결과: **연결은 살아 있고 ping/pong 도 정상인데 그 연결의 모든 구독이 사라진다.**
+영구 침묵.
 
 **결정**: 서버가 send 실패 시 **소켓을 닫는다**. 탐지 불가능한 조건을 **이미 처리되는 재연결
 경로**로 바꾼다. (전송 재시도 1회 후 close 도 허용 — 다만 "조용히 구독만 제거"는 금지.)
+
+✅ **배선됐다.** `publish_topic` 과 `publish_topic_detailed` 가 send 실패 소켓을 모아
+(`app/topic_dispatcher.py:334` · `app/topic_dispatcher.py:423`) 전송을 모두 끝낸 뒤
+`_close_failed_topic_subscribers` 로 넘기고(`app/topic_dispatcher.py:341` ·
+`app/topic_dispatcher.py:429`), 그 helper 가 `_close_after_topic_send_failure` 를 `gather` 로
+동시에 돌려 각각 `close(code=1011)` 한다(`app/topic_dispatcher.py:284-296`).
+⚠️ close 를 send 루프 **안**에서 기다리면 N 개 실패가 정상 fan-out 을 N 초까지 막으므로
+전송 뒤로 미뤘고, 각 close 에 1초 timeout 을 걸어 총 지연을 ~1초로 묶는다.
 <!-- /rid: R-HAND-6 -->
 
 <!-- rid: R-HAND-10 -->

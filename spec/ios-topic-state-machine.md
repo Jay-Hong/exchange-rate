@@ -3,10 +3,10 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4849992ac7fa7b1881a2f7bc5100905c5470e890`
-- iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
+- server 기준 commit: `4b58110c85efc844eba990b60fb36d8a4349f720`
+- iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `493783ede2065a9aad47818ad4d089378ab5b2dcf3f40e76edc73c9b8b953093`
+- manifest SHA: `5496af59928c23a2fe03e48a3e318fc780d6fbe682955e0e31b6758f87474510`
 - baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -199,7 +199,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 
 ⚠️ **만약 나중에 시간 deadline 을 둘 이상 두게 되면**, `startFreshnessMonitorIfNeeded` 는
 `guard freshnessMonitor == nil` 이라 **이미 도는 monitor 를 재무장하지 않는다**
-(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:303-304`). 균일 임계에서는
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:289-290`). 균일 임계에서는
 새 deadline 이 항상 기존보다 뒤라 안전하지만, 임계가 갈리면 더 이른 deadline 이 생겨
 **monitor 가 자면서 지나친다** = 2026-08-08 결함의 재생산. 그때는 *"새 최근접 deadline 이 현재
 수면 목표보다 이르면 재무장"* 이 **필수 동반**이다.
@@ -246,7 +246,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 | `request_too_large` | 위 1009 행 참조 | — | — | 실제 운영 경로는 **frame 이 아니라 close** |
 
 ⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의
-`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3265-3272`)
+`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3269-3277`)
 클라는 셋을 구별할 수 없다.
 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.
 
@@ -262,10 +262,21 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 
 **클라에 이미 있는 것**: `SubscriptionError.isTerminal`(invalid_token/invalid_request/request_too_large),
 `isRetryable`(temporarily_unavailable), `premium_required` 복구 집합.
-⚠️ **per-topic 거부 중 전용 동작이 있는 건 `premium_required` 하나뿐이고 나머지는 로그만 남긴다** —
-`topic_unavailable`·`unknown_topic`·`topics_disabled` 는 **새로 배선해야 한다**.
-근거: `ios/FXi/Models/TopicMessage.swift:224-247` ·
-`ios/FXi/Services/WebSocketService.swift:632-649`.
+✅ **다섯 거부 코드가 모두 배선됐다.** `handleSubscriptionAck` 가 `topicRejection(from:)` 으로
+`topics_disabled`·`topic_unavailable`·`unknown_topic`·`premium_required`·`krx_entitlement_required`
+를 각각 `TopicRejectionReason` 으로 옮기고
+(`ios/FXi/Services/WebSocketService.swift:1086-1095`), **이번 배치로 보낸 topic 에 한해**
+`topicStateStore.applyAck(rejections:)` 로 per-topic 기록한다
+(`ios/FXi/Services/WebSocketService.swift:1043-1056` ·
+`ios/FXi/Models/TopicSubscriptionState.swift:165-186`). 기록된 사유는 접근 상태
+(`accessState(authResolution:)` — `ios/FXi/Models/TopicSubscriptionState.swift:72-86`)와
+재시도 trigger(`rejectionRetryTriggers(for:)` — 같은 파일 `117-137`)에서 위 표대로 서로 다르게
+갈라지므로, `topic_unavailable`·`unknown_topic`·`topics_disabled` 도 더는 로그만 남기지 않는다.
+그 위에 **추가로** 전용 콜백을 갖는 것은 `premium_required`(`onPremiumAccessRejected`)와
+`krx_entitlement_required`(`onKrxAccessRejected`) 둘뿐이다
+(`ios/FXi/Services/WebSocketService.swift:1073-1078`).
+`SubscriptionError.isTerminal`/`isRetryable` 은 그대로다
+(`ios/FXi/Models/TopicMessage.swift:224-246`).
 
 ⚠️ **`topics_disabled` 를 "영구 중단"으로 처리하지 않는다.** 재시도 폭풍만 멈추고 **구독 의도는
 보존**해야 서버 재활성화 후 복구된다.
@@ -275,7 +286,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는
 **두 경우를 모두** 다뤄야 한다
 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330`
-(stage 별 partition) · `app/topic_dispatcher.py:852-893`(per-topic 거부 코드).
+(stage 별 partition) · `app/topic_dispatcher.py:874-915`(per-topic 거부 코드).
 상태 서술은 `DECISIONS.md` ADR-041
 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11).
 전이표는 Stage A 완료를 전제로 한다.
@@ -293,8 +304,8 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 <a id="r-cli-7"></a>
 ### R-CLI-7 — 두 축(`subscribedTopics`/`confirmedTopics`)으로는 전이표를 표현할 수 없다
 
-`subscribedTopics`(의도, `ios/FXi/Services/WebSocketService.swift:45-47`) /
-`confirmedTopics`(서버 확인, `ios/FXi/Services/WebSocketService.swift:431-433`)
+`subscribedTopics`(의도, `ios/FXi/Services/WebSocketService.swift:55-57`) /
+`confirmedTopics`(서버 확인, `ios/FXi/Services/WebSocketService.swift:747-749`)
 두 축으로는 위 표를 표현할 수 없다.
 
 | 축 | 의미 |
@@ -430,7 +441,7 @@ enum TopicRejection {
 **이 축 하나를 공유**해 판정이 갈리지 않게 한다.
 
 ⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) ·
-`app/main.py:3265-3272`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
+`app/main.py:3269-3277`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
 표의 두 행이 구현된다.
 
 ⛔ **`unknown_topic` 에서 `desired` 를 지우면 안 된다.** 버전 스큐나 순차 배포가 끝나도 **자동 복구할
@@ -497,9 +508,11 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
         → 실패 또는 불일치 확정 → degraded 배너 + 수동 재시도 노출
 ```
 
-현재 MODE 2 에서는 배너가 렌더조차 되지 않는다(`ConnectionStatusView` 가 `connectionState` 만
-본다 — `ios/FXi/Views/ConnectionStatusView.swift:11-48`) — **자동도 수동도 없는 상태**다.
-게이트를 전달 상태까지 포함하도록 넓힌다.
+✅ **게이트가 전달 상태까지 넓어졌다.** `ConnectionStatusView` 는 여전히 `connectionState` 만
+보지만(`ios/FXi/Views/ConnectionStatusView.swift:11-48`), 전달 상태는 별도 `StatusBanner` 가
+든다 — 탭 위에 붙고(`ios/FXi/ContentView.swift:87`) `topicStatusMessage(for:)` 문구와
+`canRetryTopicDelivery(for:)` 수동 재시도를 탭 범위로 렌더한다
+(`ios/FXi/Views/Components/OfflineBanner.swift:139-143`).
 
 ⚠️ 단, ADR-038 D2 의 **제약은 유지**된다 — "KRX 수신은 tether 전달 생존의 증거가 아니다"는 여전히
 참이고 재검증 오판 방지에 필요하다. 갱신되는 것은 **목적뿐**이다
@@ -521,19 +534,20 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
 - **재시도 상한** 을 둔다.
 - 실패 후 **클라 재시도 cooldown** 을 둔다.
 
-**현재 구현 상태 (iOS `45a8a12`, LOAD-S4 검증값):**
+**현재 구현 상태 (아래 좌표의 기준 트리 = iOS `99316a9`. LOAD-S4 리허설 자체는 iOS `45a8a12` 에서
+수행했고, 그 뒤 아래 튜닝 값 자체는 그대로이며 좌표만 재도출됐다):**
 - 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를
   초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다
-  (`ios/FXi/Utils/Constants.swift:272-279` · `ios/FXi/Services/WebSocketService.swift:1331-1389`).
+  (`ios/FXi/Utils/Constants.swift:277-284` · `ios/FXi/Services/WebSocketService.swift:2035-2093`).
 - 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의
   subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와
-  중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:933-952` ·
-  `ios/FXi/Services/WebSocketService.swift:1159-1178`).
+  중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1602-1623` ·
+  `ios/FXi/Services/WebSocketService.swift:1851-1870`).
 - 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact
   `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초
   시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다
-  (`ios/FXi/Utils/Constants.swift:255` · `ios/FXi/Services/WebSocketService.swift:845-900` ·
-  `ios/FXi/Services/WebSocketService.swift:987-995`).
+  (`ios/FXi/Utils/Constants.swift:255` · `ios/FXi/Services/WebSocketService.swift:1410-1562` ·
+  `ios/FXi/Services/WebSocketService.swift:1664-1673`).
 
 ⚠️ 위 값은 다수 client의 45초 동시 도착에서 서버 queue wait·1013·cooldown suppression과
 클라이언트 retry 시간축을 함께 보는 LOAD-S4 리허설을 통과했다. 다만 이 결과를 waiter 개수 hard
@@ -553,16 +567,30 @@ cap이나 영구 activation 완료로 쓰지 않는다.
 <a id="r-cli-12"></a>
 ### R-CLI-12 — `topics_disabled` = 명시적 비활성 상태(safety stop)
 
-`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이고,
-그것이 **화면에 작용하는 유일한 기전이 지금의 45초 legacy revert** 다. legacy 소비를 걷어내면
-([R-CUT-1](legacy-cutover.md#r-cut-1)) 운영자가 kill 을 눌러도 화면이 바뀌지 않는다.
-근거: `ios/TOPIC_V2_RELEASE_RUNBOOK.md:237-242` ·
-`ios/FXi/ViewModels/ExchangeRateViewModel.swift:203-211` ·
-`ios/FXi/ViewModels/ExchangeRateViewModel.swift:623-665`.
+`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다.
+⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과
+상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:205-208`), stale 전이는
+`revalidateSilencedTopic("usdt:krw")` 만 부르며
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:270-279`), 표시 경로 `usdtDisplayState` 에는
+`tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724`, 특히 671 행 주석).
+런북도 재작성돼 2차 롤백 bullet 이 "45초 legacy fallback 을 기다리는 절차가 아니다"라고 못박고,
+클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다
+(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:269-273`).
+그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled`
+명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초
+진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1030-1050`)
+탭 상태 문구가 "실시간 시세를 일시적으로 제공할 수 없습니다"를 띄운다
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:479-502`).
+legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.
 
-⚠️ 다만 현 레버가 "작동"한다는 건 화면이 **바뀐다**는 뜻일 뿐, 바뀐 결과는 USDT 탭에 은행 USD
-시세라는 **무관한 데이터**다. 롤백의 목적("새 경로가 오도하는 것을 멈춘다")을 지금도 달성하지
-못한다. 그러므로 되돌리는 게 아니라 **대체**한다.
+⚠️ 이 판단의 근거였던 "현 레버"(45초 legacy revert)는 **이제 코드에 없다**. 당시 문제는 화면이
+**바뀌기는 하되** USDT 탭에 은행 USD 시세라는 **무관한 데이터**로 바뀐다는 것이었고, 롤백의
+목적("새 경로가 오도하는 것을 멈춘다")을 달성하지 못했다. 그래서 되돌리는 게 아니라 **대체**하기로
+했고, 아래 결정이 그 대체다. 지금은 `topics_disabled` purge 후 `tetherReceived=false` + store 가
+비어 legacy 로 떨어지지 않고 빈 상태가 된다
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724`).
 
 **결정**: `topics_disabled` 를 받으면 클라는 **명시적 비활성 상태**로 전환한다 — 마지막 값을
 지우고 "실시간 시세를 일시적으로 제공할 수 없습니다"를 표시한다. 구독 의도는
@@ -585,10 +613,14 @@ cap이나 영구 activation 완료로 쓰지 않는다.
 ### R-CLI-13 — 메모리만 지우면 부족하다
 
 topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다
-(`ios/FXi/Services/CacheService.swift:49-54` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:412`).
-그리고 `stop()` 은 store 만 비우고 디스크 캐시를 지우지 않는다
-(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:484-502`). 지우지 않으면 재실행 시
-**비활성이어야 할 값이 되살아난다**.
+(`ios/FXi/Services/CacheService.swift:49-54` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:404`).
+지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다** — ✅ 이 요구는 충족됐다.
+`stop()` 이 마지막에 `purgeTopicData(.all)` 을 부르고
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:523-537`), `.all` 분기가 in-memory store 를
+비우는 데 그치지 않고 `cachedTopicRates` 를 nil 로 만든 뒤
+`cacheService.removeCachedTopicRates()` 로 **디스크 키까지** 지운다
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1054-1064` ·
+`ios/FXi/Services/CacheService.swift:63-66`).
 
 | 범위 | `topics_disabled` | 인가 거부(per-topic, [R-CLI-6](#r-cli-6)) |
 |---|---|---|
@@ -638,7 +670,7 @@ live-tail 을 **버린다**. 그 함수 주석이 스스로 실토한다 —
 - 그냥 제거하면 **주말 FX 종가나 장마감 KRX 값을 현재 시점의 live tail 로 ingest** 하게 된다.
   bridge 는 source timestamp 를 검사한 뒤 rate 만 `ingestLive` 에 넘기므로
   (`ios/FXi/Views/Components/GraphV2Section.swift:1446-1468`), `ingestLive` 는 그 rate 를
-  `Date()` 시각으로 누적한다(`ios/FXi/ViewModels/GraphV2ViewModel.swift:191-197`). 검사를 빼면
+  `Date()` 시각으로 누적한다(`ios/FXi/ViewModels/GraphV2ViewModel.swift:195-201`). 검사를 빼면
   오래된 값이 지금 값으로 그려진다.
 - "전달 상태 기준으로 교체"도 안 된다 — 정상 휴장 중에는 연결·lease 가 **healthy** 라 오래된 값을
   현재 tail 로 연장하는 문제가 그대로 남는다.
@@ -662,14 +694,21 @@ live-tail 을 **버린다**. 그 함수 주석이 스스로 실토한다 —
 <a id="r-cli-18"></a>
 ### R-CLI-18 — 알림 시트 범위 검증 우회(cold-start fail-close)
 
-- **알림 시트 범위 검증 우회** — `SourceAlertAddSheet` 의
-  `guard let threshold, let range = validRange else { return true }` 는 fail-**open** 이다
-  (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:90-142`).
-  stale 로 현재가가 nil 이면 ±50% 가드가 **조용히 꺼진 채 임의 임계값 저장이 통과**한다.
-  불변식([R-INV-1](../DECISIONS.md#r-inv-1))대로 last-known 이 공급되면 대부분 복구되고,
-  남는 건 **한 번도 수신 못 한 cold-start** 다.
-  그때는 저장을 막되 **사유 표시 + 탈출구**(값 직접 확인 등)를 함께 둔다. 서버는 현재
-  `threshold > 0` 만 검증하므로(`app/schemas.py:211`) 클라가 유일한 방어선이다.
+- **알림 시트 범위 검증** — ✅ **fail-closed 로 배선됐다.** 판정은 `SourceAlertValidation` 로
+  분리됐고, `canSaveThreshold` 는 threshold 가 nil 이면 거절하며 `validRange` 가 nil 이면
+  `isThresholdInRange` 가 `false` 를 돌려준다
+  (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:20-40`).
+  `validRange` 는 현재가가 없거나 비유한·0 이하면 nil 이 되므로
+  (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:153-161`),
+  **한 번도 수신 못 한 cold-start** 에서는 ±50% 가드가 꺼지는 게 아니라 **저장이 막힌다**.
+  `canSave` 가 그 판정을 그대로 쓴다(같은 파일 `199-210`).
+  예외는 하나 — **가격 조건을 그대로 둔 편집**이다. source·asset·condition·threshold 가 모두
+  그대로면(`priceFieldsUnchanged`, 같은 파일 `167-173`) live rate 없이도 활성/반복 토글만 저장할
+  수 있다. 요구했던 **사유 표시 + 탈출구**도 함께 있다 — 현재가를 못 읽으면 "현재 시세를 확인할 수
+  없어 가격 조건을 저장할 수 없습니다" 와 `다시 연결` 버튼을 띄운다(같은 파일 `422-433`).
+  불변식([R-INV-1](../DECISIONS.md#r-inv-1))대로 last-known 이 공급되면 애초에 이 상태에 거의
+  들어가지 않는다. 서버는 여전히 `threshold > 0` 만 검증하므로(`app/schemas.py:211`) 범위 가드는
+  클라가 유일한 방어선이다.
 
 **관계**
 
