@@ -4,10 +4,10 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
-- iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
+- iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87`
-- baseline SHA: `fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc`
+- manifest SHA: `9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6`
+- baseline SHA: `96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -101,9 +101,13 @@ flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` ·
 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당
 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의
 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만
-bounded이고 queue 개수 hard cap은 없다. 또한 기본 1초는 dormant 값이며 클라이언트
-jitter·재시도 상한([R-CLI-24](ios-topic-state-machine.md#r-cli-24))과 LOAD-S4 다중 클라이언트
-리허설이 남아 있으므로 end-to-end 완화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력
+bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은
+pinned iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 구현됐다
+(`ios/FXi/Services/WebSocketService.swift:845-900` ·
+`ios/FXi/Services/WebSocketService.swift:933-952` ·
+`ios/FXi/Services/WebSocketService.swift:1331-1389`). 다만 서버 기본 1초와 클라이언트 jitter 값은
+아직 운영 승인값이 아니며 LOAD-S4 다중 클라이언트 리허설이 남아 있으므로 end-to-end 완화 완료로
+쓰지 않는다. 취소된 sync worker는 다음 협력
 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.
 <!-- /rid: R-LOAD-3 -->
 

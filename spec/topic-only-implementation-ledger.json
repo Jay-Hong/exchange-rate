@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87",
+  "manifest_sha256": "9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
@@ -267,14 +267,46 @@
     },
     {
       "rid": "R-CLI-24",
-      "status": "unreviewed",
+      "status": "verified",
       "owner": "CLIENT",
       "block_title": "6. 내부 복구와 사용자 경고 분리",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "45a8a129be3067a5303331fe956f8f05fd267e47",
+          "paths": [
+            "CLAUDE.md",
+            "FXi/Services/WebSocketService.swift",
+            "FXi/Utils/Constants.swift",
+            "FXiTests/TopicMessageTests.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testProductionRetryPathUsesInjectedJitterAfterTheServerCooldown"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testReconnectResubscribeJitterDelaysOnlyTheRecoveryBatch"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testRapidPostAckClosesExhaustTheReconnectCapBeforeStabilityReset"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testCleanupCancelsStoredTopicRetryCooldown"
+        }
+      ],
       "non_actionable_reason": null,
-      "reviewer": null,
-      "note": ""
+      "reviewer": "Claude Code (read-only review)",
+      "note": "iOS 45a8a12가 reconnect ±20% jitter·5회 상한·30초 안정 뒤 attempt reset, reconnect 복구 subscribe U(0,2초), topic retry additive jitter·최대 3회·exact-scope 저장 cooldown과 cleanup 취소를 구현한다. XCTest 73건과 전체 701건, 5개 mutation red를 확인했고 별도 read-only 검토도 blocker 없음으로 판정했다. 다만 reconnect 계산의 비정상 입력과 superseded stability timer 전용 테스트는 비차단 잔여이며, 다수 client LOAD-S4 리허설·운영값 승인·배포 완료를 뜻하지 않는다."
     },
     {
       "rid": "R-CTX-1",

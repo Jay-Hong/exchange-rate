@@ -98,7 +98,9 @@ EXPECTED_MARKDOWN_LINK_DOCS = {
 }
 RID_BACKTICK_LOCATOR_INVENTORY = {
     "ADR": 32,
-    "CLIENT": 24,
+    # 2026-08-20 R-CLI-24 C2: reconnect/stability + reconnect-resubscribe + topic cooldown
+    #                구현 근거 7건을 추가해 24 → 31.
+    "CLIENT": 31,
     "CUT": 36,
     # 2026-08-19 LOAD-S3 C2: 실패 close/None 잔여, worker checkpoint, live publish close 잔여를
     #                현재 코드에 결속하면서 server locator 5건 증가 (19 → 24).
@@ -122,7 +124,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-20 LOAD-S6 C2: admission 기본값·잔여 한계를 config에 직접 결속해 +1 (12 → 13).
     # 2026-08-20 LOAD-S7 C2: cooldown 기본값, 상태 arm/prune, shared-task short-circuit를
     #                분리 인용해 +3 (13 → 16).
-    "LOAD": 16,
+    # 2026-08-20 R-CLI-24 C2: R-LOAD-3 의 남은 client 경계를 구현 사실로 교정하면서
+    #                pinned iOS 근거 3건을 추가해 16 → 19.
+    "LOAD": 19,
 }
 
 
@@ -399,9 +403,11 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-20 LOAD-S5 후속: HAND +1 (136 → 137 / server 72 → 73).
     # 2026-08-20 LOAD-S6 C2: HAND +1, LOAD +1 (137 → 139 / server 73 → 75).
     # 2026-08-20 LOAD-S7 C2: HAND +1, LOAD +3 (139 → 143 / server 75 → 79).
-    assert len(references) == 143
+    # 2026-08-20 R-CLI-24 C2: CLIENT +7, LOAD +3
+    #                (143 → 153 / ios 64 → 74, server 79 불변).
+    assert len(references) == 153
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 79, "ios": 64}
+    assert by_repo == {"server": 79, "ios": 74}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -446,8 +452,10 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
     # 2026-08-19 LOAD-S5 C2: shared single-flight와 실제 worker 인용을 분리해 server +1.
     # 2026-08-20 LOAD-S6 C2: admission 기본값·잔여 한계의 config 근거를 더해 server +1.
     # 2026-08-20 LOAD-S7 C2: cooldown 기본값·arm/prune·shared-task 경계를 분리해 server +3.
-    assert len(references) == 50
-    assert by_repo == {"server": 40, "ios": 10}
+    # 2026-08-20 R-CLI-24 C2: F2 reconnect 복구 분기와 F5 cooldown cleanup을 별도 근거로
+    #                결속해 ios +2 (50 → 52 / ios 10 → 12).
+    assert len(references) == 52
+    assert by_repo == {"server": 40, "ios": 12}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():
@@ -637,8 +645,10 @@ REASONS = {
 #    값을 바꾸려면 locator inventory 와 같은 규율(날짜 + 이유)을 함께 적는다.
 CLAIM_LEDGER_INVENTORY = {
     # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 CURRENT_CUE 를 복원해 64 → 65 (code_fact 53 → 54).
-    "claim_candidates": 65,
-    "code_fact_entries": 54,
+    # 2026-08-20 R-CLI-24 C2: reconnect·복구 subscribe·topic retry 현재 구현 단위 3건을
+    #                pinned iOS code_fact 로 결속해 65 → 68 (code_fact 54 → 57).
+    "claim_candidates": 68,
+    "code_fact_entries": 57,
     "normative_entries": 11,
 }
 

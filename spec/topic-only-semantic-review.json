@@ -57,7 +57,8 @@
           "epoch 이 산문 work unit 을 동반하도록 요구하는 게이트: binding 직후 marker 만 append 해도 `_semantic_binding_errors` 와 `review_errors` 가 모두 비는 것을 직접 재현한 뒤, genesis 이후 각 epoch 이 직전 marker 와 사이에 산문 scope 를 **한 방향 이상** 갖도록 강제한다. 양방향 강제는 기각했다 — work unit 은 (author→reviewer) 한 edge 소유라 없는 검토를 지어내게 만든다. 반례 헬퍼도 기본값을 올바른 사용례로 바꿔 퇴화형을 조용히 모델링하지 않게 했고, validator 배선 제거 변이로 판별력을 확인했다.",
           "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex",
           "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0006:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -98,7 +99,9 @@
           "LOAD-S6 C1 32c70e0 및 C2 재결속 독립 검토: flight를 registry에 먼저 게시한 뒤 새 shared task만 FIFO admission을 기다려 같은 key follower가 중복 대기하지 않는 순서, shared task의 permit 소유와 caller 취소·deadline·builder 오류의 gauge 반환, admission wait/executor queue wait/worker execution 분리, queue 개수 hard cap 부재와 취소된 sync worker의 checkpoint 전 잔류 한계를 코드·테스트·문서에서 대조했다. C2에서 다른 locator는 일치했지만 R-HAND-1의 KRX 데이터 없음 분기를 865-867로 옮긴 것은 실제 863-864와 어긋난다고 지적했고, handoff와 claim 원장을 863-864로 교정했다. semantic journal 미결속도 blocker로 지적했다.",
           "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=OpenAI Codex:reviewer=Claude Code",
           "LOAD-S7 C1 49fae18 및 C2 재결속 독립 검토: transient 분류를 shared builder 예외 안으로 좁혀 admission 대기 deadline·caller 취소·fatal·영구 DB 오류가 cooldown을 arm하지 않는 경계, 성공 cache 우선과 exact `(topic, generation, supported, enabled)` key의 prune/arm/suppress 순서, active cooldown에서 flight·admission·builder 0회, WS 1013·REST 503 매핑, 고정 failure class와 안전 필드만 내보내는 subscribe-load/9 capture 계약을 코드·테스트·mutation 6/6으로 대조했다. blocker는 없었고, mutation timeout 60초가 느린 호스트에서 false-invalid가 될 수 있다는 지적에 기존 300초를 유지하면서 TimeoutExpired만 invalid로 분류했다. 기본 1초는 dormant이고 R-CLI-24와 LOAD-S4 리허설이 남아 end-to-end 완료가 아니라는 한계도 확인했다.",
-          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=OpenAI Codex:reviewer=Claude Code",
+          "R-CLI-24 C1 45a8a12 및 C2 재결속 교차검토: reconnect `2초 × attempt ±20%`·최대 5회와 30초 안정 뒤 attempt reset, 자동 reconnect 복구 subscribe 전용 U(0,2초), topic retry의 서버 최소 cooldown + U(0,base)·최대 3회·exact `(verb, sorted topics)` 저장 cooldown, cleanup 취소를 코드·XCTest·5개 mutation으로 대조했다. 별도 Claude Code read-only 검토는 blocker 없음으로 판정했고 최초 연결 무지연, 재연결 중 신규/해제 topic의 중복 방지, post-ACK 1013 반복의 상한 보존을 확인했다. reconnect 계산의 비정상 입력과 superseded 30초 stability task 전용 테스트는 비차단 잔여로 남긴다. 이 C2는 iOS source 구현을 verified로 닫지만 다수 client LOAD-S4 리허설·운영값 승인·배포 완료는 주장하지 않는다.",
+          "semantic-input-binding/v1:0006:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -146,7 +149,9 @@
           "LOAD-S6 C1 32c70e0 및 C2 재결속 독립 검토: flight를 registry에 먼저 게시한 뒤 새 shared task만 FIFO admission을 기다려 같은 key follower가 중복 대기하지 않는 순서, shared task의 permit 소유와 caller 취소·deadline·builder 오류의 gauge 반환, admission wait/executor queue wait/worker execution 분리, queue 개수 hard cap 부재와 취소된 sync worker의 checkpoint 전 잔류 한계를 코드·테스트·문서에서 대조했다. C2에서 다른 locator는 일치했지만 R-HAND-1의 KRX 데이터 없음 분기를 865-867로 옮긴 것은 실제 863-864와 어긋난다고 지적했고, handoff와 claim 원장을 863-864로 교정했다. semantic journal 미결속도 blocker로 지적했다.",
           "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=OpenAI Codex:reviewer=Claude Code",
           "LOAD-S7 C1 49fae18 및 C2 재결속 독립 검토: transient 분류를 shared builder 예외 안으로 좁혀 admission 대기 deadline·caller 취소·fatal·영구 DB 오류가 cooldown을 arm하지 않는 경계, 성공 cache 우선과 exact `(topic, generation, supported, enabled)` key의 prune/arm/suppress 순서, active cooldown에서 flight·admission·builder 0회, WS 1013·REST 503 매핑, 고정 failure class와 안전 필드만 내보내는 subscribe-load/9 capture 계약을 코드·테스트·mutation 6/6으로 대조했다. blocker는 없었고, mutation timeout 60초가 느린 호스트에서 false-invalid가 될 수 있다는 지적에 기존 300초를 유지하면서 TimeoutExpired만 invalid로 분류했다. 기본 1초는 dormant이고 R-CLI-24와 LOAD-S4 리허설이 남아 end-to-end 완료가 아니라는 한계도 확인했다.",
-          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=OpenAI Codex:reviewer=Claude Code",
+          "R-CLI-24 C1 45a8a12 및 C2 재결속 교차검토: reconnect `2초 × attempt ±20%`·최대 5회와 30초 안정 뒤 attempt reset, 자동 reconnect 복구 subscribe 전용 U(0,2초), topic retry의 서버 최소 cooldown + U(0,base)·최대 3회·exact `(verb, sorted topics)` 저장 cooldown, cleanup 취소를 코드·XCTest·5개 mutation으로 대조했다. 별도 Claude Code read-only 검토는 blocker 없음으로 판정했고 최초 연결 무지연, 재연결 중 신규/해제 topic의 중복 방지, post-ACK 1013 반복의 상한 보존을 확인했다. reconnect 계산의 비정상 입력과 superseded 30초 stability task 전용 테스트는 비차단 잔여로 남긴다. 이 C2는 iOS source 구현을 verified로 닫지만 다수 client LOAD-S4 리허설·운영값 승인·배포 완료는 주장하지 않는다.",
+          "semantic-input-binding/v1:0006:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -195,7 +200,8 @@
           "epoch 이 산문 work unit 을 동반하도록 요구하는 게이트: binding 직후 marker 만 append 해도 `_semantic_binding_errors` 와 `review_errors` 가 모두 비는 것을 직접 재현한 뒤, genesis 이후 각 epoch 이 직전 marker 와 사이에 산문 scope 를 **한 방향 이상** 갖도록 강제한다. 양방향 강제는 기각했다 — work unit 은 (author→reviewer) 한 edge 소유라 없는 검토를 지어내게 만든다. 반례 헬퍼도 기본값을 올바른 사용례로 바꿔 퇴화형을 조용히 모델링하지 않게 했고, validator 배선 제거 변이로 판별력을 확인했다.",
           "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex",
           "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0006:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -250,7 +256,8 @@
           "epoch 이 산문 work unit 을 동반하도록 요구하는 게이트: binding 직후 marker 만 append 해도 `_semantic_binding_errors` 와 `review_errors` 가 모두 비는 것을 직접 재현한 뒤, genesis 이후 각 epoch 이 직전 marker 와 사이에 산문 scope 를 **한 방향 이상** 갖도록 강제한다. 양방향 강제는 기각했다 — work unit 은 (author→reviewer) 한 edge 소유라 없는 검토를 지어내게 만든다. 반례 헬퍼도 기본값을 올바른 사용례로 바꿔 퇴화형을 조용히 모델링하지 않게 했고, validator 배선 제거 변이로 판별력을 확인했다.",
           "semantic-input-binding/v1:0003:577e81455eeff5ff5ade13b63aedfa189f4f96da86c56b1065eaa8ffd88b1a25:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:author=Claude Code:reviewer=OpenAI Codex",
           "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0006:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -296,7 +303,9 @@
           "LOAD-S6 C1 32c70e0 및 C2 재결속 독립 검토: flight를 registry에 먼저 게시한 뒤 새 shared task만 FIFO admission을 기다려 같은 key follower가 중복 대기하지 않는 순서, shared task의 permit 소유와 caller 취소·deadline·builder 오류의 gauge 반환, admission wait/executor queue wait/worker execution 분리, queue 개수 hard cap 부재와 취소된 sync worker의 checkpoint 전 잔류 한계를 코드·테스트·문서에서 대조했다. C2에서 다른 locator는 일치했지만 R-HAND-1의 KRX 데이터 없음 분기를 865-867로 옮긴 것은 실제 863-864와 어긋난다고 지적했고, handoff와 claim 원장을 863-864로 교정했다. semantic journal 미결속도 blocker로 지적했다.",
           "semantic-input-binding/v1:0004:8b99492c726d0d64f9908edc787c8c0f5f47b56e222da8d12488ab05fae892d8:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:author=OpenAI Codex:reviewer=Claude Code",
           "LOAD-S7 C1 49fae18 및 C2 재결속 독립 검토: transient 분류를 shared builder 예외 안으로 좁혀 admission 대기 deadline·caller 취소·fatal·영구 DB 오류가 cooldown을 arm하지 않는 경계, 성공 cache 우선과 exact `(topic, generation, supported, enabled)` key의 prune/arm/suppress 순서, active cooldown에서 flight·admission·builder 0회, WS 1013·REST 503 매핑, 고정 failure class와 안전 필드만 내보내는 subscribe-load/9 capture 계약을 코드·테스트·mutation 6/6으로 대조했다. blocker는 없었고, mutation timeout 60초가 느린 호스트에서 false-invalid가 될 수 있다는 지적에 기존 300초를 유지하면서 TimeoutExpired만 invalid로 분류했다. 기본 1초는 dormant이고 R-CLI-24와 LOAD-S4 리허설이 남아 end-to-end 완료가 아니라는 한계도 확인했다.",
-          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0005:a83e183c29c625ced90a150834bd3da82bdfafd58988f86df23b22e5dab3b54a:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:author=OpenAI Codex:reviewer=Claude Code",
+          "R-CLI-24 C1 45a8a12 및 C2 재결속 교차검토: reconnect `2초 × attempt ±20%`·최대 5회와 30초 안정 뒤 attempt reset, 자동 reconnect 복구 subscribe 전용 U(0,2초), topic retry의 서버 최소 cooldown + U(0,base)·최대 3회·exact `(verb, sorted topics)` 저장 cooldown, cleanup 취소를 코드·XCTest·5개 mutation으로 대조했다. 별도 Claude Code read-only 검토는 blocker 없음으로 판정했고 최초 연결 무지연, 재연결 중 신규/해제 topic의 중복 방지, post-ACK 1013 반복의 상한 보존을 확인했다. reconnect 계산의 비정상 입력과 superseded 30초 stability task 전용 테스트는 비차단 잔여로 남긴다. 이 C2는 iOS source 구현을 verified로 닫지만 다수 client LOAD-S4 리허설·운영값 승인·배포 완료는 주장하지 않는다.",
+          "semantic-input-binding/v1:0006:a5981a78d5331881f4cf4b051518d6b0f45cad224b38042348395659cbc41223:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -310,25 +319,25 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87",
-    "baseline_sha256": "fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc",
-    "lock_sha256": "1f22c6c78106c0924e62af083cbd80c045e2f716019117ed41586de45fb3535a",
+    "manifest_sha256": "9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6",
+    "baseline_sha256": "96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58",
+    "lock_sha256": "e4c89cb39aadc3a46ce4817922152e6a0b712ddfbb7a3226cf34d228672deb92",
     "server_commit": "49fae18c82f7a92bda3d27938c1dc8566b479931",
-    "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
+    "ios_commit": "45a8a129be3067a5303331fe956f8f05fd267e47"
   },
   "documents": {
-    "ADR": "21869f922a5702b611c16da53a69419e945f9321219d2f7a4bb578cbc8ef5169",
-    "CLIENT": "8fe4cec8f9cde7c47efcc864b675ac253fef9109d0d606ce51da8de3531fb8a7",
-    "CUT": "9eb142f211311870c1033287bf710753dba9b4eda6953d2dec80f141bcbedc9e",
-    "HAND": "c076411b4760f123773c6df801779c2e73a12a69490b02245fc97ec53ee64801",
-    "HEALTH": "c65d09a9e98e0e1d49baaadfb86b77863ac5d914dc72b3e5d95319277e8a44a9",
-    "LOAD": "930e4d8ca532ae1e92251faaadccd3f9056e19152a982be2165e862ba9e49b02"
+    "ADR": "f920de39bd7f6c9bb1dfe1ceb0d1e2be5ba7abf74739fe822211d5f283e81af3",
+    "CLIENT": "458c866926e5ef779e864daefe449a595005f5b47a21620d23caff0d094f3eb2",
+    "CUT": "819f220a7de6f1eeb57f8fbe9d282193550d994f9b5248bbc1c1dee96fd4b258",
+    "HAND": "2ee2ac96cb81d2f847166d2a01e63e49ae1311c2640a6b1f52f6035385bd3a0f",
+    "HEALTH": "5adbcd71a4086565f59304382950b13593158fc884232d49f5d3e167880d8efa",
+    "LOAD": "31e4d1ccdb99d72a20a76303c07ec5e31ff82a8485b701421175d33bdc6d7a75"
   },
-  "claim_ledger_sha256": "67b37c4a81294e589c3e2e70832b3ba20d68372ef31f9ff3d0d63894b828169a",
+  "claim_ledger_sha256": "983efceba08a40f8639bd1afa174c505653e6d416bdf5e88898857dfe95d9f03",
   "scope": {
     "manifest_output_requirements": 86,
-    "claim_candidates": 65,
-    "code_fact_entries": 54,
+    "claim_candidates": 68,
+    "code_fact_entries": 57,
     "normative_entries": 11,
     "candidate_outside_reverse_audit": true,
     "archive_normative_preservation_review": true,
@@ -872,7 +881,7 @@
     "Commit messages, annotated tags, deployment reports, terminal transcripts, and agent memory are outside this journal's hash-bound inputs unless a review edge explicitly identifies and preserves the exact artifact. In particular, a562391's unpreserved 46-connection observation is not promoted to activation evidence; 9f0aec9 corrects only its invalid client-absence inference.",
     "SEM-028 pins the currently reviewed extraction surfaces: seven Markdown-literal test modules, nine semantic-drift inputs, 125 RID backtick locators, and six canonical Markdown-link documents. These inventories prevent silent shrinkage but do not prove that heuristic discovery is complete, that dynamically assembled paths are visible, or that a locator semantically entails its prose; legitimate additions and removals require reviewing and updating the corresponding inventory.",
     "The semantic input binding chain begins at a genesis fingerprint of this journal as it stood when the binding was introduced. Genesis fixes a baseline; it does not assert that every work unit landed before it passed through a review edge. The edge list at genesis names the LOAD-S5 implementation and its re-baseline, but other work that landed between the S1b REST auth lane isolation and genesis is named nowhere in it — among it the account deletion sweep, the snapshot Redis I/O bounds, the snapshot request deadline with worker checkpoints, the deploy verifier and runbook gates, the KRX expiry holiday correction, the PostgreSQL service and workload profile work, the M0a maintenance installer, and the mutation harness isolation. That enumeration is not exhaustive and no total is asserted, because this journal has no canonical rule for grouping commits into work units. Residual limit one already places whatever is unnamed outside what this pass covers, and the binding constrains transitions after genesis rather than the ones that preceded it. The binding also fixes bytes rather than judgement: an epoch is a reciprocal record, not evidence that a person re-read the work. Each epoch after genesis must carry at least one prose work unit in some direction, so a transition cannot pass as a fingerprint receipt alone. Requiring one in both directions was rejected: a work unit belongs to a single author-reviewer edge, and forcing the opposite direction would invite an invented entry.",
-    "LOAD-S7 C1 implements only the dormant server half: exact-key transient build failure cooldown with a 1.0-second default. It does not approve an operating value, bound the waiter queue by count, implement R-CLI-24 client jitter/retry caps, or establish multi-client LOAD-S4 behaviour. Those remain activation gates."
+    "R-CLI-24 is implemented at pinned iOS commit 45a8a12: reconnect and reconnect-resubscribe jitter, bounded reconnect/topic attempts, exact-scope client cooldown, and cleanup cancellation. The 1.0-second server cooldown and client jitter values are not approved operating values, the waiter queue is not bounded by count, and multi-client LOAD-S4 timing has not been rehearsed. Read-only review also leaves two non-blocking test gaps: abnormal reconnectDelayNanoseconds inputs and a superseded 30-second stability task. Therefore this pass closes the client implementation requirement, not end-to-end activation or deployment."
   ],
   "verdict": "pass"
 }

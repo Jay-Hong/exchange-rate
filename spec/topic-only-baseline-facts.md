@@ -153,21 +153,29 @@
 
 - **F1 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:283` `recomputeFreshness` —
   불리언 `tetherIsFresh`/`freshFxAssets` **만** 갱신. 재구독 호출 없음.
-- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift` — `resendSubscriptions()` 호출처 **2곳**
-  (911, 1044 = 연결 수립·foreground 복귀).
-  **F2-inf [추론]** ⇒ **45초 재구독은 현재 동작이 아니다**(도입하려는 설계다).
-- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:402` `takePending` —
+- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift:1038`은 foreground 복귀에서 즉시
+  `resendSubscriptions()`를 호출한다. 연결 확인 분기는 같은 파일 `:1159-1178`에서 최초 연결은
+  즉시 재전송하고 자동 reconnect 뒤 복구 batch만 별도 `U(0, 2초)` jitter에 태운다.
+  **F2-inf [추론]** ⇒ reconnect handshake가 같은 시각에 끝나도 복구 subscribe를 다시 흩뜨리지만,
+  **45초 무수신 자체가 재구독 trigger인 것은 아직 아니다**.
+- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:427` `takePending` —
   `topicRequestTimeoutTasks.removeValue(...)?.cancel()`.
   **F3-inf [추론]** ⇒ ack 수신 즉시 20초 watchdog 소멸 → 그 뒤 build 에 클라 상한 없음.
-- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:220` `sendTopicCommand` — subscribe 는 **배치**(한 요청에 여러 topic).
-- **F5 [코드]** `WebSocketService` catch — `shouldRetryCommandFailure`(denylist) + 최대 3회
-  bounded retry. **공백은 재시도 소진 이후**.
+- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:245` `sendTopicCommand` — subscribe 는
+  **배치**(한 요청에 여러 topic).
+- **F5 [코드]** `ios/FXi/Services/WebSocketService.swift:845-900` —
+  `shouldRetryCommandFailure`(denylist) + 최초 시도 포함 최대 3회 bounded retry. 서버 최소 cooldown 뒤
+  `U(0, base)` additive jitter를 더하고 exact `(verb, sorted topics)` 실패는 저장 cooldown task 하나를
+  공유한다. cleanup은 같은 파일 `:987-995`에서 그 task를 취소·제거한다.
+  **F5-inf [추론]** ⇒ 공백은 재시도 소진 이후이며, source 수준 client cooldown은 구현됐지만
+  운영값 승인은 LOAD-S4가 소유한다.
 - **F6 [코드·부정]** `confirmedTopics` 와 `subscribedTopics` 를 **비교하는 코드 없음**.
   증거: ⚠️ "같은 줄에 없다"는 다중 행 비교·helper 를 배제하지 못해 **약하다**. 그래서
-  `subscribedTopics` **전 참조 13곳(47·202·210·387·391·429·464·659·754·809·826·833·874)을 열거해 읽었다**.
-  387/391 은 *의도*와의 재대조, 659 는 `premiumGatedTopics` 와의 교집합, 나머지는 선언·삽입·삭제·주석·
-  재전송이다 — `confirmedTopics` 와 대조하는 곳은 **없다**.
-  ⚠️ 826 주석이 같은 주장을 하지만 그 주석의 **다른 부분(bounded retry 서술)은 stale** 이므로
+  `subscribedTopics` **전 참조 14곳(47·227·235·412·416·454·489·741·836·906·923·930·935·1001)을
+  열거해 읽었다**. 412/416은 *의도*와의 재대조, 741은 `premiumGatedTopics`와의 교집합, 935는
+  reconnect 복구 범위 캡처이고 나머지는 선언·삽입·삭제·주석·재전송이다 — `confirmedTopics`와
+  대조하는 곳은 **없다**.
+  ⚠️ 923 주석이 같은 주장을 하지만 그 주석의 일부 호출처 서술은 stale이므로
   주석이 아니라 위 전수 열거를 근거로 삼을 것.
 - **F7 [코드]** `applyLeaseSchedule` — 만료 전 재구독 예약(jitter 포함).
   **F7-inf [추론]** 실패 시 F5 재시도, 소진되면 hard-expiry 집행 **없음**.
@@ -181,7 +189,7 @@
   **legacy 배열이 enum payload**.
 - **F11 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:505` `rates(for:)` →
   `appState.rates` 직결. `ios/FXi/Views/Components/AlertAddSheet.swift` 가 이걸 쓴다(`baseRates` 미경유).
-- **F12 [코드]** `ios/FXi/Services/WebSocketService.swift:1073` — DXY 는 legacy envelope 의 `indices` 로 수신(`onIndicesReceived`).
+- **F12 [코드]** `ios/FXi/Services/WebSocketService.swift:1207` — DXY 는 legacy envelope 의 `indices` 로 수신(`onIndicesReceived`).
 - **F13 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:623` `func usdtDisplayState` —
   최외곽 게이트 = `if RealtimeV2Config.isTetherTopicEnabled`, 그 else 는 `sourceRates()`.
 - **F14 [코드]** `ios/FXi/Utils/RealtimeV2Config.swift:32` `isTetherTopicEnabled` —

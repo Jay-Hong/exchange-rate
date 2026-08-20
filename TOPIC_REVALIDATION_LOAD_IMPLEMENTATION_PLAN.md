@@ -56,9 +56,11 @@
 기존 read/connect 1초는 유한했지만 pool connection 수가 사실상 무제한이고 취소 후 반환 양성대조가
 없었다. `LOAD-S2-REDIS`가 이 두 누락을 닫았고, `LOAD-S3`가 여러 Redis/DB 호출의 합과 취소된
 worker의 다음 phase 진입을 제한했다. `LOAD-S5`는 그 bounded build를 같은 key의 연결들이
-공유하게 해 동시 작업량을 연결 수가 아니라 활성 key 수에 가깝게 줄였다. 다만 bounded waiter와
-실패 cooldown은 아직 없다. 아래 `LOAD-S6/S7`과 클라이언트 `R-CLI-24`, 부하 리허설·통합 활성화가 끝나기 전에는
-`R-LOAD-3 완료` 또는 `자원 상한 완료`라고 쓰지 않는다.
+공유하게 해 동시 작업량을 연결 수가 아니라 활성 key 수에 가깝게 줄였다. `LOAD-S6/S7`은 FIFO
+admission과 서버 실패 cooldown을, iOS `45a8a12`는 `R-CLI-24` jitter·retry cap·client cooldown을
+구현했다. 서버 `R-LOAD-3`과 클라이언트 `R-CLI-24` 구현은 land됐지만 waiter queue의 **개수** hard
+cap은 없고 LOAD-S4 부하 리허설·통합 활성화도 남아 있다. 따라서 `자원 상한 완료`, end-to-end 폭주
+완화 완료 또는 운영 활성화 완료라고 쓰지 않는다.
 
 ### 운영 상태는 별도 재확인
 
@@ -238,8 +240,9 @@ single-flight 하나의 transient 실패가 모든 waiter를 동시에 깨운 �
 - transient 실패 뒤 동시 retry의 builder 0회, expiry 뒤 회복, generation 격리, fatal·영구 DB 음성
   분류, WS 1013·REST 503을 행동 테스트와 mutation gate로 잠갔다.
 
-⚠️ 이것은 **서버 절반**이다. R-CLI-24 jitter·retry cap·client cooldown과 다수 client 시간축 통합
-테스트는 아직 없으므로 폭주 완화 전체나 LOAD-S4 activation을 완료라 하지 않는다.
+⚠️ 서버 절반은 구현됐고 iOS `45a8a12`에 R-CLI-24 jitter·retry cap·client cooldown도 land됐다.
+그러나 다수 client 시간축 통합 테스트와 운영값 승인은 아직 없으므로 폭주 완화 전체나 LOAD-S4
+activation을 완료라 하지 않는다.
 
 ## LOAD-S4 — 통합 activation
 
@@ -247,6 +250,7 @@ single-flight 하나의 transient 실패가 모든 waiter를 동시에 깨운 �
 
 - `LOAD-S3`, `LOAD-S5`, `LOAD-S6`, `LOAD-S7`의 행동 테스트와 mutation gate가 green이다.
 - R-CLI-24 jitter·retry cap·client cooldown이 실제 client build에 포함된다.
+  **충족(source pin):** iOS `45a8a12`; 배포·운영값 승인은 아래 부하 리허설이 소유한다.
 - 45초 동시 재구독 부하에서 queue wait, pool timeout, 1013, cooldown suppression을 함께 관측한다.
 - rollback image와 server feature flag/safety-stop 절차가 검증돼 있다.
 - activation 전후 결과를 같은 dashboard/log schema로 비교할 수 있다.

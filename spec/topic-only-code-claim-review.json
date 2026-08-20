@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87",
-    "baseline_sha256": "fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc",
-    "lock_sha256": "1f22c6c78106c0924e62af083cbd80c045e2f716019117ed41586de45fb3535a",
+    "manifest_sha256": "9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6",
+    "baseline_sha256": "96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58",
+    "lock_sha256": "e4c89cb39aadc3a46ce4817922152e6a0b712ddfbb7a3226cf34d228672deb92",
     "server_commit": "49fae18c82f7a92bda3d27938c1dc8566b479931",
-    "ios_commit": "8aadc2fb66be926a809d6e1bc5dff42951f15a7a"
+    "ios_commit": "45a8a129be3067a5303331fe956f8f05fd267e47"
   },
   "documents": {
-    "ADR": "21869f922a5702b611c16da53a69419e945f9321219d2f7a4bb578cbc8ef5169",
-    "CLIENT": "8fe4cec8f9cde7c47efcc864b675ac253fef9109d0d606ce51da8de3531fb8a7",
-    "CUT": "9eb142f211311870c1033287bf710753dba9b4eda6953d2dec80f141bcbedc9e",
-    "HAND": "c076411b4760f123773c6df801779c2e73a12a69490b02245fc97ec53ee64801",
-    "HEALTH": "c65d09a9e98e0e1d49baaadfb86b77863ac5d914dc72b3e5d95319277e8a44a9",
-    "LOAD": "930e4d8ca532ae1e92251faaadccd3f9056e19152a982be2165e862ba9e49b02"
+    "ADR": "f920de39bd7f6c9bb1dfe1ceb0d1e2be5ba7abf74739fe822211d5f283e81af3",
+    "CLIENT": "458c866926e5ef779e864daefe449a595005f5b47a21620d23caff0d094f3eb2",
+    "CUT": "819f220a7de6f1eeb57f8fbe9d282193550d994f9b5248bbc1c1dee96fd4b258",
+    "HAND": "2ee2ac96cb81d2f847166d2a01e63e49ae1311c2640a6b1f52f6035385bd3a0f",
+    "HEALTH": "5adbcd71a4086565f59304382950b13593158fc884232d49f5d3e167880d8efa",
+    "LOAD": "31e4d1ccdb99d72a20a76303c07ec5e31ff82a8485b701421175d33bdc6d7a75"
   },
   "entries": [
     {
@@ -309,6 +309,43 @@
     },
     {
       "destination": "CLIENT",
+      "rid": "R-CLI-24",
+      "unit_sha256": "7d5498af19edce38fed6a47e7d9d0c017cb821820d47d7f97f2c85b0fa66fa4a",
+      "unit_text": "- 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를 초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다 (`ios/FXi/Utils/Constants.swift:272-279` · `ios/FXi/Services/WebSocketService.swift:1331-1389`).",
+      "classification": "code_fact",
+      "detail": "pinned iOS commit에서 reconnect jitter·5회 상한과 30초 안정 연결 뒤 attempt reset을 확인했다.",
+      "provenance": [
+        "file:ios/FXi/Services/WebSocketService.swift:1331-1389",
+        "file:ios/FXi/Utils/Constants.swift:272-279"
+      ]
+    },
+    {
+      "destination": "CLIENT",
+      "rid": "R-CLI-24",
+      "unit_sha256": "d1e8da3c4c75c5637be215431005138314abab1ee15aecb4acd91dc8cfb07489",
+      "unit_text": "- 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의 subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와 중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:933-952` · `ios/FXi/Services/WebSocketService.swift:1159-1178`).",
+      "classification": "code_fact",
+      "detail": "pinned iOS commit에서 자동 reconnect 복구 batch 전용 jitter와 최초 연결 무지연 경계를 확인했다.",
+      "provenance": [
+        "file:ios/FXi/Services/WebSocketService.swift:1159-1178",
+        "file:ios/FXi/Services/WebSocketService.swift:933-952"
+      ]
+    },
+    {
+      "destination": "CLIENT",
+      "rid": "R-CLI-24",
+      "unit_sha256": "023dad90acd7755df412c1d549e3ce10cb5dbebd459f63cd15585b8e3934d7c3",
+      "unit_text": "- 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초 시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다 (`ios/FXi/Utils/Constants.swift:255` · `ios/FXi/Services/WebSocketService.swift:845-900` · `ios/FXi/Services/WebSocketService.swift:987-995`).",
+      "classification": "code_fact",
+      "detail": "pinned iOS commit에서 topic retry 상한·additive jitter·exact-scope cooldown·cleanup 취소를 확인했다.",
+      "provenance": [
+        "file:ios/FXi/Services/WebSocketService.swift:845-900",
+        "file:ios/FXi/Services/WebSocketService.swift:987-995",
+        "file:ios/FXi/Utils/Constants.swift:255"
+      ]
+    },
+    {
+      "destination": "CLIENT",
       "rid": "R-CLI-13",
       "unit_sha256": "3d2b868dfafffc9fdd3432e79b41374e2169bed8cfda46da39911ef35fcbe2a4",
       "unit_text": "topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다 (`ios/FXi/Services/CacheService.swift:49-54` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:412`). 그리고 `stop()` 은 store 만 비우고 디스크 캐시를 지우지 않는다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:484-502`). 지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다**.",
@@ -583,6 +620,33 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
+      "unit_sha256": "858cb611baf67b2d897bc50036233865647fb7f0f6449ecf4cc6ebf561a0c585",
+      "unit_text": "서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다 (`app/topic_dispatcher.py:836-926`; baseline D5). LOAD-S3/S7 구현 뒤 snapshot deadline·transient build 실패와 active cooldown은 **1013**, fatal 실패는 **1011**로 닫힌다(`app/topic_initial_snapshot.py:1049-1075`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:1077-1078`). FX publisher도 build/publish **전** 예외를 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).",
+      "classification": "code_fact",
+      "detail": "고정 C1에서 dispatcher가 register→ack→snapshot 순서를 유지하고, snapshot module이 deadline/transient와 active server cooldown을 1013, fatal을 1011로 닫는 반면 None은 skip함을 확인했다. FX publisher의 선행 build 예외 격리는 별도 잔여다.",
+      "provenance": [
+        "baseline:D3",
+        "baseline:D5",
+        "file:app/fx_topic_publisher.py:291-323",
+        "file:app/topic_dispatcher.py:836-926",
+        "file:app/topic_initial_snapshot.py:1049-1075",
+        "file:app/topic_initial_snapshot.py:1077-1078"
+      ]
+    },
+    {
+      "destination": "HAND",
+      "rid": "R-HAND-1",
+      "unit_sha256": "91b714db979d72e5b1f94b41bab612e2d3d413893d0174e7af5f3146c1a88be7",
+      "unit_text": "→ build **실패**의 조용한 구멍은 닫혔지만, `None` 경로에는 여전히 **연결·pong·ack·lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**가 표현된다. 이때 [R-HAND-6](#r-hand-6)의 close는 발동할 기회조차 없다(send 자체가 없으므로; baseline D3).",
+      "classification": "code_fact",
+      "detail": "pinned C1은 build 실패의 조용한 경로를 close로 바꿨지만 baseline D3의 None skip은 유지한다. send가 시작되지 않는 None 경로에는 publish send-failure close 정책이 개입할 수 없다.",
+      "provenance": [
+        "baseline:D3"
+      ]
+    },
+    {
+      "destination": "HAND",
+      "rid": "R-HAND-1",
       "unit_sha256": "7ffcd48b2892770c5790b923f0880ac2c8cbb2f9748d0012bd59a5d4c84db4a7",
       "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:991-992`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
       "classification": "code_fact",
@@ -612,6 +676,21 @@
         "baseline:F3",
         "baseline:F3-inf",
         "file:app/topic_dispatcher.py:900-926"
+      ]
+    },
+    {
+      "destination": "HAND",
+      "rid": "R-HAND-4",
+      "unit_sha256": "d99bc4a2e0e5807715f14e0373f08d6d441ae631111537db5f25c4730b3554e5",
+      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5/S6/S7 wrapper는 waiter마다 요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build나 그 admission permit을 반환하지 않지만, 마지막 waiter가 사라지면 shared task를 취소한다 (`app/topic_initial_snapshot.py:733-838`). worker는 각 phase 앞 checkpoint에서 다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:143-239` · `app/topic_initial_snapshot.py:242-266` · `app/topic_initial_snapshot.py:841-895`). transient build 실패만 exact key cooldown을 arm하며, admission 대기 deadline과 caller 취소는 arm하지 않는다(`app/topic_initial_snapshot.py:733-752`). 그러나 이미 시작한 I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡는다. 따라서 permit 반환 뒤에도 취소된 worker가 다음 checkpoint까지 잠시 executor를 점유할 수 있다.",
+      "classification": "code_fact",
+      "detail": "고정 server commit에서 LOAD-S5/S6/S7 shared task가 admission permit을 소유하므로 leader caller 취소는 permit을 조기 반환하지 않는다. 마지막 waiter가 사라질 때 shared task를 cancel하고 worker checkpoint가 다음 Redis/DB I/O 진입을 막는다. transient builder 실패만 cooldown을 arm하며 admission 대기 deadline과 caller 취소는 arm하지 않는다. 이미 시작한 I/O는 DB/Redis timeout이 맡는다.",
+      "provenance": [
+        "file:app/topic_initial_snapshot.py:143-239",
+        "file:app/topic_initial_snapshot.py:242-266",
+        "file:app/topic_initial_snapshot.py:733-752",
+        "file:app/topic_initial_snapshot.py:733-838",
+        "file:app/topic_initial_snapshot.py:841-895"
       ]
     },
     {
@@ -659,6 +738,19 @@
     },
     {
       "destination": "HEALTH",
+      "rid": "R-HLT-1",
+      "unit_sha256": "72bb040a8b554b1b7732006bdb156dd09adf236c7d998507949ced3bfb34cddf",
+      "unit_text": "**구멍이 어디서 생기는가.** LOAD-S3 구현으로 initial snapshot의 deadline·transient/fatal build 실패는 1013/1011 close로 바뀌어 더는 조용하지 않다(baseline D3). 다만 builder가 `None`을 반환하는 경로는 연결을 유지한 채 skip하므로([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)), **연결·pong·ack· lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**는 아직 표현된다. 그 뒤 **정상 발행되던 publisher가 죽는 경우**도 침묵으로만 관측된다 — publisher 모듈에는 timer가 없고(baseline B1), 외부 caller도 변경이 있을 때만 publish한다(`app/main.py:938-961`). transport ping/pong은 **연결 생존만** 증명하지 특정 topic publisher의 생존을 증명하지 않는다.",
+      "classification": "code_fact",
+      "detail": "pinned C1에서 build 실패는 1013/1011로 관측 가능해졌지만 None snapshot skip과 정상 발행 이후 publisher 사망은 여전히 transport 상태만으로 구분되지 않는다. B1과 main caller의 is_changed 분기를 함께 근거로 삼았다.",
+      "provenance": [
+        "baseline:B1",
+        "baseline:D3",
+        "file:app/main.py:938-961"
+      ]
+    },
+    {
+      "destination": "HEALTH",
       "rid": "R-HLT-3",
       "unit_sha256": "eae4d1734a00994c9d8971e8717d2a8dd7c9f5f72411afba39c121ca5910ed2a",
       "unit_text": "[R-HAND-1](topic-snapshot-handoff.md#r-hand-1)의 남은 `None` 침묵과 [R-HLT-1](#r-hlt-1)의 publisher 사망은 클라가 판별할 수 없다 — 서버가 이 계약으로 덮는다. 이 계약은 **확정**이며, [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택 여부와 **무관하다**. 판별 불가의 코드 근거: baseline **D3**(`None` snapshot을 연결 유지 상태로 skip) · **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:938-961`(외부 caller 도 변경 시에만 publish).",
@@ -695,6 +787,34 @@
     },
     {
       "destination": "LOAD",
+      "rid": "R-LOAD-3",
+      "unit_sha256": "1be98f736b2569dc6fab71e081d08903ffb212d21c605529db5f024422c0da49",
+      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은 flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은 pinned iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 구현됐다 (`ios/FXi/Services/WebSocketService.swift:845-900` · `ios/FXi/Services/WebSocketService.swift:933-952` · `ios/FXi/Services/WebSocketService.swift:1331-1389`). 다만 서버 기본 1초와 클라이언트 jitter 값은 아직 운영 승인값이 아니며 LOAD-S4 다중 클라이언트 리허설이 남아 있으므로 end-to-end 완화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
+      "classification": "code_fact",
+      "detail": "고정 server commit에서 LOAD-S5/S6/S7 shared build·FIFO admission·transient failure cooldown과 S3/S2 예산 경계를 확인했다. pinned iOS 45a8a12에는 R-CLI-24 jitter·retry cap·exact-scope cooldown이 land됐지만 waiter queue 개수 hard cap과 LOAD-S4 다중 클라이언트 리허설·운영값 승인은 남아 있어 end-to-end 활성화 완료를 뜻하지 않는다.",
+      "provenance": [
+        "baseline:E1",
+        "baseline:E1-b",
+        "baseline:E2",
+        "baseline:E2-inf",
+        "file:app/config.py:650-660",
+        "file:app/config.py:663-670",
+        "file:app/database.py:30",
+        "file:app/database.py:36-38",
+        "file:app/database_settings.py:113",
+        "file:app/database_settings.py:85-86",
+        "file:app/topic_initial_snapshot.py:1041-1053",
+        "file:app/topic_initial_snapshot.py:497-838",
+        "file:app/topic_initial_snapshot.py:651-709",
+        "file:app/topic_initial_snapshot.py:733-817",
+        "file:app/topic_initial_snapshot.py:841-895",
+        "file:ios/FXi/Services/WebSocketService.swift:1331-1389",
+        "file:ios/FXi/Services/WebSocketService.swift:845-900",
+        "file:ios/FXi/Services/WebSocketService.swift:933-952"
+      ]
+    },
+    {
+      "destination": "LOAD",
       "rid": "R-LOAD-4",
       "unit_sha256": "d0dfb7f96172ca79c39d6517047293b331ef0aac17be7189bb84c2cc0b567384",
       "unit_text": "근거(baseline): **E3 [결정]** `app/auth_executor.py:14-16` docstring(즉시거절 기각) + `app/auth_executor.py:29-31`(**`SimpleQueue` 무제한** — \"자원 상한 완료\" 라고 쓰지 말 것). ⚠️ S1a 로 모듈 docstring 이 늘어 두 근거가 갈렸다 — 한 범위로 합쳐 인용하면 낡는다. ⚠️ 즉 기존 `auth_executor` 를 \"이미 상한이 있다\"는 근거로 인용해서는 안 된다. 그것은 직렬화 장치이지 자원 상한이 아니며, 이 문서가 요구하는 bounded wait 를 대신하지 못한다.",
@@ -728,86 +848,6 @@
       "detail": "설정 파일의 현재 상태(부정 사실)를 단정하는 단위다. 단위 안에 이미 baseline E4 근거가 있고, 고정 commit 에서 재확인했다 — location /ws 는 정확히 80-99행 블록이며 그 안에 limit_req/limit_conn 이 없고, location /api/ 는 104행에서 열려 105-106행에 둘 다 있으며 zone 정의는 19-20행(파일 상단)에 있다.",
       "provenance": [
         "baseline:E4"
-      ]
-    },
-    {
-      "destination": "HAND",
-      "rid": "R-HAND-1",
-      "unit_sha256": "858cb611baf67b2d897bc50036233865647fb7f0f6449ecf4cc6ebf561a0c585",
-      "unit_text": "서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다 (`app/topic_dispatcher.py:836-926`; baseline D5). LOAD-S3/S7 구현 뒤 snapshot deadline·transient build 실패와 active cooldown은 **1013**, fatal 실패는 **1011**로 닫힌다(`app/topic_initial_snapshot.py:1049-1075`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:1077-1078`). FX publisher도 build/publish **전** 예외를 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).",
-      "classification": "code_fact",
-      "detail": "고정 C1에서 dispatcher가 register→ack→snapshot 순서를 유지하고, snapshot module이 deadline/transient와 active server cooldown을 1013, fatal을 1011로 닫는 반면 None은 skip함을 확인했다. FX publisher의 선행 build 예외 격리는 별도 잔여다.",
-      "provenance": [
-        "baseline:D3",
-        "baseline:D5",
-        "file:app/fx_topic_publisher.py:291-323",
-        "file:app/topic_dispatcher.py:836-926",
-        "file:app/topic_initial_snapshot.py:1049-1075",
-        "file:app/topic_initial_snapshot.py:1077-1078"
-      ]
-    },
-    {
-      "destination": "HAND",
-      "rid": "R-HAND-1",
-      "unit_sha256": "91b714db979d72e5b1f94b41bab612e2d3d413893d0174e7af5f3146c1a88be7",
-      "unit_text": "→ build **실패**의 조용한 구멍은 닫혔지만, `None` 경로에는 여전히 **연결·pong·ack·lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**가 표현된다. 이때 [R-HAND-6](#r-hand-6)의 close는 발동할 기회조차 없다(send 자체가 없으므로; baseline D3).",
-      "classification": "code_fact",
-      "detail": "pinned C1은 build 실패의 조용한 경로를 close로 바꿨지만 baseline D3의 None skip은 유지한다. send가 시작되지 않는 None 경로에는 publish send-failure close 정책이 개입할 수 없다.",
-      "provenance": [
-        "baseline:D3"
-      ]
-    },
-    {
-      "destination": "HAND",
-      "rid": "R-HAND-4",
-      "unit_sha256": "d99bc4a2e0e5807715f14e0373f08d6d441ae631111537db5f25c4730b3554e5",
-      "unit_text": "- ⚠️ **`asyncio.to_thread` 취소는 실행 중 I/O를 즉시 멈추지 않는다.** 현재 LOAD-S5/S6/S7 wrapper는 waiter마다 요청 예산을 따로 적용하고 shared build에는 독립된 예산을 준다. leader 하나의 취소는 build나 그 admission permit을 반환하지 않지만, 마지막 waiter가 사라지면 shared task를 취소한다 (`app/topic_initial_snapshot.py:733-838`). worker는 각 phase 앞 checkpoint에서 다음 Redis/DB I/O 진입을 막는다(`app/topic_initial_snapshot.py:143-239` · `app/topic_initial_snapshot.py:242-266` · `app/topic_initial_snapshot.py:841-895`). transient build 실패만 exact key cooldown을 arm하며, admission 대기 deadline과 caller 취소는 arm하지 않는다(`app/topic_initial_snapshot.py:733-752`). 그러나 이미 시작한 I/O의 종료는 협력 신호가 아니라 **DB/Redis 자체 timeout**이 맡는다. 따라서 permit 반환 뒤에도 취소된 worker가 다음 checkpoint까지 잠시 executor를 점유할 수 있다.",
-      "classification": "code_fact",
-      "detail": "고정 server commit에서 LOAD-S5/S6/S7 shared task가 admission permit을 소유하므로 leader caller 취소는 permit을 조기 반환하지 않는다. 마지막 waiter가 사라질 때 shared task를 cancel하고 worker checkpoint가 다음 Redis/DB I/O 진입을 막는다. transient builder 실패만 cooldown을 arm하며 admission 대기 deadline과 caller 취소는 arm하지 않는다. 이미 시작한 I/O는 DB/Redis timeout이 맡는다.",
-      "provenance": [
-        "file:app/topic_initial_snapshot.py:143-239",
-        "file:app/topic_initial_snapshot.py:242-266",
-        "file:app/topic_initial_snapshot.py:733-752",
-        "file:app/topic_initial_snapshot.py:733-838",
-        "file:app/topic_initial_snapshot.py:841-895"
-      ]
-    },
-    {
-      "destination": "HEALTH",
-      "rid": "R-HLT-1",
-      "unit_sha256": "72bb040a8b554b1b7732006bdb156dd09adf236c7d998507949ced3bfb34cddf",
-      "unit_text": "**구멍이 어디서 생기는가.** LOAD-S3 구현으로 initial snapshot의 deadline·transient/fatal build 실패는 1013/1011 close로 바뀌어 더는 조용하지 않다(baseline D3). 다만 builder가 `None`을 반환하는 경로는 연결을 유지한 채 skip하므로([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)), **연결·pong·ack· lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**는 아직 표현된다. 그 뒤 **정상 발행되던 publisher가 죽는 경우**도 침묵으로만 관측된다 — publisher 모듈에는 timer가 없고(baseline B1), 외부 caller도 변경이 있을 때만 publish한다(`app/main.py:938-961`). transport ping/pong은 **연결 생존만** 증명하지 특정 topic publisher의 생존을 증명하지 않는다.",
-      "classification": "code_fact",
-      "detail": "pinned C1에서 build 실패는 1013/1011로 관측 가능해졌지만 None snapshot skip과 정상 발행 이후 publisher 사망은 여전히 transport 상태만으로 구분되지 않는다. B1과 main caller의 is_changed 분기를 함께 근거로 삼았다.",
-      "provenance": [
-        "baseline:B1",
-        "baseline:D3",
-        "file:app/main.py:938-961"
-      ]
-    },
-    {
-      "destination": "LOAD",
-      "rid": "R-LOAD-3",
-      "unit_sha256": "bc67ab6333887f6c8232381c7bfc7d15ae80dc32ea61faff03f5f13632769ec0",
-      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은 flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 또한 기본 1초는 dormant 값이며 클라이언트 jitter·재시도 상한([R-CLI-24](ios-topic-state-machine.md#r-cli-24))과 LOAD-S4 다중 클라이언트 리허설이 남아 있으므로 end-to-end 완화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
-      "classification": "code_fact",
-      "detail": "고정 server commit에서 연결 내부 topic 순회는 순차이고, LOAD-S5 key별 shared build/cache, LOAD-S6 4-slot FIFO admission, LOAD-S7 exact-key transient failure cooldown이 구현됐음을 확인했다. fatal·영구 DB 오류와 caller 취소·admission deadline은 cooldown 대상이 아니다. queue 개수 hard cap과 R-CLI-24 client jitter/retry cap, LOAD-S4 다중 클라이언트 리허설이 남아 R-LOAD-3 end-to-end 완료를 뜻하지 않는다.",
-      "provenance": [
-        "baseline:E1",
-        "baseline:E1-b",
-        "baseline:E2",
-        "baseline:E2-inf",
-        "file:app/config.py:650-660",
-        "file:app/config.py:663-670",
-        "file:app/database.py:30",
-        "file:app/database.py:36-38",
-        "file:app/database_settings.py:113",
-        "file:app/database_settings.py:85-86",
-        "file:app/topic_initial_snapshot.py:1041-1053",
-        "file:app/topic_initial_snapshot.py:497-838",
-        "file:app/topic_initial_snapshot.py:651-709",
-        "file:app/topic_initial_snapshot.py:733-817",
-        "file:app/topic_initial_snapshot.py:841-895"
       ]
     }
   ]

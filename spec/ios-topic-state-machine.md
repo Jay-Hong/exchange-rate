@@ -4,10 +4,10 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
-- iOS 기준 commit: `8aadc2fb66be926a809d6e1bc5dff42951f15a7a`
+- iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `3a56ce03c3dbb68d7489c9fedbaad898d5ad2a0fd752bfd2aebcffc68a8ccf87`
-- baseline SHA: `fb84a670ef5d7eaab51a2091919b00d9b3ff5da08c04366d07d21968ef8ad4bc`
+- manifest SHA: `9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6`
+- baseline SHA: `96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -520,6 +520,24 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
 - 재연결·재구독에 **jitter** 를 건다.
 - **재시도 상한** 을 둔다.
 - 실패 후 **클라 재시도 cooldown** 을 둔다.
+
+**현재 구현 상태 (iOS `45a8a12`, LOAD-S4 전 임시 기본값):**
+- 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를
+  초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다
+  (`ios/FXi/Utils/Constants.swift:272-279` · `ios/FXi/Services/WebSocketService.swift:1331-1389`).
+- 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의
+  subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와
+  중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:933-952` ·
+  `ios/FXi/Services/WebSocketService.swift:1159-1178`).
+- 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact
+  `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초
+  시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다
+  (`ios/FXi/Utils/Constants.swift:255` · `ios/FXi/Services/WebSocketService.swift:845-900` ·
+  `ios/FXi/Services/WebSocketService.swift:987-995`).
+
+⚠️ 위 값은 source에 결속된 **클라이언트 구현 기본값**이지 운영 승인값이 아니다. 다수 client의
+45초 동시 도착에서 서버 queue wait·1013·cooldown suppression과 클라이언트 retry 시간축을 함께
+보는 LOAD-S4 부하 리허설 전에는 end-to-end 완화나 활성화 완료로 쓰지 않는다.
 
 서버 쪽 대응(single-flight · bounded wait · I/O 상한 · 서버 실패 cooldown)은
 [R-LOAD-3](revalidation-and-load.md#r-load-3) 가 소유한다. ⚠️ **서버 실패 cooldown 과 클라 jitter 는
