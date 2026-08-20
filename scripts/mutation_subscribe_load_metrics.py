@@ -103,10 +103,12 @@ MUTANTS: list[tuple] = [  # (label, path, old, new) — old/new 는 str 또는 �
         permit = await state.admission.acquire(key.topic, budget)'''),
     ("LOAD-S6-03 shared task permit 소유권 제거", SNAPSHOT,
      '''        permit = await state.admission.acquire(key.topic, budget)
-        payload = await _build_snapshot_once_observed(key.topic, budget=budget)''',
+        try:
+            payload = await _build_snapshot_once_observed(key.topic, budget=budget)''',
      '''        permit = await state.admission.acquire(key.topic, budget)
         permit.release()  # mutation: shared build 전에 slot을 조기 반환
-        payload = await _build_snapshot_once_observed(key.topic, budget=budget)'''),
+        try:
+            payload = await _build_snapshot_once_observed(key.topic, budget=budget)'''),
     ("LOAD-S6-04 cross-topic 용량을 1로 축소", SNAPSHOT,
      '''        default_factory=lambda: _SnapshotAdmission(
             config.WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS

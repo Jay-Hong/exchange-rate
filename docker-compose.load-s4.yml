@@ -1,0 +1,30 @@
+# LOAD-S4 local-only backends. This file never starts the application or mounts repo data.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: fxi_load_s4
+      POSTGRES_PASSWORD: fxi-load-s4-local
+      POSTGRES_DB: fxi_load_s4
+    ports:
+      - "127.0.0.1:55434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fxi_load_s4 -d fxi_load_s4"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  redis:
+    image: redis:7.4-alpine
+    command: redis-server --appendonly no
+    ports:
+      - "127.0.0.1:6394:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    tmpfs:
+      - /data
