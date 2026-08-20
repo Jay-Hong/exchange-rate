@@ -22,6 +22,26 @@ LOGROTATE = REPO_ROOT / "ops" / "logrotate" / "fxi-nginx"
 JOURNALD = REPO_ROOT / "ops" / "systemd" / "zz-fxi-limits.conf"
 INSTALLER = REPO_ROOT / "ops" / "install-host-config.sh"
 LEGACY_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "legacy_journald_limits.conf"
+NGINX_DEFAULT = REPO_ROOT / "nginx" / "conf.d" / "default.conf"
+
+
+class TestNginxWebSocketLocation(unittest.TestCase):
+    def test_websocket_proxy_is_bound_to_the_exact_ws_path(self):
+        """Scanner suffixes must not inherit the long-lived WebSocket proxy settings."""
+        text = NGINX_DEFAULT.read_text()
+        self.assertEqual(len(re.findall(r"^\s*location\s+=\s+/ws\s*\{", text, re.M)), 1)
+        self.assertNotRegex(text, re.compile(r"^\s*location\s+/ws\s*\{", re.M))
+
+        start = text.index("    location = /ws {")
+        end = text.index("\n    }", start)
+        block = text[start:end]
+        for directive in (
+            "proxy_set_header Upgrade $http_upgrade;",
+            'proxy_set_header Connection "upgrade";',
+            "proxy_read_timeout 600s;",
+            "proxy_buffering off;",
+        ):
+            self.assertIn(directive, block)
 
 
 class TestNginxLogrotateConfig(unittest.TestCase):
