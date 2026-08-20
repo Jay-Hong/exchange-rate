@@ -450,6 +450,41 @@ class TestProductionRunbookFailClosed(unittest.TestCase):
         self.assertNotEqual(run("unknown").returncode, 0)
         self.assertIn('run 00-disk.txt "디스크" -- verify_root_disk_capacity', self.script)
 
+    def test_nginx_bind_mount_freshness_is_checked_after_checkout(self):
+        start = self.script.index("verify_nginx_runtime_config_freshness()")
+        end = self.script.index("\nverify_root_disk_capacity()", start)
+        helper = self.script[start:end]
+
+        def run(host_hash: str, runtime_hash: str) -> subprocess.CompletedProcess[str]:
+            stubs = f'''\
+HOST_HASH={host_hash!r}
+RUNTIME_HASH={runtime_hash!r}
+sha256sum() {{ printf '%s  %s\\n' "$HOST_HASH" "$1"; }}
+timeout() {{ shift 3; "$@"; }}
+docker() {{
+  if [ "$1" = inspect ]; then return 0; fi
+  if [ "$1" = exec ]; then printf '%s  %s\\n' "$RUNTIME_HASH" "$4"; return 0; fi
+  return 1
+}}
+'''
+            return subprocess.run(
+                ["bash", "-c", stubs + helper + "\nverify_nginx_runtime_config_freshness"],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        good = "a" * 64
+        self.assertEqual(run(good, good).returncode, 0)
+        self.assertNotEqual(run(good, "b" * 64).returncode, 0)
+        self.assertNotEqual(run(good, "unreadable").returncode, 0)
+
+        checkout = self.script.index('run 04-checkout.txt "고정 SHA fast-forward"')
+        freshness = self.script.index('run 04b-nginx-runtime-config.txt')
+        build = self.script.index('run 07-build.txt "candidate build / latest 무결성"')
+        self.assertLess(checkout, freshness)
+        self.assertLess(freshness, build)
+
     def test_cutover_window_enforces_boundaries_and_rejects_active_oneoffs(self):
         start = self.script.index("verify_cutover_window()")
         end = self.script.index("\n# 실패하면 그 자리에서", start)

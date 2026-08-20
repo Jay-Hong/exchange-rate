@@ -1010,6 +1010,38 @@ raise SystemExit(1 if blocked else 0)
 PY
 }
 
+verify_nginx_runtime_config_freshness() {
+  local host_file runtime_file host_hash runtime_hash
+  command -v sha256sum >/dev/null 2>&1 || {
+    echo "sha256sum이 없어 nginx bind-mount freshness를 검증할 수 없다"; return 1;
+  }
+  command -v timeout >/dev/null 2>&1 || {
+    echo "timeout(1)이 없어 nginx freshness 검사 상한을 보장할 수 없다"; return 1;
+  }
+  timeout -k 2s 5s docker inspect exchange-rate-nginx >/dev/null 2>&1 || {
+    echo "실행 중인 exchange-rate-nginx를 확인할 수 없다"; return 1;
+  }
+
+  for host_file in nginx/nginx.conf nginx/conf.d/default.conf; do
+    runtime_file="/etc/${host_file}"
+    host_hash=$(sha256sum "$host_file" | awk 'NF >= 1 {print $1}') || return 1
+    runtime_hash=$(timeout -k 2s 5s \
+      docker exec exchange-rate-nginx sha256sum "$runtime_file" \
+        | awk 'NF >= 1 {print $1}') || return 1
+    if ! [[ "$host_hash" =~ ^[0-9a-f]{64}$ ]] \
+      || ! [[ "$runtime_hash" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "nginx 설정 hash를 판독할 수 없다: $host_file"
+      return 1
+    fi
+    printf 'nginx_config=%s host=%s runtime=%s\n' \
+      "$host_file" "$host_hash" "$runtime_hash"
+    if [ "$host_hash" != "$runtime_hash" ]; then
+      echo "nginx bind mount가 stale이다: $host_file — nginx를 별도 검증·재생성한 뒤 재실행"
+      return 1
+    fi
+  done
+}
+
 verify_root_disk_capacity() {
   local snapshot use_percent
   snapshot=$(df -P /) || return 1
@@ -1225,6 +1257,13 @@ if [ "$REV" != "$DEPLOY_SHA" ] || [ -n "$(git status --porcelain)" ]; then
   stop_follower
   exit 1
 fi
+
+# bind-mounted nginx 설정은 `git merge`가 파일 inode를 교체해도 실행 컨테이너가 구 inode를 계속
+# 볼 수 있다. 실제로 host에는 rt/lrs/lcs 로그 필드가 있는데 4주 된 nginx는 구 log_format을
+# 유지한 채 fastapi 배포가 완료됐다. nginx 변경을 이 fastapi 런북이 암묵 배포하지는 않되,
+# host/runtime가 갈라진 상태를 조용히 통과시키지도 않는다.
+run 04b-nginx-runtime-config.txt "nginx bind-mount freshness" -- \
+  verify_nginx_runtime_config_freshness || exit 1
 
 # 6) M0b가 실제 host에 남아 있는지 새 checkout의 verifier로 다시 확인한다.
 run 05-maintenance-cron.txt "DB maintenance cron" -- \
