@@ -37,7 +37,11 @@ from app.notifications.fcm import (
     send_fcm_data_only,
 )
 
-from app.subscription import verify_premium_status, PremiumStatus
+from app.subscription import (
+    PremiumStatus,
+    verify_premium_status,
+    verify_premium_status_fresh,
+)
 from app.webhooks import router as webhooks_router
 
 # 로거 설정
@@ -4539,21 +4543,33 @@ async def delete_comparison_alert(
 async def get_entitlements(
     request: Request,
     db: Session = Depends(get_db),
+    fresh_premium: bool = False,
 ):
     """ADR-038 — krx_visible 단일 신호 (G3 ∧ G2 ∧ G1 ∧ premium). 클라는 게이트 조합을
     계산하지 않고 이 값 하나로 KRX 표면(그래프 series/시세/알림 선택지) 노출을 결정.
 
     premium PENDING → 503 대신 200 {krx_visible:false, premium_pending:true} (read API —
     fail-closed + 클라 retry_after_seconds 후 재요청, codex Q2). INACTIVE → krx_visible=false.
+    `fresh_premium=true`는 cache-free WS 거부 뒤의 복구 전용이다. 일반 조회의 availability cache를
+    그대로 읽으면 방금 받은 `premium_required`보다 오래된 ACTIVE가 사용자를 다시 열 수 있다.
     """
     user_id = await verify_firebase_token(request)
-    status = await verify_premium_status(user_id)
+    verifier = verify_premium_status_fresh if fresh_premium else verify_premium_status
+    status = await verifier(user_id)
     if status == PremiumStatus.PENDING:
         return schemas.EntitlementsResponse(
-            krx_visible=False, premium_pending=True, retry_after_seconds=5)
+            krx_visible=False,
+            premium_active=False,
+            premium_pending=True,
+            retry_after_seconds=5,
+        )
+    premium_active = status == PremiumStatus.ACTIVE
     visible = entitlements.compute_krx_visible(
-        db, user_id, premium_active=(status == PremiumStatus.ACTIVE))
-    return schemas.EntitlementsResponse(krx_visible=visible)
+        db, user_id, premium_active=premium_active)
+    return schemas.EntitlementsResponse(
+        krx_visible=visible,
+        premium_active=premium_active,
+    )
 
 
 @app.get("/api/comparison-notification-logs",

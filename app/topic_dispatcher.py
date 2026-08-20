@@ -281,6 +281,21 @@ def leased_subscribers(topic: str) -> Set["WebSocket"]:
     }
 
 
+async def _close_after_topic_send_failure(websocket: "WebSocket") -> None:
+    """Turn a silent registry eviction into a client-visible reconnect trigger."""
+    try:
+        async with asyncio.timeout(1.0):
+            await websocket.close(code=1011)
+    except Exception:
+        logger.debug("topic publish 실패 후 close 실패", exc_info=True)
+
+
+async def _close_failed_topic_subscribers(websockets: list["WebSocket"]) -> None:
+    """Close failed sockets concurrently so one dead peer cannot stall fan-out."""
+    if websockets:
+        await asyncio.gather(*(_close_after_topic_send_failure(ws) for ws in websockets))
+
+
 async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
     """주어진 topic 구독자 전체에게 payload send.
 
@@ -308,18 +323,22 @@ async def publish_topic(topic: str, payload: Dict[str, Any]) -> int:
         return 0
 
     sent = 0
+    failed: list["WebSocket"] = []
     for ws in subscribers:
         try:
             await ws.send_json(payload)
             sent += 1
         except Exception:
-            # disconnected/closed/timeout 등 — stale entry 방지를 위해 즉시 정리.
+            # registry 제거만 하면 ping/pong은 살아 있는데 topic만 영구 침묵할 수 있다.
             registry.remove_websocket(ws)
+            failed.append(ws)
             logger.warning(
                 "topic publish 실패 (격리)",
                 extra={"topic": topic},
                 exc_info=True,
             )
+    # 실패 close를 loop 안에서 기다리면 N개 실패가 정상 fan-out을 N초까지 막는다.
+    await _close_failed_topic_subscribers(failed)
     return sent
 
 
@@ -394,17 +413,20 @@ async def publish_topic_detailed(topic: str, payload: Dict[str, Any]) -> TopicSe
 
     attempted = len(subscribers)
     sent = 0
+    failed: list["WebSocket"] = []
     for ws in subscribers:
         try:
             await ws.send_json(payload)
             sent += 1
         except Exception:
             registry.remove_websocket(ws)
+            failed.append(ws)
             logger.warning(
                 "topic publish 실패 (격리)",
                 extra={"topic": topic},
                 exc_info=True,
             )
+    await _close_failed_topic_subscribers(failed)
     return TopicSendCounts(attempted=attempted, sent=sent, enabled=True)
 
 

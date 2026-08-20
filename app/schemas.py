@@ -382,6 +382,7 @@ class EntitlementsResponse(BaseModel):
     premium PENDING이면 503 대신 200 + premium_pending=true (read API — fail-closed
     krx_visible=false, 클라는 retry_after_seconds 후 재요청. codex Q2 합의 2026-07-08)."""
     krx_visible: bool
+    premium_active: bool = False
     premium_pending: bool = False
     retry_after_seconds: Optional[int] = None
 

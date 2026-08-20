@@ -33,6 +33,7 @@ from app.subscription import (
     PendingCache,
     PremiumStatus,
     verify_premium_status,
+    verify_premium_status_fresh,
 )
 
 T0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
@@ -416,6 +417,52 @@ class TestVerifyPremiumStatusStateMachine(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got, PremiumStatus.INACTIVE)
         self.assertEqual(subscription._cache._cache["u"], (False, after))
         self.assertNotIn("u", subscription._pending._cache, "확정되면 pending을 비운다")
+
+
+class TestVerifyPremiumStatusFresh(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        subscription._cache.clear()
+        subscription._pending.clear_all()
+
+    def tearDown(self):
+        subscription._cache.clear()
+        subscription._pending.clear_all()
+
+    async def test_bypasses_fresh_active_cache_and_repairs_it_with_inactive(self):
+        clock = _clock(T0)[0]
+        subscription._cache.set("u", True, clock=clock)
+        provider = AsyncMock(return_value=subscription.Determined(is_premium=False))
+
+        with patch.object(subscription, "fetch_revenuecat_result", new=provider):
+            got = await verify_premium_status_fresh("u", clock=clock)
+
+        self.assertEqual(got, PremiumStatus.INACTIVE)
+        provider.assert_awaited_once_with("u", clock=clock)
+        self.assertEqual(subscription._cache._cache["u"], (False, T0))
+
+    async def test_unavailable_never_falls_back_to_stale_active(self):
+        clock = _clock(T0)[0]
+        subscription._cache.set("u", True, clock=clock)
+        provider = AsyncMock(return_value=subscription.ProviderUnavailable(status=503))
+
+        with patch.object(subscription, "fetch_revenuecat_result", new=provider):
+            got = await verify_premium_status_fresh("u", clock=clock)
+
+        self.assertEqual(got, PremiumStatus.PENDING)
+        self.assertEqual(subscription._cache._cache["u"], (True, T0))
+
+    async def test_determined_active_repairs_cache_and_clears_pending(self):
+        clock = _clock(T0)[0]
+        subscription._cache.set("u", False, clock=clock)
+        subscription._pending.mark("u", clock=clock)
+        provider = AsyncMock(return_value=subscription.Determined(is_premium=True))
+
+        with patch.object(subscription, "fetch_revenuecat_result", new=provider):
+            got = await verify_premium_status_fresh("u", clock=clock)
+
+        self.assertEqual(got, PremiumStatus.ACTIVE)
+        self.assertEqual(subscription._cache._cache["u"], (True, T0))
+        self.assertNotIn("u", subscription._pending._cache)
 
 
 class TestSamplingFidelity(unittest.IsolatedAsyncioTestCase):

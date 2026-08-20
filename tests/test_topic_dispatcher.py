@@ -4,6 +4,7 @@ TopicRegistry register/unregister/remove + publish_topic FF 분기 + 실패 격�
 """
 from __future__ import annotations
 
+import asyncio
 import ast
 import pathlib
 import unittest
@@ -199,8 +200,10 @@ class TestPublishTopic(unittest.IsolatedAsyncioTestCase):
         """한 구독자 send 실패 → 격리 + registry에서 stale ws 즉시 제거."""
         ws_ok = MagicMock(name="ws_ok")
         ws_ok.send_json = AsyncMock()
+        ws_ok.close = AsyncMock()
         ws_fail = MagicMock(name="ws_fail")
         ws_fail.send_json = AsyncMock(side_effect=ConnectionError("closed"))
+        ws_fail.close = AsyncMock()
 
         topic_dispatcher.registry.register(ws_ok, ["usdt:krw"])
         topic_dispatcher.registry.register(ws_fail, ["usdt:krw"])
@@ -213,6 +216,8 @@ class TestPublishTopic(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sent, 1)
         ws_ok.send_json.assert_awaited_once()
         ws_fail.send_json.assert_awaited_once()
+        ws_ok.close.assert_not_awaited()
+        ws_fail.close.assert_awaited_once_with(code=1011)
         self.assertTrue(any("topic publish 실패" in m for m in cm.output))
 
         # Codex 권고: 실패한 ws는 registry에서 즉시 제거 (stale entry 방지)
@@ -228,6 +233,7 @@ class TestPublishTopic(unittest.IsolatedAsyncioTestCase):
         """
         ws_fail = MagicMock(name="ws_fail")
         ws_fail.send_json = AsyncMock(side_effect=ConnectionError("closed"))
+        ws_fail.close = AsyncMock()
         topic_dispatcher.registry.register(ws_fail, ["usdt:krw", "krx:usd-krw-futures"])
 
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
@@ -240,6 +246,49 @@ class TestPublishTopic(unittest.IsolatedAsyncioTestCase):
         # disconnect hook이 뒤늦게 호출돼도 예외 없음 (idempotent)
         topic_dispatcher.registry.remove_websocket(ws_fail)  # 무동작
         self.assertEqual(topic_dispatcher.registry.subscribed_connection_count, 0)
+
+    async def test_close_failure_isolated_from_other_subscribers(self):
+        ws_fail = MagicMock(name="ws_close_fail")
+        ws_fail.send_json = AsyncMock(side_effect=ConnectionError("closed"))
+        ws_fail.close = AsyncMock(side_effect=RuntimeError("transport gone"))
+        ws_ok = MagicMock(name="ws_ok")
+        ws_ok.send_json = AsyncMock()
+        ws_ok.close = AsyncMock()
+        topic_dispatcher.registry.register(ws_fail, ["usdt:krw"])
+        topic_dispatcher.registry.register(ws_ok, ["usdt:krw"])
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             self.assertLogs("exchange_rate.topic_dispatcher", level="WARNING"):
+            sent = await topic_dispatcher.publish_topic("usdt:krw", {})
+
+        self.assertEqual(sent, 1)
+        ws_fail.close.assert_awaited_once_with(code=1011)
+        ws_ok.send_json.assert_awaited_once()
+
+    async def test_failed_close_does_not_delay_later_healthy_subscriber(self):
+        close_started = asyncio.Event()
+        release_close = asyncio.Event()
+
+        async def held_close(*, code):
+            self.assertEqual(code, 1011)
+            close_started.set()
+            await release_close.wait()
+
+        ws_fail = MagicMock(name="ws_fail_first")
+        ws_fail.send_json = AsyncMock(side_effect=ConnectionError("closed"))
+        ws_fail.close = AsyncMock(side_effect=held_close)
+        ws_ok = MagicMock(name="ws_ok_second")
+        ws_ok.send_json = AsyncMock()
+        ws_ok.close = AsyncMock()
+
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
+             patch.object(topic_dispatcher, "leased_subscribers", return_value=[ws_fail, ws_ok]), \
+             self.assertLogs("exchange_rate.topic_dispatcher", level="WARNING"):
+            task = asyncio.create_task(topic_dispatcher.publish_topic("usdt:krw", {}))
+            await asyncio.wait_for(close_started.wait(), timeout=0.2)
+            ws_ok.send_json.assert_awaited_once()
+            release_close.set()
+            self.assertEqual(await task, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +333,7 @@ class TestPublishTopicDetailed(unittest.IsolatedAsyncioTestCase):
     def _ws(self, *, ok=True):
         ws = MagicMock()
         ws.send_json = AsyncMock(side_effect=None if ok else ConnectionError("closed"))
+        ws.close = AsyncMock()
         return ws
 
     async def test_ff_off(self):
@@ -309,6 +359,8 @@ class TestPublishTopicDetailed(unittest.IsolatedAsyncioTestCase):
             counts = await publish_topic_detailed("usdt:krw", {})
         self.assertEqual(counts, TopicSendCounts(attempted=2, sent=0, enabled=True))
         self.assertGreater(counts.attempted, 0)   # no-subscribers와 구분
+        a.close.assert_awaited_once_with(code=1011)
+        b.close.assert_awaited_once_with(code=1011)
         # 실패 ws 둘 다 eviction
         self.assertEqual(topic_dispatcher.registry.get_subscribers("usdt:krw"), set())
 
@@ -352,6 +404,7 @@ class TestPublishTopicParity(unittest.IsolatedAsyncioTestCase):
         for ok in success_flags:
             ws = MagicMock()
             ws.send_json = AsyncMock(side_effect=None if ok else ConnectionError("x"))
+            ws.close = AsyncMock()
             topic_dispatcher.registry.register(ws, ["t"])
             wss.append(ws)
         with patch.object(config, "TOPIC_DISPATCHER_ENABLED", ff):
@@ -385,6 +438,7 @@ class TestPublishTopicParity(unittest.IsolatedAsyncioTestCase):
             for _ in range(2):
                 ws = MagicMock()
                 ws.send_json = AsyncMock(side_effect=ConnectionError("x"))
+                ws.close = AsyncMock()
                 topic_dispatcher.registry.register(ws, ["t"])
             with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), \
                  self.assertLogs("exchange_rate.topic_dispatcher", level="WARNING"):

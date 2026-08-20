@@ -465,6 +465,31 @@ async def verify_premium_status(user_id: str, *, clock: Optional[Clock] = None) 
     return PremiumStatus.PENDING
 
 
+async def verify_premium_status_fresh(
+    user_id: str, *, clock: Optional[Clock] = None
+) -> PremiumStatus:
+    """Cache-free premium verdict for recovery after a fresh WS denial.
+
+    The regular REST path intentionally protects availability with a five-minute stale
+    cache. Reusing that value after the topic arbiter just returned ``premium_required``
+    can reopen a user from an older ACTIVE entry. A determined provider result repairs
+    the regular cache; an unavailable or malformed result remains PENDING and never
+    falls back to stale authority.
+    """
+    if clock is None:
+        clock = system_clock()
+    if not user_id:
+        return PremiumStatus.INACTIVE
+
+    result = await fetch_revenuecat_result(user_id, clock=clock)
+    if not isinstance(result, Determined):
+        return PremiumStatus.PENDING
+
+    _pending.clear(user_id)
+    _cache.set(user_id, result.is_premium, clock=clock)
+    return PremiumStatus.ACTIVE if result.is_premium else PremiumStatus.INACTIVE
+
+
 async def verify_premium(user_id: str, *, clock: Optional[Clock] = None) -> bool:
     return await verify_premium_status(user_id, clock=clock) == PremiumStatus.ACTIVE
 
@@ -473,6 +498,7 @@ __all__ = [
     # ⚠️ `Clock`/`system_clock`은 의도적으로 없다 — 정본은 `app/clock.py`.
     "verify_premium",
     "verify_premium_status",
+    "verify_premium_status_fresh",
     "PremiumStatus",
     "invalidate_user_cache",
     "EntitlementCache",

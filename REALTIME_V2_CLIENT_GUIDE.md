@@ -46,8 +46,8 @@
 > ✅ **클라 축은 land 했다**(2026-08-02~03): **lease 소비**(최단 만료 기준 재인증 타이머,
 > `duration: 0` = "지금 재인증" — iOS `1f6040e`/`a826dbf`) · **request timeout**(송신 직후 무장,
 > 20초 무응답 → 같은 연결에서 새 `request_id` 재전송, 기존 재시도 상한 공유 — `cbc1c0f`/`f1e72c9`) ·
-> **구매 직후 `premium_required` 복구**(서버 stable `krx_visible=true` 확정 → 기록된 topic 만
-> 재구독 — `b83b99b`/`0eb91a1`).
+> **구매 직후 `premium_required` 복구**(→ §3.5. 판정 신호가 `krx_visible` 에서
+> **`premium_active`** 로 분리됐다 — `b83b99b`/`0eb91a1` 이후 재설계).
 > 이 문서를 "서버가 다 됐다"로 읽고 활성화를 앞당기지 말 것 — 활성화 선행 조건은 아래 3조건이다.
 > 서버 코드 구현 완료(snapshot-on-subscribe + wire e2e). ⚠️ **prod 현재 OFF** — 구 "prod LIVE"(2026-06-27
 > `TOPIC_DISPATCHER_ENABLED`/`FX_TOPIC_ENABLED` ON)는 2026-07-22 route auth 감사에서 무인증 누수 완화로
@@ -478,6 +478,30 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
 - legacy `/api/rates/{usdt-krw|usd-krw-futures}`는 여전히 410 Gone(use_topic) — 신규 앱은 위 v2 bootstrap 사용. FX legacy `/api/rates/{asset}`(legacy shape)도 v2 bootstrap으로 대체 권장.
 
 > ✅ (구 OPEN — usdt:krw REST bootstrap 부재)는 본 endpoint로 **해소**(2026-06-25). 전 topic(fx:*+usdt:krw) 통일 bootstrap.
+
+### 3.5 자격 확인 (`GET /api/entitlements`) — 강등 뒤 복구 신호
+
+인증 필요. 응답:
+
+| 필드 | 타입 | 의미 |
+| --- | --- | --- |
+| `krx_visible` | bool | KRX 표면(그래프 series·시세·알림 선택지) 노출 여부. G3 ∧ G2 ∧ G1 ∧ premium |
+| `premium_active` | bool | **유료 자격 자체.** KRX 게이트와 **독립** |
+| `premium_pending` | bool | 판정 불가(provider 미확정). fail-closed — 둘 다 false |
+| `retry_after_seconds` | int? | `premium_pending` 일 때 재요청 간격 |
+
+⛔ **`krx_visible` 로 유료 복구를 판정하지 말 것.** 그것은 premium 에 더해 KRX 게이트 3개를
+곱한 값이라, KRX 가 닫혀 있으면 유료 사용자에게도 false 다. 강등(`premium_required`) 뒤의
+복구는 **`premium_active`** 로 판정한다.
+
+**`?fresh_premium=true`** — WS 가 방금 `premium_required` 를 확정한 **뒤의 복구 전용** 질의다.
+일반 조회는 가용성을 위해 5분 stale cache 를 읽는데, 그 값이 방금 받은 거부보다 오래된
+`ACTIVE` 면 사용자를 도로 열어 **강등↔복구 진동**을 만든다. 이 질의는 캐시를 우회해 provider
+판정을 직접 받고, 확정된 결과로 공용 캐시도 함께 고친다. 미확정이면 `premium_pending` 으로
+남고 **stale 권위로 떨어지지 않는다**.
+
+⚠️ 복구 전용이다 — 일반 폴링에 쓰지 말 것(외부 provider 호출이 매번 발생한다). 클라는
+bounded 재시도로만 사용한다.
 
 ## 4. 수신 규칙 (snapshot 처리)
 
