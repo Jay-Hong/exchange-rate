@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
+- server 기준 commit: `4849992ac7fa7b1881a2f7bc5100905c5470e890`
 - iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6`
-- baseline SHA: `96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58`
+- manifest SHA: `493783ede2065a9aad47818ad4d089378ab5b2dcf3f40e76edc73c9b8b953093`
+- baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -521,7 +521,7 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
 - **재시도 상한** 을 둔다.
 - 실패 후 **클라 재시도 cooldown** 을 둔다.
 
-**현재 구현 상태 (iOS `45a8a12`, LOAD-S4 전 임시 기본값):**
+**현재 구현 상태 (iOS `45a8a12`, LOAD-S4 검증값):**
 - 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를
   초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다
   (`ios/FXi/Utils/Constants.swift:272-279` · `ios/FXi/Services/WebSocketService.swift:1331-1389`).
@@ -535,9 +535,9 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
   (`ios/FXi/Utils/Constants.swift:255` · `ios/FXi/Services/WebSocketService.swift:845-900` ·
   `ios/FXi/Services/WebSocketService.swift:987-995`).
 
-⚠️ 위 값은 source에 결속된 **클라이언트 구현 기본값**이지 운영 승인값이 아니다. 다수 client의
-45초 동시 도착에서 서버 queue wait·1013·cooldown suppression과 클라이언트 retry 시간축을 함께
-보는 LOAD-S4 부하 리허설 전에는 end-to-end 완화나 활성화 완료로 쓰지 않는다.
+⚠️ 위 값은 다수 client의 45초 동시 도착에서 서버 queue wait·1013·cooldown suppression과
+클라이언트 retry 시간축을 함께 보는 LOAD-S4 리허설을 통과했다. 다만 이 결과를 waiter 개수 hard
+cap이나 영구 activation 완료로 쓰지 않는다.
 
 서버 쪽 대응(single-flight · bounded wait · I/O 상한 · 서버 실패 cooldown)은
 [R-LOAD-3](revalidation-and-load.md#r-load-3) 가 소유한다. ⚠️ **서버 실패 cooldown 과 클라 jitter 는

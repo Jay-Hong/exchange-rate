@@ -58,9 +58,9 @@
 worker의 다음 phase 진입을 제한했다. `LOAD-S5`는 그 bounded build를 같은 key의 연결들이
 공유하게 해 동시 작업량을 연결 수가 아니라 활성 key 수에 가깝게 줄였다. `LOAD-S6/S7`은 FIFO
 admission과 서버 실패 cooldown을, iOS `45a8a12`는 `R-CLI-24` jitter·retry cap·client cooldown을
-구현했다. 서버 `R-LOAD-3`과 클라이언트 `R-CLI-24` 구현은 land됐지만 waiter queue의 **개수** hard
-cap은 없고 LOAD-S4 부하 리허설·통합 활성화도 남아 있다. 따라서 `자원 상한 완료`, end-to-end 폭주
-완화 완료 또는 운영 활성화 완료라고 쓰지 않는다.
+구현했다. 서버 `R-LOAD-3`과 클라이언트 `R-CLI-24` 구현 및 LOAD-S4 부하 리허설은 끝났지만 waiter
+queue의 **개수** hard cap은 없고 통합 활성화도 남아 있다. 따라서 `자원 상한 완료` 또는 운영 활성화
+완료라고 쓰지 않는다.
 
 ### 운영 상태는 별도 재확인
 
@@ -185,8 +185,8 @@ phase를 시작하지 않게 한다.
 - 새 shared flight task만 process-local FIFO admission을 통과한다. flight를 registry에 먼저 게시해
   같은 key의 후속 요청은 admission에 중복 대기하지 않고 즉시 그 shared task에 join한다. 기존 flight
   join과 성공 cache hit는 slot을 소비하지 않는다.
-- 동시 build 기본값은 `WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS=4`다. dormant 메커니즘 값이며
-  LOAD-S4 부하 리허설 전 운영 승인값으로 간주하지 않는다. permit은 leader caller가 아니라 shared
+- 동시 build 기본값은 `WS_TOPIC_SNAPSHOT_MAX_CONCURRENT_BUILDS=4`다. LOAD-S4 리허설 후보로
+  검증됐지만 영구 activation 승인은 별도다. permit은 leader caller가 아니라 shared
   task가 소유해 caller 하나의 취소가 살아 있는 build의 slot을 조기 반환하지 않는다.
 - 각 leader 후보는 자기 LOAD-S3 남은 예산으로 FIFO slot을 기다린다. 예산 소진 전 즉시거절은 없고,
   queue에서 만료된 요청은 builder를 시작하지 않은 채 기존 deadline 경로(WS post-ACK 1013 / REST

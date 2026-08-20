@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
+- server 기준 commit: `4849992ac7fa7b1881a2f7bc5100905c5470e890`
 - iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6`
-- baseline SHA: `96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58`
+- manifest SHA: `493783ede2065a9aad47818ad4d089378ab5b2dcf3f40e76edc73c9b8b953093`
+- baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의

@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `49fae18c82f7a92bda3d27938c1dc8566b479931`
+- server 기준 commit: `4849992ac7fa7b1881a2f7bc5100905c5470e890`
 - iOS 기준 commit: `45a8a129be3067a5303331fe956f8f05fd267e47`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9e09855e972cdbe821c5b3125318027113cb27420b0435a20c6ca4db312c7ec6`
-- baseline SHA: `96b9af6e6389634fc094c6895af171d56c790d198a24a4d4021a6dfef44b7f58`
+- manifest SHA: `493783ede2065a9aad47818ad4d089378ab5b2dcf3f40e76edc73c9b8b953093`
+- baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -105,9 +105,9 @@ bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도
 pinned iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 구현됐다
 (`ios/FXi/Services/WebSocketService.swift:845-900` ·
 `ios/FXi/Services/WebSocketService.swift:933-952` ·
-`ios/FXi/Services/WebSocketService.swift:1331-1389`). 다만 서버 기본 1초와 클라이언트 jitter 값은
-아직 운영 승인값이 아니며 LOAD-S4 다중 클라이언트 리허설이 남아 있으므로 end-to-end 완화 완료로
-쓰지 않는다. 취소된 sync worker는 다음 협력
+`ios/FXi/Services/WebSocketService.swift:1331-1389`). 서버 기본 1초와 클라이언트 jitter를 사용한
+45초 다중 클라이언트 LOAD-S4 리허설은 GO였지만 waiter 개수 hard cap과 영구 activation은 별도다.
+따라서 리허설 통과를 메모리 상한이나 운영 활성화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력
 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.
 <!-- /rid: R-LOAD-3 -->
 
@@ -153,12 +153,12 @@ ADR-041 의 파생 숫자 숨김 정책 제안은 **조건부**로만 수용된�
 
 실측: zone 은 이미 정의돼 있고(`limit_req_zone` / `limit_conn_zone` — `nginx/conf.d/default.conf:19-20`),
 **`location /api/` 에만** `limit_req` + `limit_conn` 이 걸려 있다(`nginx/conf.d/default.conf:105-106`).
-**`location /ws` 에는 둘 다 없다**(`nginx/conf.d/default.conf:80-99`).
+**`location = /ws` 에는 둘 다 없다**(`nginx/conf.d/default.conf:80-99`).
 
 → handshake 폭주는 `limit_req` 로 막는다. 다만 **IP별 `limit_conn` 은 모바일 캐리어 NAT 위험이 크다**
 (한 IP 뒤에 다수 사용자) → **계측 후 결정**. 이 항목은 "신설 vs 위험 수용" 이분법이 아니었다.
 
-근거(baseline): **E4 [코드·부정]** `nginx/conf.d/default.conf` 의 `location /ws` 는 **80~99행** 블록이고
+근거(baseline): **E4 [코드·부정]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **80~99행** 블록이고
 그 안에 `limit_req`·`limit_conn` 이 **없다**(블록 전체를 훑어 확인). `location /api/` 에는 둘 다 있고
 zone 정의는 파일 상단에 존재한다.
 <!-- /rid: R-LOAD-2 -->

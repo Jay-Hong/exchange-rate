@@ -138,14 +138,15 @@
   (`app/main.py:3196-3197`).
   **E2-inf [추론]** ⇒ 연결당 topic 순회는 **순차**지만, 같은 key의 요청은 shared task 하나에
   합류하고 새 shared task의 admission 점유는 기본 4다. 서버 transient 실패의 즉시 재진입은
-  cooldown으로 억제되지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 기본 1초는 dormant
-  값이며 클라이언트 jitter·재시도 상한과 다중 클라이언트 리허설 전에는 end-to-end 폭주 완화 완료가
-  아니다. 취소된 sync worker도 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4를 실제
+  cooldown으로 억제되지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 기본 1초와
+  클라이언트 jitter·재시도 상한을 사용한 45초 다중 클라이언트 리허설은 완료됐지만 waiter 개수
+  hard cap과 영구 activation은 별도다. 취소된 sync worker도 다음 협력 checkpoint까지 잠시 남아
+  admission 4를 실제
   executor thread 점유의 순간 상한으로 읽으면 안 된다.
 - **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
   배포 재연결은 평균 유입이 낮아도 **동시 도착** 이라 1초면 빠질 큐를 대량 거절한다."*
   같은 docstring: *"이것은 큐 상한이 아니다"*(`SimpleQueue` 무제한), *"자원 상한 완료 라고 쓰지 말 것"*.
-- **E4 [코드·부정]** `nginx/conf.d/default.conf` `location /ws` 는 **80~99행** 블록이고
+- **E4 [코드·부정]** `nginx/conf.d/default.conf` `location = /ws` 는 **80~99행** 블록이고
   그 안에 `limit_req`·`limit_conn` **없음**(블록 전체를 훑어 확인). `location /api/` 에는 둘 다 있고
   zone 정의는 파일 상단에 존재.
 
