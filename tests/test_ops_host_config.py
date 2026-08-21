@@ -73,6 +73,36 @@ class TestNginxWebSocketLocation(unittest.TestCase):
         self.assertNotIn("zone=api_limit", block)
 
 
+class TestNginxApiRateLimit(unittest.TestCase):
+    def test_api_burst_absorbs_the_observed_v2_cold_start_fanout(self):
+        """Keep the sustained cap while allowing one normal app launch to complete."""
+        text = NGINX_DEFAULT.read_text()
+        self.assertRegex(
+            text,
+            re.compile(
+                r"^limit_req_zone\s+\$binary_remote_addr\s+"
+                r"zone=api_limit:10m\s+rate=3r/s;$",
+                re.M,
+            ),
+        )
+
+        start = text.index("    location /api/ {")
+        end = text.index("\n    }", start)
+        block = text[start:end]
+        self.assertRegex(
+            block,
+            re.compile(
+                r"^\s*limit_req\s+zone=api_limit\s+burst=20\s+nodelay;$",
+                re.M,
+            ),
+        )
+        self.assertRegex(block, re.compile(r"^\s*limit_req_status\s+429;$", re.M))
+        self.assertRegex(
+            block,
+            re.compile(r"^\s*limit_conn\s+conn_limit\s+10;$", re.M),
+        )
+
+
 class TestNginxLogrotateConfig(unittest.TestCase):
     def setUp(self):
         self.text = LOGROTATE.read_text()
