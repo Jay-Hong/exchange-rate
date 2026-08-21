@@ -135,7 +135,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     #                분리 인용해 +3 (13 → 16).
     # 2026-08-20 R-CLI-24 C2: R-LOAD-3 의 남은 client 경계를 구현 사실로 교정하면서
     #                pinned iOS 근거 3건을 추가해 16 → 19.
-    "LOAD": 26,
+    # 2026-08-21 /ws limit_req C2: 전용 zone·적용 지점과 subscribe 인증 seam 을 결속해
+    #                195 → 199 / server 84 → 88.
+    "LOAD": 30,
 }
 
 
@@ -414,9 +416,9 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-20 LOAD-S7 C2: HAND +1, LOAD +3 (139 → 143 / server 75 → 79).
     # 2026-08-20 R-CLI-24 C2: CLIENT +7, LOAD +3
     #                (143 → 153 / ios 64 → 74, server 79 불변).
-    assert len(references) == 195
+    assert len(references) == 199
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 84, "ios": 111}
+    assert by_repo == {"server": 88, "ios": 111}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -664,8 +666,11 @@ CLAIM_LEDGER_INVENTORY = {
     # 2026-08-21 codex NO-GO 반영: R-HAND-6(서버 close-on-send-failure) 과 R-CLI-11(배너 렌더)
     #                의 구 "미구현" 서술이 pinned 코드와 정반대라 정정했고, cutover 매트릭스
     #                B5/B8/B9 도 실제 커버리지로 갈랐다(B8 은 '절반만'). 72 → 74 (code_fact 61 → 63).
-    "claim_candidates": 74,
-    "code_fact_entries": 63,
+    # 2026-08-21 /ws limit_req C1(463c880) C2: R-LOAD-2 의 "둘 다 없다" 와 baseline E4 가
+    #                구현으로 거짓이 돼 재작성했고, 10r/s 선택 근거 단정이 새 code_fact 로 생겼다.
+    #                74 → 75 (code_fact 63 → 64).
+    "claim_candidates": 75,
+    "code_fact_entries": 64,
     "normative_entries": 11,
 }
 

@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "5496af59928c23a2fe03e48a3e318fc780d6fbe682955e0e31b6758f87474510",
-    "baseline_sha256": "23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7",
-    "lock_sha256": "a1fbed1aaf207d83cf28e4a208439c2772fd313e0103a26d01891a43d413b78e",
-    "server_commit": "4b58110c85efc844eba990b60fb36d8a4349f720",
+    "manifest_sha256": "a9e6eb9c43233218871977a0af2cdea1dc243ddcf401f6c379947ee8b181276d",
+    "baseline_sha256": "c838e871bb02abd4657d1fc99fd364f5bfbd3edfba083a5cf4d615a4cf60cc8f",
+    "lock_sha256": "4385955937847e544692c3436e87eb12aea21c77ae169e54c07cb324631bb808",
+    "server_commit": "463c880616b7649e81f8082281eacf8c08c2c113",
     "ios_commit": "1de20ea70a74fe3f6653725591a30596343597ac"
   },
   "documents": {
-    "ADR": "06084161451983a8ffedaf655d3d7ae26be799b3c9dc8d011c76c85d4726954f",
-    "CLIENT": "56af2c4de287a635c1c83caf6d9f4fb4be4890f507e731688b65d583b841179e",
-    "CUT": "31dd9b5d76ea25a3ba82da7ecc670f700b385a334220854e27a9c5fd3128246c",
-    "HAND": "b2c2b9d0896ba33eb5e9af0f3a1588f136600cc08f48d95c4275d498390564f7",
-    "HEALTH": "e0ebe18a0c2597273bc635a9d8f76dbf7c6af5f452498791bd35cfa788c32147",
-    "LOAD": "66a54f30b25bed1b7909b7a9d142a5277681529840b9897c39084108857b2772"
+    "ADR": "63eedefd9138fa2cfab1b8c16db49deb93bf2c02cc96df8235ab528485b08d80",
+    "CLIENT": "152bf3a4f5279d7e8d074fa0280803aebd09af69d936a22c54b4d51a64a532d4",
+    "CUT": "3511f2a4aa239e9f4b9139f11deb2fbcb32ad5a6fce397abbcef662b24e41d52",
+    "HAND": "13b5f4f7ab1e5b3ddf64955465ed93049beef7064f274c685a47003bb45e304c",
+    "HEALTH": "63680b5ab7a3e223ac6c5a720c2f1d1baeca24b9c4d0b4a82be3ad337ff4bbf7",
+    "LOAD": "16bbb054be23b17991d41dc951fc7b9e7eed512dfc6831aeb7d8e502d8cba0bc"
   },
   "entries": [
     {
@@ -872,25 +872,39 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-2",
-      "unit_sha256": "c0c800c19e1ef951d90204e207e2462661256933b3243e29cf317665d6a9ade6",
-      "unit_text": "실측: zone 은 이미 정의돼 있고(`limit_req_zone` / `limit_conn_zone` — `nginx/conf.d/default.conf:19-20`), **`location /api/` 에만** `limit_req` + `limit_conn` 이 걸려 있다(`nginx/conf.d/default.conf:105-106`). **`location = /ws` 에는 둘 다 없다**(`nginx/conf.d/default.conf:80-99`).",
+      "unit_sha256": "dff84e2567b9eb3e0c432ae9a914e027845bdcbb0b975f4c2d0f12b2389c1f53",
+      "unit_text": "✅ **`limit_req` 축은 이행됐다**(C1 `463c880`). `location = /ws` 가 **전용 zone** `ws_handshake_limit`(10r/s, `nginx/conf.d/default.conf:25`)로 `limit_req burst=20 nodelay` + `limit_req_status 429` 를 건다(`nginx/conf.d/default.conf:89-90`). `/api/` 의 `api_limit`(3r/s) 을 공유하지 않는다(`nginx/conf.d/default.conf:19` · `nginx/conf.d/default.conf:116-117`). ⚠️ **`limit_conn` 은 여전히 `/ws` 에 없다** — 아래 NAT 사유로 계측 후 결정이 유지된다.",
       "classification": "code_fact",
-      "detail": "고정 server commit 4849992에서 19-20행 zone 정의, 105-106행 API의 limit_req·limit_conn, 80-99행 exact `location = /ws` 블록을 직접 확인했다. WebSocket 블록에는 아직 두 제한 지시자가 모두 없다.",
+      "detail": "`/ws` 가 전용 zone `ws_handshake_limit`(10r/s) 로 `limit_req burst=20 nodelay` + 429 를 걸고 `/api/` 의 `api_limit` 을 공유하지 않으며, `limit_conn` 은 여전히 없다는 현재 nginx 설정 단정이다.",
       "provenance": [
-        "file:nginx/conf.d/default.conf:105-106",
-        "file:nginx/conf.d/default.conf:19-20",
-        "file:nginx/conf.d/default.conf:80-99"
+        "file:nginx/conf.d/default.conf:116-117",
+        "file:nginx/conf.d/default.conf:19",
+        "file:nginx/conf.d/default.conf:25",
+        "file:nginx/conf.d/default.conf:89-90"
       ]
     },
     {
       "destination": "LOAD",
       "rid": "R-LOAD-2",
-      "unit_sha256": "5a60a91593156a466dcb99535e675d3a758826809d46b5edf209598374c9ea7f",
-      "unit_text": "근거(baseline): **E4 [코드·부정]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **80~99행** 블록이고 그 안에 `limit_req`·`limit_conn` 이 **없다**(블록 전체를 훑어 확인). `location /api/` 에는 둘 다 있고 zone 정의는 파일 상단에 존재한다.",
+      "unit_sha256": "6661a9a681b72b1d6d0e3edecef768ab9bcdb4219b2a0266c2037e5817895f59",
+      "unit_text": "근거(baseline): **E4 [코드]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **86~110행** 블록이고 그 안에 전용 zone 기반 `limit_req` 가 **있고**(89~90행) `limit_conn` 은 **없다**. `location /api/` 는 별개 zone 으로 둘 다 있다(116~117행). zone 정의는 파일 상단 19·25·26행.",
       "classification": "code_fact",
-      "detail": "baseline E4가 고정 server commit의 exact `location = /ws` 80-99행 전체를 근거로 삼는다. 그 블록에는 limit_req·limit_conn이 없고 API 블록에만 둘 다 있다.",
+      "detail": "`location = /ws` 블록(86~110행)에 전용 zone 기반 `limit_req` 가 있고 `limit_conn` 은 없으며, `/api/` 는 별개 zone 으로 둘 다 있다는 baseline E4 재도출 단정이다.",
       "provenance": [
         "baseline:E4"
+      ]
+    },
+    {
+      "destination": "LOAD",
+      "rid": "R-LOAD-2",
+      "unit_sha256": "e2b6f8d770be05bdb6a008444ff6f5c051e5e0a473b294ce2565b33e4aefaa04",
+      "unit_text": "⚠️ 10r/s 는 **사용자 트래픽 실측이 아니다** — v2 구독자 실트래픽이 없다. W=4 identity canary 처리량(~13/s) 아래의 capacity guard 이고, handshake 자체는 인증을 돌리지 않으므로 — 인증은 subscribe 처리에서 `authorize_subscribe` 로 일어난다(`app/topic_dispatcher.py:715`) — \"연결 1개당 subscribe 최소 1회\"라는 **대리 지표**로 묶은 값이다. zone 자체는 `nginx/conf.d/default.conf:25` 이고 적용은 `nginx/conf.d/default.conf:89` 다. 초기 phased 의 `lrs=` 관측으로 재평가한다.",
+      "classification": "code_fact",
+      "detail": "10r/s 가 사용자 트래픽 실측이 아니라 W=4 canary 처리량 아래의 capacity guard 이고, handshake 는 인증을 돌리지 않아 '연결 1개당 subscribe 최소 1회' 대리 지표로 묶은 값이라는 선택 근거 단정이다.",
+      "provenance": [
+        "file:app/topic_dispatcher.py:715",
+        "file:nginx/conf.d/default.conf:25",
+        "file:nginx/conf.d/default.conf:89"
       ]
     },
     {

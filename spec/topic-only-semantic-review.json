@@ -62,7 +62,9 @@
           "semantic-input-binding/v1:0007:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:author=Claude Code:reviewer=OpenAI Codex",
           "R-GATE-3 C2 재-baseline: pin 을 iOS 99316a9 / server 4b58110 으로 전진하고 6개 문서의 인용 좌표를 재도출했다. 핵심은 좌표가 아니라 **구현이 요구를 충족하면서 '미충족' 서술이 거짓이 된 단위 8건**을 현재 동작으로 정정한 것이다 — R-CLI-6(다섯 거부 코드 per-topic 배선) · R-CLI-12(45초 legacy revert 기전 제거, purge 후 blank) · R-CLI-13(stop() 이 디스크 캐시까지 purge) · R-CLI-18(알림 시트 fail-closed + 가격 미변경 편집 예외 + 탈출구) · R-CUT-9(런북 3행 이미 해소) · R-CUT-2(freshFxAssets 심볼 삭제). claim ledger 를 72 단위(code_fact 61 / normative 11)로 재동기화하고 backtick locator inventory 를 153 → 183 으로 전진했다. 서버 축은 R-HAND-6 close-on-send-failure 구현과 premium_active cache-free 복구 신호이며, 클라 축은 공용 deadline arbiter · lease hard-expiry · purge · 재검증 jitter · 소진 시 수신증거 기반 degrade 다.",
           "R-GATE-3 C2 재-baseline: pin 을 server 4b58110 / iOS 1de20ea 로 전진하고 6개 문서의 인용 좌표를 재도출했다(문서별 소유 + 독립 감사). 이번 C2 의 실질은 좌표 이동이 아니라 **구현이 요구를 충족하면서 '미충족' 서술이 거짓이 된 단위**의 정정이다 — R-CLI-6(다섯 거부 코드 per-topic 배선) · R-CLI-11(전달 상태 배너·수동 재시도 렌더) · R-CLI-12(45초 legacy revert 기전 제거) · R-CLI-13(stop() 이 디스크 캐시까지 purge) · R-CLI-18(알림 시트 fail-closed) · R-CUT-2(freshFxAssets 삭제) · R-CUT-9(런북 3행 해소) · R-HAND-6(서버 close-on-send-failure 배선). cutover 매트릭스 B5/B8/B9 는 실제 테스트 커버리지로 갈랐고 **B8 은 '절반만'** 이다 — purge 는 잠겼으나 재활성화 복구 테스트는 0건이다. claim ledger 74 단위(code_fact 63) · locator inventory 195 로 전진.",
-          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=Claude Code:reviewer=OpenAI Codex",
+          "위 C1 검토 + C2 재-baseline: 값 선택 근거를 정밀화했다 — handshake 자체는 인증을 돌리지 않으므로(인증은 `authorize_subscribe`) 10r/s 는 auth 부하를 직접 묶는 게 아니라 '연결 1개당 subscribe 최소 1회' **대리 지표**다. 클라 경로도 교차 확인했다: iOS 는 handshake HTTP status 를 읽지 않아 429 가 일반 연결 실패로 떨어지고 bounded backoff(5회) 뒤 가시적 `.failed` + 수동/foreground 복구가 된다 — 조용한 죽은 연결이 아니다. 그리고 **C1 이 세 곳의 산문을 거짓으로 만든 것**을 찾아 정정했다 — baseline E4('둘 다 없음', lock 에 해시로 묶여 연쇄를 일으킨다) · R-LOAD-2 본문('`location = /ws` 에는 둘 다 없다') · FREE_TIER 열린 항목('실측: limit_req·limit_conn 이 없다'). baseline→lock→manifest→문서 헤더→두 ledger 로 해시를 다시 밀고 claim ledger 75/64 · locator 199 로 전진했다.",
+          "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -109,7 +111,9 @@
           "nginx exact-path C1 4849992 및 C2 재결속 교차검토: FastAPI와 iOS가 exact `/ws`를 쓰고 `location = /ws`가 query를 유지하면서 suffix·trailing slash를 WebSocket 전용 Upgrade·600초 timeout 블록에서 제외하는지, prefix 복귀 변이가 테스트를 red로 만드는지 대조했다. server pin, baseline·manifest·lock·문서·claim ledger 해시와 LOAD-S4 완료/영구 activation 미완 경계를 다시 검사했다. R-DEC-4/R-LOAD-2의 handshake `limit_req` 추가는 확정됐지만 아직 미구현이고 per-IP `limit_conn`은 계측 후 결정이라는 잔여를 보존한다.",
           "semantic-input-binding/v1:0007:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:author=OpenAI Codex:reviewer=Claude Code",
           "R-GATE-3 구현 + C2 번들 교차검토: NO-GO 판정과 함께 세 fail-open 을 지목했다 — degrade helper 가 'delivery deadline 과 같은 술어'라고 적고 rejection 가드를 빠뜨린 점, scheduleTopicRetry 의 조용한 return 이 `.revalidating` 을 집행자 없이 남기는 점, 일반 entitlements 조회가 서버 premium 거부 latch 를 5분 stale ACTIVE 로 푸는 점. 그리고 정본 두 곳(R-HAND-6 · R-CLI-11)이 pinned 코드와 정반대로 남아 있음과 commit message 가 아직 결속되지 않은 epoch 를 결속됐다고 적은 점을 지적했다. 셋은 iOS 1de20ea 로, 둘은 이 번들에서 정정됐다.",
-          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=OpenAI Codex:reviewer=Claude Code",
+          "/ws handshake limit_req C1 구현(`463c880` 에 포함): `location = /ws` 에 상한이 하나도 없던 것을 전용 zone `ws_handshake_limit`(10r/s) + `burst=20 nodelay` + `limit_req_status 429` 로 닫았다. `/api/` 의 `api_limit`(3r/s)을 공유하지 않고, IP별 `limit_conn` 은 캐리어 NAT 오탐 위험 때문에 R-DEC-4 (3) 대로 유보했다. 회귀 테스트는 추가뿐 아니라 **유보 결정도** 부정 단언으로 잠근다(블록 안 `limit_conn` 부재 · `api_limit` 미사용). 격리 네트워크 행동 프로브로 80 동시 handshake → 23 통과 / 57 거절과 `lrs=PASSED/REJECTED` 일치를 확인했다.",
+          "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -163,7 +167,9 @@
           "nginx exact-path C1 4849992 및 C2 재결속 교차검토: FastAPI와 iOS가 exact `/ws`를 쓰고 `location = /ws`가 query를 유지하면서 suffix·trailing slash를 WebSocket 전용 Upgrade·600초 timeout 블록에서 제외하는지, prefix 복귀 변이가 테스트를 red로 만드는지 대조했다. server pin, baseline·manifest·lock·문서·claim ledger 해시와 LOAD-S4 완료/영구 activation 미완 경계를 다시 검사했다. R-DEC-4/R-LOAD-2의 handshake `limit_req` 추가는 확정됐지만 아직 미구현이고 per-IP `limit_conn`은 계측 후 결정이라는 잔여를 보존한다.",
           "semantic-input-binding/v1:0007:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:author=OpenAI Codex:reviewer=Claude Code",
           "R-GATE-3 구현 + C2 번들 교차검토: NO-GO 판정과 함께 세 fail-open 을 지목했다 — degrade helper 가 'delivery deadline 과 같은 술어'라고 적고 rejection 가드를 빠뜨린 점, scheduleTopicRetry 의 조용한 return 이 `.revalidating` 을 집행자 없이 남기는 점, 일반 entitlements 조회가 서버 premium 거부 latch 를 5분 stale ACTIVE 로 푸는 점. 그리고 정본 두 곳(R-HAND-6 · R-CLI-11)이 pinned 코드와 정반대로 남아 있음과 commit message 가 아직 결속되지 않은 epoch 를 결속됐다고 적은 점을 지적했다. 셋은 iOS 1de20ea 로, 둘은 이 번들에서 정정됐다.",
-          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=OpenAI Codex:reviewer=Claude Code",
+          "/ws handshake limit_req C1 구현(`463c880` 에 포함): `location = /ws` 에 상한이 하나도 없던 것을 전용 zone `ws_handshake_limit`(10r/s) + `burst=20 nodelay` + `limit_req_status 429` 로 닫았다. `/api/` 의 `api_limit`(3r/s)을 공유하지 않고, IP별 `limit_conn` 은 캐리어 NAT 오탐 위험 때문에 R-DEC-4 (3) 대로 유보했다. 회귀 테스트는 추가뿐 아니라 **유보 결정도** 부정 단언으로 잠근다(블록 안 `limit_conn` 부재 · `api_limit` 미사용). 격리 네트워크 행동 프로브로 80 동시 handshake → 23 통과 / 57 거절과 `lrs=PASSED/REJECTED` 일치를 확인했다.",
+          "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -217,7 +223,9 @@
           "semantic-input-binding/v1:0007:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:author=Claude Code:reviewer=OpenAI Codex",
           "R-GATE-3 C2 재-baseline: pin 을 iOS 99316a9 / server 4b58110 으로 전진하고 6개 문서의 인용 좌표를 재도출했다. 핵심은 좌표가 아니라 **구현이 요구를 충족하면서 '미충족' 서술이 거짓이 된 단위 8건**을 현재 동작으로 정정한 것이다 — R-CLI-6(다섯 거부 코드 per-topic 배선) · R-CLI-12(45초 legacy revert 기전 제거, purge 후 blank) · R-CLI-13(stop() 이 디스크 캐시까지 purge) · R-CLI-18(알림 시트 fail-closed + 가격 미변경 편집 예외 + 탈출구) · R-CUT-9(런북 3행 이미 해소) · R-CUT-2(freshFxAssets 심볼 삭제). claim ledger 를 72 단위(code_fact 61 / normative 11)로 재동기화하고 backtick locator inventory 를 153 → 183 으로 전진했다. 서버 축은 R-HAND-6 close-on-send-failure 구현과 premium_active cache-free 복구 신호이며, 클라 축은 공용 deadline arbiter · lease hard-expiry · purge · 재검증 jitter · 소진 시 수신증거 기반 degrade 다.",
           "R-GATE-3 C2 재-baseline: pin 을 server 4b58110 / iOS 1de20ea 로 전진하고 6개 문서의 인용 좌표를 재도출했다(문서별 소유 + 독립 감사). 이번 C2 의 실질은 좌표 이동이 아니라 **구현이 요구를 충족하면서 '미충족' 서술이 거짓이 된 단위**의 정정이다 — R-CLI-6(다섯 거부 코드 per-topic 배선) · R-CLI-11(전달 상태 배너·수동 재시도 렌더) · R-CLI-12(45초 legacy revert 기전 제거) · R-CLI-13(stop() 이 디스크 캐시까지 purge) · R-CLI-18(알림 시트 fail-closed) · R-CUT-2(freshFxAssets 삭제) · R-CUT-9(런북 3행 해소) · R-HAND-6(서버 close-on-send-failure 배선). cutover 매트릭스 B5/B8/B9 는 실제 테스트 커버리지로 갈랐고 **B8 은 '절반만'** 이다 — purge 는 잠겼으나 재활성화 복구 테스트는 0건이다. claim ledger 74 단위(code_fact 63) · locator inventory 195 로 전진.",
-          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=Claude Code:reviewer=OpenAI Codex",
+          "위 C1 검토 + C2 재-baseline: 값 선택 근거를 정밀화했다 — handshake 자체는 인증을 돌리지 않으므로(인증은 `authorize_subscribe`) 10r/s 는 auth 부하를 직접 묶는 게 아니라 '연결 1개당 subscribe 최소 1회' **대리 지표**다. 클라 경로도 교차 확인했다: iOS 는 handshake HTTP status 를 읽지 않아 429 가 일반 연결 실패로 떨어지고 bounded backoff(5회) 뒤 가시적 `.failed` + 수동/foreground 복구가 된다 — 조용한 죽은 연결이 아니다. 그리고 **C1 이 세 곳의 산문을 거짓으로 만든 것**을 찾아 정정했다 — baseline E4('둘 다 없음', lock 에 해시로 묶여 연쇄를 일으킨다) · R-LOAD-2 본문('`location = /ws` 에는 둘 다 없다') · FREE_TIER 열린 항목('실측: limit_req·limit_conn 이 없다'). baseline→lock→manifest→문서 헤더→두 ledger 로 해시를 다시 밀고 claim ledger 75/64 · locator 199 로 전진했다.",
+          "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -277,7 +285,9 @@
           "semantic-input-binding/v1:0007:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:author=Claude Code:reviewer=OpenAI Codex",
           "R-GATE-3 C2 재-baseline: pin 을 iOS 99316a9 / server 4b58110 으로 전진하고 6개 문서의 인용 좌표를 재도출했다. 핵심은 좌표가 아니라 **구현이 요구를 충족하면서 '미충족' 서술이 거짓이 된 단위 8건**을 현재 동작으로 정정한 것이다 — R-CLI-6(다섯 거부 코드 per-topic 배선) · R-CLI-12(45초 legacy revert 기전 제거, purge 후 blank) · R-CLI-13(stop() 이 디스크 캐시까지 purge) · R-CLI-18(알림 시트 fail-closed + 가격 미변경 편집 예외 + 탈출구) · R-CUT-9(런북 3행 이미 해소) · R-CUT-2(freshFxAssets 심볼 삭제). claim ledger 를 72 단위(code_fact 61 / normative 11)로 재동기화하고 backtick locator inventory 를 153 → 183 으로 전진했다. 서버 축은 R-HAND-6 close-on-send-failure 구현과 premium_active cache-free 복구 신호이며, 클라 축은 공용 deadline arbiter · lease hard-expiry · purge · 재검증 jitter · 소진 시 수신증거 기반 degrade 다.",
           "R-GATE-3 C2 재-baseline: pin 을 server 4b58110 / iOS 1de20ea 로 전진하고 6개 문서의 인용 좌표를 재도출했다(문서별 소유 + 독립 감사). 이번 C2 의 실질은 좌표 이동이 아니라 **구현이 요구를 충족하면서 '미충족' 서술이 거짓이 된 단위**의 정정이다 — R-CLI-6(다섯 거부 코드 per-topic 배선) · R-CLI-11(전달 상태 배너·수동 재시도 렌더) · R-CLI-12(45초 legacy revert 기전 제거) · R-CLI-13(stop() 이 디스크 캐시까지 purge) · R-CLI-18(알림 시트 fail-closed) · R-CUT-2(freshFxAssets 삭제) · R-CUT-9(런북 3행 해소) · R-HAND-6(서버 close-on-send-failure 배선). cutover 매트릭스 B5/B8/B9 는 실제 테스트 커버리지로 갈랐고 **B8 은 '절반만'** 이다 — purge 는 잠겼으나 재활성화 복구 테스트는 0건이다. claim ledger 74 단위(code_fact 63) · locator inventory 195 로 전진.",
-          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=Claude Code:reviewer=OpenAI Codex",
+          "위 C1 검토 + C2 재-baseline: 값 선택 근거를 정밀화했다 — handshake 자체는 인증을 돌리지 않으므로(인증은 `authorize_subscribe`) 10r/s 는 auth 부하를 직접 묶는 게 아니라 '연결 1개당 subscribe 최소 1회' **대리 지표**다. 클라 경로도 교차 확인했다: iOS 는 handshake HTTP status 를 읽지 않아 429 가 일반 연결 실패로 떨어지고 bounded backoff(5회) 뒤 가시적 `.failed` + 수동/foreground 복구가 된다 — 조용한 죽은 연결이 아니다. 그리고 **C1 이 세 곳의 산문을 거짓으로 만든 것**을 찾아 정정했다 — baseline E4('둘 다 없음', lock 에 해시로 묶여 연쇄를 일으킨다) · R-LOAD-2 본문('`location = /ws` 에는 둘 다 없다') · FREE_TIER 열린 항목('실측: limit_req·limit_conn 이 없다'). baseline→lock→manifest→문서 헤더→두 ledger 로 해시를 다시 밀고 claim ledger 75/64 · locator 199 로 전진했다.",
+          "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -329,7 +339,9 @@
           "nginx exact-path C1 4849992 및 C2 재결속 교차검토: FastAPI와 iOS가 exact `/ws`를 쓰고 `location = /ws`가 query를 유지하면서 suffix·trailing slash를 WebSocket 전용 Upgrade·600초 timeout 블록에서 제외하는지, prefix 복귀 변이가 테스트를 red로 만드는지 대조했다. server pin, baseline·manifest·lock·문서·claim ledger 해시와 LOAD-S4 완료/영구 activation 미완 경계를 다시 검사했다. R-DEC-4/R-LOAD-2의 handshake `limit_req` 추가는 확정됐지만 아직 미구현이고 per-IP `limit_conn`은 계측 후 결정이라는 잔여를 보존한다.",
           "semantic-input-binding/v1:0007:8d5dddc8bb5832e71663131a915c2c54a32e707f859850d3dc9c36c4f2084fe4:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:author=OpenAI Codex:reviewer=Claude Code",
           "R-GATE-3 구현 + C2 번들 교차검토: NO-GO 판정과 함께 세 fail-open 을 지목했다 — degrade helper 가 'delivery deadline 과 같은 술어'라고 적고 rejection 가드를 빠뜨린 점, scheduleTopicRetry 의 조용한 return 이 `.revalidating` 을 집행자 없이 남기는 점, 일반 entitlements 조회가 서버 premium 거부 latch 를 5분 stale ACTIVE 로 푸는 점. 그리고 정본 두 곳(R-HAND-6 · R-CLI-11)이 pinned 코드와 정반대로 남아 있음과 commit message 가 아직 결속되지 않은 epoch 를 결속됐다고 적은 점을 지적했다. 셋은 iOS 1de20ea 로, 둘은 이 번들에서 정정됐다.",
-          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0008:5340af978162539a03ac923f79bd6a626567ea0b7b0093c3d9b821431ff7eccf:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:author=OpenAI Codex:reviewer=Claude Code",
+          "/ws handshake limit_req C1 구현(`463c880` 에 포함): `location = /ws` 에 상한이 하나도 없던 것을 전용 zone `ws_handshake_limit`(10r/s) + `burst=20 nodelay` + `limit_req_status 429` 로 닫았다. `/api/` 의 `api_limit`(3r/s)을 공유하지 않고, IP별 `limit_conn` 은 캐리어 NAT 오탐 위험 때문에 R-DEC-4 (3) 대로 유보했다. 회귀 테스트는 추가뿐 아니라 **유보 결정도** 부정 단언으로 잠근다(블록 안 `limit_conn` 부재 · `api_limit` 미사용). 격리 네트워크 행동 프로브로 80 동시 handshake → 23 통과 / 57 거절과 `lrs=PASSED/REJECTED` 일치를 확인했다.",
+          "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -343,25 +355,25 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "5496af59928c23a2fe03e48a3e318fc780d6fbe682955e0e31b6758f87474510",
-    "baseline_sha256": "23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7",
-    "lock_sha256": "a1fbed1aaf207d83cf28e4a208439c2772fd313e0103a26d01891a43d413b78e",
-    "server_commit": "4b58110c85efc844eba990b60fb36d8a4349f720",
+    "manifest_sha256": "a9e6eb9c43233218871977a0af2cdea1dc243ddcf401f6c379947ee8b181276d",
+    "baseline_sha256": "c838e871bb02abd4657d1fc99fd364f5bfbd3edfba083a5cf4d615a4cf60cc8f",
+    "lock_sha256": "4385955937847e544692c3436e87eb12aea21c77ae169e54c07cb324631bb808",
+    "server_commit": "463c880616b7649e81f8082281eacf8c08c2c113",
     "ios_commit": "1de20ea70a74fe3f6653725591a30596343597ac"
   },
   "documents": {
-    "ADR": "06084161451983a8ffedaf655d3d7ae26be799b3c9dc8d011c76c85d4726954f",
-    "CLIENT": "56af2c4de287a635c1c83caf6d9f4fb4be4890f507e731688b65d583b841179e",
-    "CUT": "31dd9b5d76ea25a3ba82da7ecc670f700b385a334220854e27a9c5fd3128246c",
-    "HAND": "b2c2b9d0896ba33eb5e9af0f3a1588f136600cc08f48d95c4275d498390564f7",
-    "HEALTH": "e0ebe18a0c2597273bc635a9d8f76dbf7c6af5f452498791bd35cfa788c32147",
-    "LOAD": "66a54f30b25bed1b7909b7a9d142a5277681529840b9897c39084108857b2772"
+    "ADR": "63eedefd9138fa2cfab1b8c16db49deb93bf2c02cc96df8235ab528485b08d80",
+    "CLIENT": "152bf3a4f5279d7e8d074fa0280803aebd09af69d936a22c54b4d51a64a532d4",
+    "CUT": "3511f2a4aa239e9f4b9139f11deb2fbcb32ad5a6fce397abbcef662b24e41d52",
+    "HAND": "13b5f4f7ab1e5b3ddf64955465ed93049beef7064f274c685a47003bb45e304c",
+    "HEALTH": "63680b5ab7a3e223ac6c5a720c2f1d1baeca24b9c4d0b4a82be3ad337ff4bbf7",
+    "LOAD": "16bbb054be23b17991d41dc951fc7b9e7eed512dfc6831aeb7d8e502d8cba0bc"
   },
-  "claim_ledger_sha256": "ef51a19500369e90c0a99505138a93bad93de038d9a45b3d50df6dda46af070b",
+  "claim_ledger_sha256": "32bcd8abaefcd9ce97277b4b5585b62550e0e8152bb3b42c3b18494d0d594438",
   "scope": {
     "manifest_output_requirements": 86,
-    "claim_candidates": 74,
-    "code_fact_entries": 63,
+    "claim_candidates": 75,
+    "code_fact_entries": 64,
     "normative_entries": 11,
     "archive_normative_preservation_review": true,
     "citation_support_review": true,
@@ -907,7 +919,8 @@
     "The semantic input binding chain begins at a genesis fingerprint of this journal as it stood when the binding was introduced. Genesis fixes a baseline; it does not assert that every work unit landed before it passed through a review edge. The edge list at genesis names the LOAD-S5 implementation and its re-baseline, but other work that landed between the S1b REST auth lane isolation and genesis is named nowhere in it — among it the account deletion sweep, the snapshot Redis I/O bounds, the snapshot request deadline with worker checkpoints, the deploy verifier and runbook gates, the KRX expiry holiday correction, the PostgreSQL service and workload profile work, the M0a maintenance installer, and the mutation harness isolation. That enumeration is not exhaustive and no total is asserted, because this journal has no canonical rule for grouping commits into work units. Residual limit one already places whatever is unnamed outside what this pass covers, and the binding constrains transitions after genesis rather than the ones that preceded it. The binding also fixes bytes rather than judgement: an epoch is a reciprocal record, not evidence that a person re-read the work. Each epoch after genesis must carry at least one prose work unit in some direction, so a transition cannot pass as a fingerprint receipt alone. Requiring one in both directions was rejected: a work unit belongs to a single author-reviewer edge, and forcing the opposite direction would invite an invented entry.",
     "R-CLI-24 is implemented at pinned iOS commit 45a8a12, and the 45-second LOAD-S4 multi-client rehearsal completed using the server cooldown and client jitter candidates. This pass does not establish a count hard cap for either admission waiters or same-key followers, and it does not perform permanent activation. Two non-blocking iOS test gaps also remain: abnormal reconnectDelayNanoseconds inputs and a superseded 30-second stability task.",
     "Server C1 4849992 narrows the WebSocket proxy to exact `location = /ws`, so suffix and trailing-slash paths do not inherit Upgrade headers or 600-second timeouts. It adds no `limit_req` or `limit_conn`: R-DEC-4 and R-LOAD-2 still require a handshake `limit_req`, while the per-IP connection cap remains measurement-dependent. This epoch does not choose an uncalibrated rate or claim that the confirmed ingress requirement is complete.",
-    "This C2 pass was authored by Claude Code and cross-reviewed by OpenAI Codex, which returned NO-GO. Three of its findings landed as iOS 1de20ea (degrade predicate parity, retry-scheduling fail-open, ordinary-refresh releasing the server premium latch) and two stale-prose findings were corrected here: R-HAND-6 still asserted the server does not close on publish send failure, and R-CLI-11 still asserted no banner renders in MODE 2 — both were the opposite of the pinned code. Claude Code's own adversarial subagent rounds (49 findings with 12 surviving; then 20 with 4 surviving) preceded that review and are not a substitute for it: they missed both stale-prose items, and the locator round had flagged R-HAND-6 without it reaching the repair list."
+    "This C2 pass was authored by Claude Code and cross-reviewed by OpenAI Codex, which returned NO-GO. Three of its findings landed as iOS 1de20ea (degrade predicate parity, retry-scheduling fail-open, ordinary-refresh releasing the server premium latch) and two stale-prose findings were corrected here: R-HAND-6 still asserted the server does not close on publish send failure, and R-CLI-11 still asserted no banner renders in MODE 2 — both were the opposite of the pinned code. Claude Code's own adversarial subagent rounds (49 findings with 12 surviving; then 20 with 4 surviving) preceded that review and are not a substitute for it: they missed both stale-prose items, and the locator round had flagged R-HAND-6 without it reaching the repair list.",
+    "The /ws handshake limit was implemented by OpenAI Codex and re-baselined by Claude Code. Codex's own C2 plan named pin, ledger and hash re-binding but did not enumerate the three prose assertions its C1 falsified — baseline E4, R-LOAD-2's body, and the FREE_TIER open item — which is the same failure mode Codex had caught in the preceding R-GATE-3 pass, now in the opposite direction. The rate itself (10r/s, burst 20) is a provisional capacity guard, not a measurement: there is no v2 subscriber traffic to derive it from, and handshake rate only proxies auth load because authorization happens on subscribe, not on the upgrade. Re-evaluate from phased lrs= observation. IP-level limit_conn stays deferred under R-DEC-4 (3)."
   ],
   "verdict": "pass"
 }

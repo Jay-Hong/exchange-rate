@@ -146,9 +146,12 @@
 - **E3 [결정]** `app/auth_executor.py:15` docstring — *"즉시거절 semaphore 는 별도로 **기각**됐다:
   배포 재연결은 평균 유입이 낮아도 **동시 도착** 이라 1초면 빠질 큐를 대량 거절한다."*
   같은 docstring: *"이것은 큐 상한이 아니다"*(`SimpleQueue` 무제한), *"자원 상한 완료 라고 쓰지 말 것"*.
-- **E4 [코드·부정]** `nginx/conf.d/default.conf` `location = /ws` 는 **80~99행** 블록이고
-  그 안에 `limit_req`·`limit_conn` **없음**(블록 전체를 훑어 확인). `location /api/` 에는 둘 다 있고
-  zone 정의는 파일 상단에 존재.
+- **E4 [코드]** `nginx/conf.d/default.conf` `location = /ws` 는 **86~110행** 블록이고 그 안에
+  **전용 zone `ws_handshake_limit`(10r/s) 기반 `limit_req burst=20 nodelay` + `limit_req_status 429`
+  가 있다**(89~90행). ⚠️ **`limit_conn` 은 여전히 없다** — R-DEC-4 (3) 이 캐리어 NAT 위험 때문에
+  계측 후로 유보한 것이고, 부재가 곧 미이행은 아니다. `location /api/` 는 별개 zone `api_limit`
+  (3r/s) + `limit_conn 10` 이다(116~117행). zone 정의는 파일 상단 19·25·26행.
+  (구 baseline 은 "둘 다 없음"이었다 — C1 `463c880` 으로 `limit_req` 축만 해소됐다.)
 
 ## F. 클라이언트 현재 동작
 

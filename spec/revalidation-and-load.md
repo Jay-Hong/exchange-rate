@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4b58110c85efc844eba990b60fb36d8a4349f720`
+- server 기준 commit: `463c880616b7649e81f8082281eacf8c08c2c113`
 - iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5496af59928c23a2fe03e48a3e318fc780d6fbe682955e0e31b6758f87474510`
-- baseline SHA: `23530fdfc8829f00b736496ad998bc8660e2da6209fc241ee7e090d81bb809f7`
+- manifest SHA: `a9e6eb9c43233218871977a0af2cdea1dc243ddcf401f6c379947ee8b181276d`
+- baseline SHA: `c838e871bb02abd4657d1fc99fd364f5bfbd3edfba083a5cf4d615a4cf60cc8f`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -166,14 +166,23 @@ ADR-041 의 파생 숫자 숨김 정책 제안은 **조건부**로만 수용된�
 **nginx — WS handshake `limit_req` 는 추가, IP별 `limit_conn` 은 계측 후.**
 이 항목은 **확정**이다(ADR-041 [R-DEC-4](../DECISIONS.md#r-dec-4)).
 
-실측: zone 은 이미 정의돼 있고(`limit_req_zone` / `limit_conn_zone` — `nginx/conf.d/default.conf:19-20`),
-**`location /api/` 에만** `limit_req` + `limit_conn` 이 걸려 있다(`nginx/conf.d/default.conf:105-106`).
-**`location = /ws` 에는 둘 다 없다**(`nginx/conf.d/default.conf:80-99`).
+✅ **`limit_req` 축은 이행됐다**(C1 `463c880`). `location = /ws` 가 **전용 zone**
+`ws_handshake_limit`(10r/s, `nginx/conf.d/default.conf:25`)로 `limit_req burst=20 nodelay` +
+`limit_req_status 429` 를 건다(`nginx/conf.d/default.conf:89-90`). `/api/` 의 `api_limit`(3r/s)
+을 공유하지 않는다(`nginx/conf.d/default.conf:19` · `nginx/conf.d/default.conf:116-117`).
+⚠️ **`limit_conn` 은 여전히 `/ws` 에 없다** — 아래 NAT 사유로 계측 후 결정이 유지된다.
 
 → handshake 폭주는 `limit_req` 로 막는다. 다만 **IP별 `limit_conn` 은 모바일 캐리어 NAT 위험이 크다**
 (한 IP 뒤에 다수 사용자) → **계측 후 결정**. 이 항목은 "신설 vs 위험 수용" 이분법이 아니었다.
 
-근거(baseline): **E4 [코드·부정]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **80~99행** 블록이고
-그 안에 `limit_req`·`limit_conn` 이 **없다**(블록 전체를 훑어 확인). `location /api/` 에는 둘 다 있고
-zone 정의는 파일 상단에 존재한다.
+근거(baseline): **E4 [코드]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **86~110행** 블록이고
+그 안에 전용 zone 기반 `limit_req` 가 **있고**(89~90행) `limit_conn` 은 **없다**. `location /api/` 는
+별개 zone 으로 둘 다 있다(116~117행). zone 정의는 파일 상단 19·25·26행.
+
+⚠️ 10r/s 는 **사용자 트래픽 실측이 아니다** — v2 구독자 실트래픽이 없다. W=4 identity canary
+처리량(~13/s) 아래의 capacity guard 이고, handshake 자체는 인증을 돌리지 않으므로 —
+인증은 subscribe 처리에서 `authorize_subscribe` 로 일어난다(`app/topic_dispatcher.py:715`) —
+"연결 1개당 subscribe 최소 1회"라는 **대리 지표**로 묶은 값이다. zone 자체는
+`nginx/conf.d/default.conf:25` 이고 적용은 `nginx/conf.d/default.conf:89` 다.
+초기 phased 의 `lrs=` 관측으로 재평가한다.
 <!-- /rid: R-LOAD-2 -->

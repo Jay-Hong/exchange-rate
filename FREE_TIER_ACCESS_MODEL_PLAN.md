@@ -730,9 +730,11 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   land + `W=4` 실측 확정으로 닫혔다). ⚠️ 당시(2026-08-03) 서술은 "이 **2건**"이었다 [superseded].
   기능 선행조건(§3.1 표)이 4/4 충족된 뒤에도 **여전히 열려 있다**.
   GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
-  "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. 실측: `/ws` location 블록에 `limit_req`·`limit_conn` 이
-  **없다**(`default.conf:78-80` 주석도 "Rate Limit 없음"). `/api/` 만 3r/s + conn 10 이 걸려 있다
-  (`:105-106`, zone key 는 `$binary_remote_addr`). **호스트 config 변경이라 별도 승인이 필요하다.**
+  "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. ✅ **`limit_req` 축은 C1 `463c880` 으로 닫혔다** — `/ws` 가 전용 zone
+  `ws_handshake_limit`(10r/s, `default.conf:25`)로 `burst=20 nodelay` + `429` 를 건다
+  (`:89-90`). `/api/` 는 별개 zone 3r/s + conn 10 그대로다(`:116-117`, zone key 는
+  `$binary_remote_addr`). ⚠️ **`limit_conn` 은 유보 유지**(R-DEC-4 (3), 캐리어 NAT 오탐 위험) —
+  이 항목은 **부분 해소**이지 완결이 아니다. **배포는 호스트 config 변경이라 별도 승인이 필요하다.**
   ⛔ **"토큰 flood 방어"로 일반화하지 말 것**(2026-08-03 정정). 실제 보호 범위는 좁다:
     · `limit_req` 는 **upgrade handshake** 만 제한한다 — WebSocket 연결은 HTTP 요청 **하나**다.
     · `limit_conn` 은 **동시 연결 수**만 제한하고, key 가 IP 라 **모바일 carrier NAT 사용자를 함께
