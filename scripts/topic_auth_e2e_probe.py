@@ -25,7 +25,7 @@ import urllib.request
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Awaitable, Callable, Optional, Sequence
 
 
 HTTP_BASE_URL = "http://localhost:8000"
@@ -54,7 +54,9 @@ class ProbeTimings:
     # valid evidence when present but cannot be a pass requirement.
     anonymous_silence_seconds: float = 15.0
     denied_silence_seconds: float = 1.0
-
+    # A cache miss for an authoritatively inactive user intentionally enters
+    # the REST PENDING grace period before converging to 403.
+    nonpremium_pending_budget_seconds: float = 20.0
 
 def read_token_pair(stream: Any) -> tuple[str, str]:
     """Read exactly ``premium\nnonpremium`` without echoing either value."""
@@ -140,6 +142,55 @@ def validate_legacy_rest(result: HttpResult) -> None:
         raise ProbeFailure("legacy /api/rates에 객체가 아닌 행이 있다")
     if not isinstance(metadata, dict) or metadata.get("total_count") != len(rates):
         raise ProbeFailure("legacy /api/rates metadata가 rates와 일치하지 않는다")
+
+
+def _premium_pending_retry_seconds(result: HttpResult) -> int:
+    """Return a bounded Retry-After only for the premium PENDING response."""
+    if result.status != 503:
+        raise ProbeFailure(
+            f"nonpremium DXY REST가 403이 아니다(status={result.status})"
+        )
+    raw = result.headers.get("retry-after")
+    if not isinstance(raw, str) or not raw.isascii() or not raw.isdigit():
+        raise ProbeFailure("premium PENDING 503의 Retry-After가 유효한 정수가 아니다")
+    delay = int(raw)
+    if delay <= 0:
+        raise ProbeFailure("premium PENDING 503의 Retry-After가 양수가 아니다")
+    return delay
+
+
+async def await_nonpremium_rest_denial(
+    request_snapshot: Callable[[str, Optional[str]], HttpResult],
+    token: str,
+    *,
+    budget_seconds: float,
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    """Wait through the deliberate first-seen PENDING grace, then require 403.
+
+    Snapshot/DB 503 responses intentionally carry no Retry-After, so they are
+    not folded into this retry path.
+    """
+    if not math.isfinite(budget_seconds) or budget_seconds <= 0:
+        raise ProbeFailure("nonpremium REST PENDING 예산이 유효한 양수가 아니다")
+    deadline = clock() + budget_seconds
+    pending_responses = 0
+    while True:
+        if pending_responses and clock() >= deadline:
+            raise ProbeFailure("nonpremium DXY REST가 PENDING 예산 안에 403으로 수렴하지 않았다")
+        result = await asyncio.to_thread(request_snapshot, DXY_TOPIC, token)
+        if result.status == 403:
+            if clock() > deadline:
+                raise ProbeFailure("nonpremium DXY REST가 PENDING 예산 안에 403으로 수렴하지 않았다")
+            return pending_responses
+
+        delay = _premium_pending_retry_seconds(result)
+        remaining = deadline - clock()
+        if delay >= remaining:
+            raise ProbeFailure("nonpremium DXY REST가 PENDING 예산 안에 403으로 수렴하지 않았다")
+        pending_responses += 1
+        await sleeper(delay)
 
 
 def admin_tether_subscriber_count() -> int:
@@ -481,6 +532,8 @@ async def run_probe(
     request_legacy: Callable[[], HttpResult] = http_legacy_rates,
     admin_count: Callable[[], int] = admin_tether_subscriber_count,
     timings: ProbeTimings = ProbeTimings(),
+    sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     legacy_rest = await asyncio.to_thread(request_legacy)
     validate_legacy_rest(legacy_rest)
@@ -491,13 +544,13 @@ async def run_probe(
 
     anonymous_ws = await probe_anonymous_ws(connect, admin_count, timings)
 
-    nonpremium_rest = await asyncio.to_thread(
-        request_snapshot, DXY_TOPIC, nonpremium_token
+    nonpremium_pending_responses = await await_nonpremium_rest_denial(
+        request_snapshot,
+        nonpremium_token,
+        budget_seconds=timings.nonpremium_pending_budget_seconds,
+        sleeper=sleeper,
+        clock=clock,
     )
-    if nonpremium_rest.status != 403:
-        raise ProbeFailure(
-            f"nonpremium DXY REST가 403이 아니다(status={nonpremium_rest.status})"
-        )
     nonpremium_ws = await probe_nonpremium_ws(connect, nonpremium_token, timings)
 
     premium_rest = await asyncio.to_thread(request_snapshot, DXY_TOPIC, premium_token)
@@ -514,6 +567,7 @@ async def run_probe(
             "legacy_anonymous": 200,
             "anonymous": 401,
             "nonpremium": 403,
+            "nonpremium_pending_responses": nonpremium_pending_responses,
             "premium": 200,
         },
         "anonymous_ws": anonymous_ws,

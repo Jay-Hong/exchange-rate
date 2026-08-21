@@ -239,16 +239,40 @@ class TestFunctionalProbe(unittest.IsolatedAsyncioTestCase):
         ]
         connect = ConnectSequence(sockets)
         counts = iter((0, 0))
+        now = [0.0]
+        sleeps = []
+        nonpremium_responses = iter((
+            probe.HttpResult(
+                503,
+                {"detail": "pending"},
+                {"retry-after": "5"},
+            ),
+            probe.HttpResult(
+                503,
+                {"detail": "pending"},
+                {"retry-after": "5"},
+            ),
+            probe.HttpResult(
+                503,
+                {"detail": "pending"},
+                {"retry-after": "5"},
+            ),
+            probe.HttpResult(403, {"detail": "premium required"}, {}),
+        ))
 
         def request_snapshot(topic, token):
             self.assertEqual(topic, probe.DXY_TOPIC)
             if token is None:
                 return probe.HttpResult(401, {"detail": "unauthorized"}, {})
             if token == "nonpremium-secret":
-                return probe.HttpResult(403, {"detail": "premium required"}, {})
+                return next(nonpremium_responses)
             if token == "premium-secret":
                 return probe.HttpResult(200, DXY_SNAPSHOT, {})
             raise AssertionError("unexpected token")
+
+        async def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
 
         result = await probe.run_probe(
             "premium-secret",
@@ -262,14 +286,92 @@ class TestFunctionalProbe(unittest.IsolatedAsyncioTestCase):
             ),
             admin_count=lambda: next(counts),
             timings=self.timings,
+            sleeper=sleep,
+            clock=lambda: now[0],
         )
         self.assertTrue(result["ok"])
         self.assertEqual(result["rest"]["legacy_anonymous"], 200)
+        self.assertEqual(result["rest"]["nonpremium_pending_responses"], 3)
+        self.assertEqual(sleeps, [5, 5, 5])
         self.assertEqual(result["anonymous_ws"]["legacy_updates_seen"], 0)
         rendered = json.dumps(result)
         self.assertNotIn("premium-secret", rendered)
         self.assertNotIn("nonpremium-secret", rendered)
         self.assertEqual(connect.sockets, [])
+
+    async def test_nonpremium_rest_pending_converges_to_403(self):
+        now = [0.0]
+        sleeps = []
+        responses = iter((
+            probe.HttpResult(
+                503,
+                {"detail": "pending"},
+                {"retry-after": "5"},
+            ),
+            probe.HttpResult(
+                503,
+                {"detail": "pending"},
+                {"retry-after": "5"},
+            ),
+            probe.HttpResult(
+                503,
+                {"detail": "pending"},
+                {"retry-after": "5"},
+            ),
+            probe.HttpResult(403, {"detail": "Premium subscription required"}, {}),
+        ))
+
+        async def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+
+        pending = await probe.await_nonpremium_rest_denial(
+            lambda topic, token: next(responses),
+            "nonpremium-secret",
+            budget_seconds=20,
+            sleeper=sleep,
+            clock=lambda: now[0],
+        )
+
+        self.assertEqual(pending, 3)
+        self.assertEqual(sleeps, [5, 5, 5])
+
+    async def test_nonpremium_rest_does_not_retry_503_without_pending_header(self):
+        sleeps = []
+        with self.assertRaisesRegex(probe.ProbeFailure, "Retry-After"):
+            await probe.await_nonpremium_rest_denial(
+                lambda topic, token: probe.HttpResult(
+                    503,
+                    {"error": "temporarily_unavailable"},
+                    {},
+                ),
+                "nonpremium-secret",
+                budget_seconds=20,
+                sleeper=lambda delay: sleeps.append(delay),
+            )
+        self.assertEqual(sleeps, [])
+
+    async def test_nonpremium_rest_pending_must_converge_within_budget(self):
+        now = [0.0]
+        sleeps = []
+
+        async def sleep(delay):
+            sleeps.append(delay)
+            now[0] += delay
+
+        with self.assertRaisesRegex(probe.ProbeFailure, "예산 안에 403"):
+            await probe.await_nonpremium_rest_denial(
+                lambda topic, token: probe.HttpResult(
+                    503,
+                    {"detail": "pending"},
+                    {"retry-after": "5"},
+                ),
+                "nonpremium-secret",
+                budget_seconds=9,
+                sleeper=sleep,
+                clock=lambda: now[0],
+            )
+        self.assertEqual(sleeps, [5])
 
     async def test_anonymous_snapshot_leak_is_rejected(self):
         counts = iter((0, 0))
