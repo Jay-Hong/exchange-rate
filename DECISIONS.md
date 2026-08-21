@@ -6528,10 +6528,10 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `bbf29cb0b74a9fd17641fbbd05cbd44eca7a2ae5`
-- iOS 기준 commit: `db545354be83e707d4cf2f403ed94108d83c73a9`
+- server 기준 commit: `7f0b6f24c09741a7584fd3eca2ef32f35e9def4d`
+- iOS 기준 commit: `1c806535f77dd45f1611b28ef78f1ffe72dd0352`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `0ab0dfebf7c69b16b7665c64e3fed68aebc3bc130672d8905887d2ea3f609f21`
+- manifest SHA: `7532daa70a1dc501504e1db409776ee4c18f4a5ee7fb3de8569f8025622cbc01`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -6586,7 +6586,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 > `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다.
 > iOS architecture test가 legacy API/callback/파일의 복원을 거부하고
 > (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을
-> 소유한다 (`app/dxy_topic_publisher.py:20-26` · `app/dxy_topic_publisher.py:112-145`).
+> 소유한다 (`app/dxy_topic_publisher.py:20-27` · `app/dxy_topic_publisher.py:115-148`).
 > 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다.
 
 **불변식의 근거는 두 겹이다 — 둘 다 적어 둔다.** 하나만 남기면 다른 하나가 잊힌다.
@@ -6655,7 +6655,7 @@ fallback 빌드가 아니며 출시할 수 없다.
 ### R-INV-3 — 격차 (b) 해소: DXY 는 `dxy:spot` topic 으로 온다
 
 당시 격차는 `8755510`(서버) + `0f2a3f8`(iOS)에서 해소됐다. 서버는 `dxy:spot` publisher와
-initial snapshot을 제공하고(`app/dxy_topic_publisher.py:20-129` ·
+initial snapshot을 제공하고(`app/dxy_topic_publisher.py:20-132` ·
 `app/topic_initial_snapshot.py:972-995`), iOS는 인증 REST bootstrap과 WS topic frame을 같은
 `DxyLiveTick`으로 merge한다(`ios/FXi/Services/TopicSnapshotService.swift:53-58` ·
 `ios/FXi/ViewModels/ExchangeRateViewModel.swift:980-1010`). 신규 앱의 legacy `indices` 소비는 제거됐다.

@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "0ab0dfebf7c69b16b7665c64e3fed68aebc3bc130672d8905887d2ea3f609f21",
+    "manifest_sha256": "7532daa70a1dc501504e1db409776ee4c18f4a5ee7fb3de8569f8025622cbc01",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "7c898723ea31d216310e2c09eb4ff357f6847bf687a3470f5a244fbd33454386",
-    "server_commit": "bbf29cb0b74a9fd17641fbbd05cbd44eca7a2ae5",
-    "ios_commit": "db545354be83e707d4cf2f403ed94108d83c73a9"
+    "lock_sha256": "50fdc474d09bc99573f9b0463eacfc77b848923939f943bf551f80efa768041a",
+    "server_commit": "7f0b6f24c09741a7584fd3eca2ef32f35e9def4d",
+    "ios_commit": "1c806535f77dd45f1611b28ef78f1ffe72dd0352"
   },
   "documents": {
-    "ADR": "a0daa1bf7b46a74f29c3bb3cc164d36f2ddacfaad61d8783a59e6668afb2a994",
-    "CLIENT": "05a8365b4ee377b23be3587e05a51c21a4e22d32947e30c1cebb6e52cf3a090f",
-    "CUT": "ddb70a4b77de14018755b6fc107bf52cda918be8dd999b5cd85f1683ffee9486",
-    "HAND": "80e5b10e40583e1bbcfa2dab4b2a9c51be2a82076859f333b454f44f6ae80b7b",
-    "HEALTH": "688d9a35d4d21b3f750449902d409da6426773cdbc9bd1eed246aa7e12e83725",
-    "LOAD": "e47369cdfcfea688d76356962a46c77c08f8a6b0f9a9b57495a4bf7db26886f6"
+    "ADR": "4436f8085d843c3ee47c8c3e3fb5fa992b12b32d59c291b9470570d3e6b551a7",
+    "CLIENT": "a2ab86cbdb9e29a70c86eba117fa24e5a55a4d7e45f1ecc17ad346b7566e9541",
+    "CUT": "93e1a0ef465f782b1f54c5fd7b66022a9e4b43e112422d4dd91c5882e0cc2467",
+    "HAND": "4e83d540695450f6f23d8f5fd67a4b723b37699ccf4a37afd23034051bd04cb7",
+    "HEALTH": "64c6e8e56acb04fcfcc4caefcfd5884153c4544cc1e52aca6f1b7cf019a6e738",
+    "LOAD": "a6cfb519775b81970b56ca8b11d14c6c6c679de4e0ce63805589e39b93b05169"
   },
   "entries": [
     {
@@ -76,12 +76,12 @@
       "classification": "code_fact",
       "detail": "구현 commit 이름만으로 닫지 않는다. iOS architecture test가 legacy API/callback/파일의 복원을 거부하고, 서버 DXY publisher가 dxy:spot payload와 live 발행을 소유한다는 직접 근거로 코드 cutover 완료와 운영 게이트 미완료를 구분했다.",
       "provenance": [
-        "file:app/dxy_topic_publisher.py:112-145",
-        "file:app/dxy_topic_publisher.py:20-26",
+        "file:app/dxy_topic_publisher.py:115-148",
+        "file:app/dxy_topic_publisher.py:20-27",
         "file:ios/FXiTests/TopicMessageTests.swift:386-428"
       ],
-      "unit_sha256": "ae26794195e1c26260c26f7cc4ea22ffe1fdf475b2f7716efbae7bd802b41427",
-      "unit_text": "> ✅ **코드 불변식은 충족됐다.** 서버 `8755510`과 iOS `0f2a3f8`이 신규 앱의 legacy > REST/WS/cache/graph 소비를 제거하고 `dxy:spot`까지 topic 경로로 옮겼다. 다만 운영 > `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다. > iOS architecture test가 legacy API/callback/파일의 복원을 거부하고 > (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을 > 소유한다 (`app/dxy_topic_publisher.py:20-26` · `app/dxy_topic_publisher.py:112-145`). > 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다."
+      "unit_sha256": "bb866f6fd410d0b936ef4301c38a13d23031482c9e9da842ddd3195daeb0ff5e",
+      "unit_text": "> ✅ **코드 불변식은 충족됐다.** 서버 `8755510`과 iOS `0f2a3f8`이 신규 앱의 legacy > REST/WS/cache/graph 소비를 제거하고 `dxy:spot`까지 topic 경로로 옮겼다. 다만 운영 > `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다. > iOS architecture test가 legacy API/callback/파일의 복원을 거부하고 > (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을 > 소유한다 (`app/dxy_topic_publisher.py:20-27` · `app/dxy_topic_publisher.py:115-148`). > 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다."
     },
     {
       "destination": "ADR",
