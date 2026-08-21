@@ -26,15 +26,19 @@ NGINX_DEFAULT = REPO_ROOT / "nginx" / "conf.d" / "default.conf"
 
 
 class TestNginxWebSocketLocation(unittest.TestCase):
+    @staticmethod
+    def _websocket_block(text: str) -> str:
+        start = text.index("    location = /ws {")
+        end = text.index("\n    }", start)
+        return text[start:end]
+
     def test_websocket_proxy_is_bound_to_the_exact_ws_path(self):
         """Scanner suffixes must not inherit the long-lived WebSocket proxy settings."""
         text = NGINX_DEFAULT.read_text()
         self.assertEqual(len(re.findall(r"^\s*location\s+=\s+/ws\s*\{", text, re.M)), 1)
         self.assertNotRegex(text, re.compile(r"^\s*location\s+/ws\s*\{", re.M))
 
-        start = text.index("    location = /ws {")
-        end = text.index("\n    }", start)
-        block = text[start:end]
+        block = self._websocket_block(text)
         for directive in (
             "proxy_set_header Upgrade $http_upgrade;",
             'proxy_set_header Connection "upgrade";',
@@ -42,6 +46,31 @@ class TestNginxWebSocketLocation(unittest.TestCase):
             "proxy_buffering off;",
         ):
             self.assertIn(directive, block)
+
+    def test_websocket_handshake_has_a_dedicated_provisional_rate_limit(self):
+        """Bound Upgrade floods without copying API traffic or imposing a NAT-hostile conn cap."""
+        text = NGINX_DEFAULT.read_text()
+        self.assertEqual(
+            len(re.findall(
+                r"^limit_req_zone\s+\$binary_remote_addr\s+"
+                r"zone=ws_handshake_limit:10m\s+rate=10r/s;$",
+                text,
+                re.M,
+            )),
+            1,
+        )
+
+        block = self._websocket_block(text)
+        self.assertRegex(
+            block,
+            re.compile(
+                r"^\s*limit_req\s+zone=ws_handshake_limit\s+burst=20\s+nodelay;$",
+                re.M,
+            ),
+        )
+        self.assertRegex(block, re.compile(r"^\s*limit_req_status\s+429;$", re.M))
+        self.assertNotRegex(block, re.compile(r"^\s*limit_conn\s+", re.M))
+        self.assertNotIn("zone=api_limit", block)
 
 
 class TestNginxLogrotateConfig(unittest.TestCase):
