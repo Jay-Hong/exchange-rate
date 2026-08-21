@@ -539,7 +539,8 @@ def main() -> int:
             # ⛔ repo_key 만 기록하면 **경로 0개·pin 위조** 퇴행이 통과한다(실측 지적).
             "import json as _j\n"
             "def _rec(repo_key, paths, pinned):\n"
-            "    calls.append({'k': repo_key, 'n': len(paths), 'pin': pinned})\n"
+            "    calls.append({'k': repo_key, 'n': len(paths), 'pin': pinned,\n"
+            "                  'canonical': 'app/__canonical_only_probe__.py' in paths})\n"
             "def ok(repo_key, paths, pinned):\n"
             "    _rec(repo_key, paths, pinned); return []\n"
             "def bad(repo_key, paths, pinned):\n"
@@ -547,6 +548,7 @@ def main() -> int:
             "mode = sys.argv[1]; mf = pathlib.Path(sys.argv[2])\n"
             "if mode == 'nocited':\n"
             "    M.cited_paths = lambda *a, **k: {'server': [], 'ios': []}\n"
+            "    M.canonical_cited_paths = lambda *a, **k: {'server': [], 'ios': []}\n"
             # ⛔ realwire: provenance_fn 을 **주입하지 않고** 실제 default_provenance 가 불리는지 본다.
             #    이 배선이 no-op 람다로 바뀌면 근거 대조가 통째로 의례가 된다.
             # ⛔ 개수 하한('0개 금지')만 있으면 11개를 1개로 줄여도 통과한다(실측) — 넓은 그물과 대조
@@ -563,6 +565,9 @@ def main() -> int:
             "if mode == 'narrowed':\n"
             "    _real = M.cited_paths()\n"
             "    M.cited_paths = lambda *a, **k: {k2: v[:1] for k2, v in _real.items()}\n"
+            "if mode == 'canonicalwire':\n"
+            "    M.canonical_cited_paths = lambda *a, **k: {\n"
+            "        'server': ['app/__canonical_only_probe__.py'], 'ios': []}\n"
             "if mode == 'realwire':\n"
             "    M.cited_paths = lambda *a, **k: {'server': ['app/__NO_SUCH__.py'],\n"
             "                                     'ios': ['FXi/__NO_SUCH__.swift']}\n"
@@ -585,6 +590,7 @@ def main() -> int:
         rcH_n, outH_n, errH_n = harness_run("nocited")
         rcH_w, outH_w, errH_w = harness_run("realwire")
         rcH_nr, outH_nr, errH_nr = harness_run("narrowed")
+        rcH_cw, outH_cw, errH_cw = harness_run("canonicalwire")
         rcH_u, outH_u, errH_u = harness_run("unknownext")
         rcH_bn, outH_bn, errH_bn = harness_run("broadnarrowed")
         rcH_fmt, outH_fmt, errH_fmt = harness_run("badformat")
@@ -607,6 +613,14 @@ def main() -> int:
                         ",".join(f"{c['k']}={c['n']}" for c in detail) or "⚠️호출 기록 없음"))
         results.append(("preflight — 넘긴 pin 이 **lock 의 pinned_commit** 과 일치", pin_ok,
                         "일치" if pin_ok else "⚠️pin 불일치/누락"))
+        canonical_detail = (json.loads(outH_cw.split("DETAIL=")[1].splitlines()[0])
+                            if "DETAIL=" in outH_cw else [])
+        canonical_wired = (rcH_cw == 0 and not errH_cw.strip()
+                           and any(c["k"] == "server" and c["canonical"]
+                                   for c in canonical_detail))
+        results.append(("preflight — canonical RID 전용 경로를 provenance 합집합에 전달",
+                        canonical_wired,
+                        f"rc={rcH_cw} canonical={'O' if canonical_wired else 'X'}"))
         results.append(("preflight — 주입 없으면 **실제** default_provenance 가 불린다(배선)",
                         rcH_w == 1 and "E_PATHMISSING" in outH_w and not errH_w.strip(),
                         f"rc={rcH_w}" + ("" if "E_PATHMISSING" in outH_w else " ⚠️no-op 가능")))
@@ -710,7 +724,7 @@ def main() -> int:
         results.append(("preflight — 도출이 **줄어들면** E_CITEMISS(넓은 그물 교차검증)",
                         rcH_nr == 1 and "E_CITEMISS" in outH_nr and not errH_nr.strip(),
                         f"rc={rcH_nr}" + ("" if "E_CITEMISS" in outH_nr else " ⚠️축소가 통과")))
-        results.append(("preflight — baseline 도출이 0개면 E_NOCITED(정규식 퇴행 방어)",
+        results.append(("preflight — baseline/canonical 도출이 모두 0개면 E_NOCITED(정규식 퇴행 방어)",
                         rcH_n == 1 and "E_NOCITED" in outH_n and not errH_n.strip(), f"rc={rcH_n}"))
         results.append(("mode — provenance 실패가 rc 로 전파",
                         rcH_f == 1 and "E_PATHMISSING" in outH_f and not errH_f.strip(),
@@ -1109,6 +1123,13 @@ def make_sandbox(name: str, *, with_suite: bool = False, lock_body: str | None =
     shutil.copy(VALIDATOR, sand / "scripts")
     shutil.copy(REPO / "TOPIC_ONLY_DELIVERY_CONTRACT.archive.md", sand)
     shutil.copy(REPO / "spec" / "topic-only-baseline-facts.md", sand / "spec")
+    # provenance 입력이 baseline에서 canonical RID 문서까지 넓어졌으므로 격리 사본도 같은
+    # 입력 표면을 가져야 한다. 빠지면 변이를 넣기 전 대조군부터 FileNotFoundError로 빨강이다.
+    for document in MOD.CANONICAL_CITATION_DOCUMENTS:
+        relative = document.relative_to(REPO)
+        target = sand / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(document, target)
     (sand / "spec" / "topic-only.lock.json").write_text(
         lock_body if lock_body is not None else (REPO / "spec" / "topic-only.lock.json").read_text())
     if with_suite:

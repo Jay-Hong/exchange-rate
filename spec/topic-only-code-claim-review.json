@@ -2,26 +2,26 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c",
-    "baseline_sha256": "6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2",
-    "lock_sha256": "e4b3b15ad781ae341854a28c259b9e6ad0e4f5abab1c4087d24c29886efef863",
-    "server_commit": "5429d0f78e44aa467d9acc4487585be5fd31cad9",
-    "ios_commit": "cfe06f6028ec030f6d5913a54eb87262488d6f83"
+    "manifest_sha256": "9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee",
+    "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
+    "lock_sha256": "6aa62f0b2d21967e96559ba71a8263a0c4fd4acf51422af45296148d7a163dd0",
+    "server_commit": "875551082ccd3ac51c9de4285430660948b32773",
+    "ios_commit": "c90470e0f8887387cd49c528e67edfbe635de217"
   },
   "documents": {
-    "ADR": "dbcede2e25f4a7cbe8d7d574ad69c81391b64b159122c9bc5c4712a61745f68e",
-    "CLIENT": "f581a373b4a5baf2f090fe84fbe124fa1a234851188ed97872b42c507b653ec7",
-    "CUT": "4037da821cd507094b7c28e0ae86eb748d953660c9d9d51b8cf7d6af03e95635",
-    "HAND": "e5e59ca890478f1bedc80f2e917cce68faabccdf8f3a770e7ead9e36c4a3e306",
-    "HEALTH": "9d03ab6569071ae8ab2d832654f3fbcdf418d5ecebf205756360b87ddc4bafba",
-    "LOAD": "805123e93e7c50208cf9f5b43c0b2bdc5aca01ca78f20e37a5cdfe303024a9e4"
+    "ADR": "9d187d85f0a2b2677a9762f5823fcc780560c17dc287a8acc4c1748281cafe23",
+    "CLIENT": "584d1bfd09e6f7dae1ef75814fe724f7303a71188df09fd87450762f90af754f",
+    "CUT": "e5057065f085dacb73719c333ffdda3fd60be8754c54fe94d3bd990bc9608678",
+    "HAND": "103f3e914229daec8304de26eaf4513627819a9a80097677a8038d6d375a9732",
+    "HEALTH": "cea410df482974d4e3ab1d583688643d00f68ac8491b50013eb7f7a2846e33a0",
+    "LOAD": "22b54750b484c5b5951f83ded26eeab0443c613a70b9620bdf3b7ecbd26f03fe"
   },
   "entries": [
     {
       "destination": "ADR",
       "rid": "R-DEC-1",
-      "unit_sha256": "8b7fd7c159bfd138ff61a8046bed59240efab3cc5d5d4354610f634e3e59dc14",
-      "unit_text": "- **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`, 코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다. 그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2). 근거: baseline B3 · B3-op · `app/latest_rates_cache.py:787-793` · `app/latest_rates_cache.py:662-667` · `app/config.py:392`.",
+      "unit_sha256": "78ceb107792d3a1bea38e2137e2703ca3d2737337b00c30887fb7acda4e0c377",
+      "unit_text": "- **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`, 코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다. 그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2). 근거: baseline B3 · B3-op · `app/latest_rates_cache.py:818-824` · `app/latest_rates_cache.py:662-667` · `app/config.py:392`.",
       "classification": "code_fact",
       "detail": "tick writer의 coalesce와 일반 writer의 매회 SET, 코드 기본 OFF는 pinned code와 baseline B3가 뒷받침한다. 2026-05-26 운영 활성 기록은 코드 사실과 분리된 baseline B3-op로 명시했다.",
       "provenance": [
@@ -30,21 +30,21 @@
         "baseline:D2",
         "file:app/config.py:392",
         "file:app/latest_rates_cache.py:662-667",
-        "file:app/latest_rates_cache.py:787-793"
+        "file:app/latest_rates_cache.py:818-824"
       ]
     },
     {
       "destination": "ADR",
       "rid": "R-DEC-1",
-      "unit_sha256": "47464306f4813da7f8c1116b4c7343a27530f7dd0caa8190daaeaf431f3591e1",
-      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1402-1412` · `app/main.py:942-965`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:250`.",
+      "unit_sha256": "96e51d5fb5a353545daa67a40ab4dbd738c31f20fe35f6a22b64186b2f107a54",
+      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1402-1412` · `app/main.py:942-965`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:243`.",
       "classification": "code_fact",
       "detail": "baseline B1은 두 publisher 모듈 내부만의 부정 사실이다. 외부 scheduler가 broadcast_rates_once를 매초 깨우지만 publisher 호출은 is_changed 분기 안임을 추가 확인해, 무조건 주기 재발행 계약 부재로 범위를 좁혔다.",
       "provenance": [
         "baseline:B1",
         "file:app/main.py:942-965",
         "file:app/scheduler.py:1402-1412",
-        "file:ios/FXi/Utils/Constants.swift:250"
+        "file:ios/FXi/Utils/Constants.swift:243"
       ]
     },
     {
@@ -61,13 +61,27 @@
     {
       "destination": "ADR",
       "rid": "R-GATE-2",
-      "unit_sha256": "90862c0c2038bb9bd0611ae60cad1249785e21d8e184eaf29328609ebc8ebcc5",
-      "unit_text": "고정 iOS commit 에서 Release 는 `TOPIC_V2_RELEASE_ON` 이 정의될 때만 topic 을 켜고, 그 외에는 legacy 기본값으로 빌드된다(`ios/FXi/Utils/RealtimeV2Config.swift:32-40`). 같은 commit 의 `FXi.xcodeproj/project.pbxproj` 에서 해당 플래그를 찾는 `git grep` 결과는 0건이다.",
+      "unit_sha256": "b099ef426cafa48c10a4167cde9f6b95f785a74b6bbb99489eed8ad8d365aced",
+      "unit_text": "고정 iOS commit 에서 Release 는 `TOPIC_V2_RELEASE_ON` 이 정의될 때만 topic 을 켠다. 그 외에는 fail-closed로 topic 표면이 비며 legacy fallback으로 돌아가지 않는다 (`ios/FXi/Utils/RealtimeV2Config.swift:31-39` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-697`). 같은 commit 의 `FXi.xcodeproj/project.pbxproj` 에서 해당 플래그를 찾는 `git grep` 결과는 0건이다.",
       "classification": "code_fact",
-      "detail": "pinned iOS의 RealtimeV2Config는 compile flag가 없으면 Release OFF이고 project.pbxproj의 flag 검색은 0건이다. archive의 미커밋 worktree 관찰은 frozen baseline 범위 밖이라 현재 사실에서 제거했다.",
+      "detail": "pinned iOS는 compile flag가 없으면 Release topic gate를 끄며, 현재 ViewModel은 그 상태에서 legacy fallback이 아니라 빈 topic 표면으로 fail-closed한다. project.pbxproj의 flag 검색은 0건이다.",
       "provenance": [
-        "file:ios/FXi/Utils/RealtimeV2Config.swift:32-40"
+        "file:ios/FXi/Utils/RealtimeV2Config.swift:31-39",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-697"
       ]
+    },
+    {
+      "destination": "ADR",
+      "rid": "R-INV-1",
+      "classification": "code_fact",
+      "detail": "구현 commit 이름만으로 닫지 않는다. iOS architecture test가 legacy API/callback/파일의 복원을 거부하고, 서버 DXY publisher가 dxy:spot payload와 live 발행을 소유한다는 직접 근거로 코드 cutover 완료와 운영 게이트 미완료를 구분했다.",
+      "provenance": [
+        "file:app/dxy_topic_publisher.py:112-145",
+        "file:app/dxy_topic_publisher.py:20-26",
+        "file:ios/FXiTests/TopicMessageTests.swift:386-428"
+      ],
+      "unit_sha256": "ae26794195e1c26260c26f7cc4ea22ffe1fdf475b2f7716efbae7bd802b41427",
+      "unit_text": "> ✅ **코드 불변식은 충족됐다.** 서버 `8755510`과 iOS `0f2a3f8`이 신규 앱의 legacy > REST/WS/cache/graph 소비를 제거하고 `dxy:spot`까지 topic 경로로 옮겼다. 다만 운영 > `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다. > iOS architecture test가 legacy API/callback/파일의 복원을 거부하고 > (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을 > 소유한다 (`app/dxy_topic_publisher.py:20-26` · `app/dxy_topic_publisher.py:112-145`). > 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다."
     },
     {
       "destination": "ADR",
@@ -84,16 +98,14 @@
     {
       "destination": "ADR",
       "rid": "R-INV-1",
-      "unit_sha256": "54b86137164fe08a78c702f114d2c89fd19a9d129e72dd0913f90b53da0e5825",
-      "unit_text": "**근거 ② 제품** — 고정 server commit 의 legacy source set 에는 USDT/KRX 가 **없다**. `app/legacy_policy.py` 의 `LEGACY_RATE_SOURCES` 는 investing + 은행 9곳뿐이고 docstring 이 doctest 로 못 박는다: `should_include_source_in_legacy_rates(\"upbit\", \"usdt-krw\") → False`. 테더 화면이 legacy `sourceRates()` 로 전환되면 SourceRegistry 와 겹치는 USD reference 후보는 investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 그보다 더 줄 수 있다 (`ios/FXi/Models/RateSource.swift:32-91` · `ios/FXi/Services/SourcePreferenceManager.swift:133-161` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707`). 따라서 이 전환은 fallback 이 아니라 **거래소 5 + KRX 를 잃고 일부 USD reference 만 남기는 순수 손실 교환**이다. 근거: `app/legacy_policy.py:35-38` · `app/legacy_policy.py:59-60`.",
+      "unit_sha256": "549de95a13cf8918ced6470bddd70fb45e3786f1be2c61edb3e19f4e0ef7e905",
+      "unit_text": "**근거 ② 제품** — 고정 server commit 의 legacy source set 에는 USDT/KRX 가 **없다**. `app/legacy_policy.py` 의 `LEGACY_RATE_SOURCES` 는 investing + 은행 9곳뿐이고 docstring 이 doctest 로 못 박는다: `should_include_source_in_legacy_rates(\"upbit\", \"usdt-krw\") → False`. 과거 테더 화면의 legacy fallback은 USDT/KRX를 공급하지 못하는 **데이터 손실**이었다. 현재 iOS는 그 fallback 자체를 제거했으며, topic gate가 OFF면 legacy reference 행을 대신 그리지 않고 빈 topic 표면을 반환한다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-697`). 따라서 unarmed artifact는 usable한 fallback 빌드가 아니며 출시할 수 없다. 근거: `app/legacy_policy.py:35-38` · `app/legacy_policy.py:59-60`.",
       "classification": "code_fact",
-      "detail": "고정 server commit의 legacy allowlist에는 USDT/KRX가 없고, iOS fallback에서 겹치는 reference 후보도 investing/kb/hana뿐이다. 과거 전체나 고정 3행을 주장하지 않도록 범위를 교정했다.",
+      "detail": "고정 server commit의 legacy allowlist에는 USDT/KRX가 없고, 현재 iOS는 legacy fallback 자체를 제거했다. topic gate OFF가 usable fallback이 아니라 빈 표면이라는 제품 결론을 server allowlist와 iOS OFF 분기로 함께 확인했다.",
       "provenance": [
         "file:app/legacy_policy.py:35-38",
         "file:app/legacy_policy.py:59-60",
-        "file:ios/FXi/Models/RateSource.swift:32-91",
-        "file:ios/FXi/Services/SourcePreferenceManager.swift:133-161",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707"
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-697"
       ]
     },
     {
@@ -122,79 +134,70 @@
     },
     {
       "destination": "ADR",
-      "rid": "R-INV-3",
-      "unit_sha256": "1e414e7bdc0be51f58c72ca29d14d4a61e17d648bc7ab5e102f08083412eb33a",
-      "unit_text": "`WebSocketService` 가 legacy `rates` 프레임의 `indices` 를 통해 DXY 를 받는다 (`onIndicesReceived?(response.indices)`). 근거: `ios/FXi/Services/WebSocketService.swift:1892-1910`.",
-      "classification": "code_fact",
-      "detail": "handleLegacyRatesMessage 가 legacy rates 프레임을 디코드해 onIndicesReceived?(response.indices) 를 호출한다 — DXY 수신 경로에 대한 현재 iOS 코드 상태 단정이다.",
-      "provenance": [
-        "file:ios/FXi/Services/WebSocketService.swift:1892-1910"
-      ]
-    },
-    {
-      "destination": "ADR",
       "rid": "R-INV-4",
-      "unit_sha256": "692c255c5ac011147cc684b6cc49641a93b91859de99546af8f83bb3128a5576",
-      "unit_text": "✅ **범위 확정: 이번 출시는 `dxy:spot` 하나만**(로드맵 4b 그대로). 근거 — premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` 의 live state 는 없다. 따라서 futures topic 은 **legacy 이탈에 불필요**하며 phased 로 미룬다. (테더 1d 그래프의 DXY_futures 계열은 그래프 데이터 경로이지 live tail 이 아니다.) 근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989`.",
+      "unit_sha256": "b6e9962fc53eff070a247f3df31515a6eb6ad2078e9c6bb3aec04f85ec6a5d27",
+      "unit_text": "✅ **범위 확정: 이번 출시는 `dxy:spot` 하나만**(로드맵 4b 그대로). 근거 — premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` 의 live state 는 없다. 따라서 futures topic 은 **legacy 이탈에 불필요**하며 phased 로 미룬다. (테더 1d 그래프의 DXY_futures 계열은 그래프 데이터 경로이지 live tail 이 아니다.) 근거: `ios/FXi/Models/ExchangeRate.swift:53-58` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:21-24` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-987`.",
       "classification": "code_fact",
-      "detail": "출시 범위 결정(design)과 'IndicesPayload 는 dxy 뿐이고 dxy_futures live state 는 없다'는 코드 사실이 한 단위에 섞였다 — 혼재는 code_fact 이므로 근거를 붙였다.",
+      "detail": "출시 범위 결정과 현재 DxyLiveTick/dxyLive가 spot만 소유하고 futures live state는 없다는 코드 사실이 한 단위에 섞였다. 혼재 단위이므로 직접 근거를 갖는 code_fact로 분류했다.",
       "provenance": [
-        "file:ios/FXi/Models/ExchangeRate.swift:68-70",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989"
+        "file:ios/FXi/Models/ExchangeRate.swift:53-58",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:21-24",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-987"
       ]
     },
     {
       "destination": "ADR",
       "rid": "R-OPEN-3",
-      "unit_sha256": "0cbf50af0a780992b04c1497a012c5bf4b3d583dd33775e4738854f377a1eb24",
-      "unit_text": "1. ~~`dxy:spot` / `dxy:futures` 분리~~ → **확정: 이번 출시는 `dxy:spot` 만**(로드맵 4b 그대로). 근거: premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` live state 는 없다 → futures topic 은 legacy 이탈에 **불필요**, phased. 근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989`.",
+      "unit_sha256": "ed980fc294b4d4110b54c880cd2679bb400ed700877507a2323aac7e3a4ea847",
+      "unit_text": "1. ~~`dxy:spot` / `dxy:futures` 분리~~ → **확정: 이번 출시는 `dxy:spot` 만**(로드맵 4b 그대로). 근거: premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` live state 는 없다 → futures topic 은 legacy 이탈에 **불필요**, phased. 근거: `ios/FXi/Models/ExchangeRate.swift:53-58` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:21-24` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-987`.",
       "classification": "code_fact",
-      "detail": "미결 해소 결정문 안에 R-INV-4 와 같은 'dxy_futures live state 부재' 코드 사실이 근거로 들어 있다 — 혼재이므로 code_fact 이고 같은 근거를 붙였다.",
+      "detail": "미결 해소 결정문 안에 R-INV-4와 같은 spot-only live state 코드 사실이 근거로 들어 있다. 혼재 단위이므로 code_fact로 분류하고 같은 직접 근거를 붙였다.",
       "provenance": [
-        "file:ios/FXi/Models/ExchangeRate.swift:68-70",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989"
+        "file:ios/FXi/Models/ExchangeRate.swift:53-58",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:21-24",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-987"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-12",
-      "unit_sha256": "80aa4e662dbfb505d22c2e74dfb76091ba5b29efa60e5120fd13e2c2950c5ddb",
-      "unit_text": "`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다. ⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과 상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:205-208`), stale 전이는 `revalidateSilencedTopic(\"usdt:krw\")` 만 부르며 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:270-279`), 표시 경로 `usdtDisplayState` 에는 `tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724`, 특히 671 행 주석). 런북도 재작성돼 2차 롤백 bullet 이 \"45초 legacy fallback 을 기다리는 절차가 아니다\"라고 못박고, 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다 (`ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-301`). 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled` 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1030-1050`) 탭 상태 문구가 \"실시간 시세를 일시적으로 제공할 수 없습니다\"를 띄운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:479-502`). legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.",
+      "unit_sha256": "570db6c0e94649191eb28ace304a75e64586c3673fab57c57d5f77bc446bfc86",
+      "unit_text": "`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다. ⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과 상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:218-221`), stale 전이는 `revalidateSilencedTopic(\"usdt:krw\")` 만 부르며 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-324`), 표시 경로 `usdtDisplayState` 에는 `tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`, 특히 671 행 주석). 런북도 재작성돼 2차 롤백 bullet 이 \"45초 legacy fallback 을 기다리는 절차가 아니다\"라고 못박고, 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다 (`ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-301`). 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled` 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1051-1074`) 탭 상태 문구가 \"실시간 시세를 일시적으로 제공할 수 없습니다\"를 띄운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:503-526`). legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.",
       "classification": "code_fact",
       "detail": "45초 legacy revert 기전이 코드에서 제거됐고, 45초 무수신은 조용한 재구독 1회 + 상태 안내뿐이며 화면 값은 유지된다는 현재 iOS 동작 단정이다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:1030-1050",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:205-208",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:270-279",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:479-502",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:1051-1074",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:218-221",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-324",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:503-526",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714",
         "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-301"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-12",
-      "unit_sha256": "6d745b4f8e7ad53dbe0ebe0f65d73899bdf1978932aca868f8b3761a9d784279",
-      "unit_text": "⚠️ 이 판단의 근거였던 \"현 레버\"(45초 legacy revert)는 **이제 코드에 없다**. 당시 문제는 화면이 **바뀌기는 하되** USDT 탭에 은행 USD 시세라는 **무관한 데이터**로 바뀐다는 것이었고, 롤백의 목적(\"새 경로가 오도하는 것을 멈춘다\")을 달성하지 못했다. 그래서 되돌리는 게 아니라 **대체**하기로 했고, 아래 결정이 그 대체다. 지금은 `topics_disabled` purge 후 `tetherReceived=false` + store 가 비어 legacy 로 떨어지지 않고 빈 상태가 된다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724`).",
+      "unit_sha256": "ebb6f22b37a646fa6ffec8b3a96f5327afe41ee071d866eb2f4fbfc0bcbb858c",
+      "unit_text": "⚠️ 이 판단의 근거였던 \"현 레버\"(45초 legacy revert)는 **이제 코드에 없다**. 당시 문제는 화면이 **바뀌기는 하되** USDT 탭에 은행 USD 시세라는 **무관한 데이터**로 바뀐다는 것이었고, 롤백의 목적(\"새 경로가 오도하는 것을 멈춘다\")을 달성하지 못했다. 그래서 되돌리는 게 아니라 **대체**하기로 했고, 아래 결정이 그 대체다. 지금은 `topics_disabled` purge 후 `tetherReceived=false` + store 가 비어 legacy 로 떨어지지 않고 빈 상태가 된다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`).",
       "classification": "code_fact",
       "detail": "topics_disabled purge 뒤에는 legacy(은행 USD)로 떨어지지 않고 빈 상태가 된다는 현재 iOS 동작 단정이다. 구 서술(무관한 데이터로 바뀐다)은 제거된 레버에 대한 역사적 판단으로 보존했다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724"
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-13",
-      "unit_sha256": "9cc7e7d1df325ae4ae1a66663042f2d74d0ade8b6a7ec644a0fa0539cdf6e392",
-      "unit_text": "topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다 (`ios/FXi/Services/CacheService.swift:49-54` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:404`). 지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다** — ✅ 이 요구는 충족됐다. `stop()` 이 마지막에 `purgeTopicData(.all)` 을 부르고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:523-537`), `.all` 분기가 in-memory store 를 비우는 데 그치지 않고 `cachedTopicRates` 를 nil 로 만든 뒤 `cacheService.removeCachedTopicRates()` 로 **디스크 키까지** 지운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1054-1064` · `ios/FXi/Services/CacheService.swift:63-66`).",
+      "unit_sha256": "74b6dd54000360b59c555810429c1a3b230296a9ca3d60ab26edbce1320296a5",
+      "unit_text": "topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다 (`ios/FXi/Services/CacheService.swift:31-36` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:446`). 지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다** — ✅ 이 요구는 충족됐다. `stop()` 이 마지막에 `purgeTopicData(.all)` 을 부르고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:550-568`), `.all` 분기가 in-memory store 를 비우는 데 그치지 않고 `cachedTopicRates` 를 nil 로 만든 뒤 `cacheService.removeCachedTopicRates()` 로 **디스크 키까지** 지운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1078-1090` · `ios/FXi/Services/CacheService.swift:45-48`).",
       "classification": "code_fact",
       "detail": "topic 값이 cached_topic_rates 로 UserDefaults 에 저장되고 VM init 에서 복원되며, stop() 이 purgeTopicData(.all) 로 in-memory store 와 디스크 캐시를 함께 지운다는 현재 iOS 동작 단정이다. (구 서술 '디스크를 지우지 않는다'는 R-GATE-3 purge 구현으로 supersede)",
       "provenance": [
-        "file:ios/FXi/Services/CacheService.swift:49-54",
-        "file:ios/FXi/Services/CacheService.swift:63-66",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:1054-1064",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:404",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:523-537"
+        "file:ios/FXi/Services/CacheService.swift:31-36",
+        "file:ios/FXi/Services/CacheService.swift:45-48",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:1078-1090",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:446",
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:550-568"
       ]
     },
     {
@@ -212,60 +215,63 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-18",
-      "unit_sha256": "ac6cca701efbfa092b8013a4870a1e3e937ef7d0bc358e585979f51367593103",
-      "unit_text": "- **알림 시트 범위 검증** — ✅ **fail-closed 로 배선됐다.** 판정은 `SourceAlertValidation` 로 분리됐고, `canSaveThreshold` 는 threshold 가 nil 이면 거절하며 `validRange` 가 nil 이면 `isThresholdInRange` 가 `false` 를 돌려준다 (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:20-40`). `validRange` 는 현재가가 없거나 비유한·0 이하면 nil 이 되므로 (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:153-161`), **한 번도 수신 못 한 cold-start** 에서는 ±50% 가드가 꺼지는 게 아니라 **저장이 막힌다**. `canSave` 가 그 판정을 그대로 쓴다(같은 파일 `199-210`). 예외는 하나 — **가격 조건을 그대로 둔 편집**이다. source·asset·condition·threshold 가 모두 그대로면(`priceFieldsUnchanged`, 같은 파일 `167-173`) live rate 없이도 활성/반복 토글만 저장할 수 있다. 요구했던 **사유 표시 + 탈출구**도 함께 있다 — 현재가를 못 읽으면 \"현재 시세를 확인할 수 없어 가격 조건을 저장할 수 없습니다\" 와 `다시 연결` 버튼을 띄운다(같은 파일 `422-433`). 불변식([R-INV-1](../DECISIONS.md#r-inv-1))대로 last-known 이 공급되면 애초에 이 상태에 거의 들어가지 않는다. 서버는 여전히 `threshold > 0` 만 검증하므로(`app/schemas.py:211`) 범위 가드는 클라가 유일한 방어선이다.",
+      "unit_sha256": "7e9d070f4ad948d69cf0b5c5a283c2796ce55196c597a0eb8f5ad5a5a2bb3618",
+      "unit_text": "- **알림 시트 범위 검증** — ✅ **fail-closed 로 배선됐다.** 판정은 `SourceAlertValidation` 로 분리됐고, `canSaveThreshold` 는 threshold 가 nil 이면 거절하며 `validRange` 가 nil 이면 `isThresholdInRange` 가 `false` 를 돌려준다 (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:20-40`). `validRange` 는 현재가가 없거나 비유한·0 이하면 nil 이 되므로 (`ios/FXi/Views/Components/SourceAlertAddSheet.swift:150-158`), **한 번도 수신 못 한 cold-start** 에서는 ±50% 가드가 꺼지는 게 아니라 **저장이 막힌다**. `canSave` 가 그 판정을 그대로 쓴다(같은 파일 `196-206`). 예외는 하나 — **가격 조건을 그대로 둔 편집**이다. source·asset·condition·threshold 가 모두 그대로면(`priceFieldsUnchanged`, 같은 파일 `164-170`) live rate 없이도 활성/반복 토글만 저장할 수 있다. 요구했던 **사유 표시 + 탈출구**도 함께 있다 — 현재가를 못 읽으면 \"현재 시세를 확인할 수 없어 가격 조건을 저장할 수 없습니다\" 와 `다시 연결` 버튼을 띄운다(같은 파일 `422-433`). 불변식([R-INV-1](../DECISIONS.md#r-inv-1))대로 last-known 이 공급되면 애초에 이 상태에 거의 들어가지 않는다. 서버는 여전히 `threshold > 0` 만 검증하므로(`app/schemas.py:211`) 범위 가드는 클라가 유일한 방어선이다.",
       "classification": "code_fact",
       "detail": "현재가가 없으면 알림 시트가 fail-closed 로 저장을 막고, 가격 조건 미변경 편집만 예외로 허용하며, 사유 표시 + '다시 연결' 탈출구를 함께 둔다는 현재 iOS 동작 단정이다. (구 서술 'fail-open' 은 R-GATE-3 로 supersede)",
       "provenance": [
         "file:app/schemas.py:211",
-        "file:ios/FXi/Views/Components/SourceAlertAddSheet.swift:153-161",
+        "file:ios/FXi/Views/Components/SourceAlertAddSheet.swift:150-158",
         "file:ios/FXi/Views/Components/SourceAlertAddSheet.swift:20-40"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-2",
-      "unit_sha256": "a51e4215df944fd66df075389c68015422595cec13ef1576a02597d1ab86c1c5",
-      "unit_text": "⛔ **표에 \"동시엔 ACK 우선\"이라 적는 것만으로는 보장되지 않는다.** 독립 `Task` 둘은 MainActor 에서 직렬화되더라도 **어느 쪽이 먼저 재개되는지 계약되지 않는다** — 규칙만 있고 집행자가 없다 (이번 슬라이스가 고치고 있는 원 결함과 **같은 형태**다).",
-      "classification": "normative",
-      "detail": "MainActor 위 독립 Task 두 개의 재개 순서가 Swift 동시성 모델에서 계약되지 않는다는 플랫폼 semantics 를 근거로, 'watchdog 둘' 대신 '공용 arbiter 하나'를 고르는 설계 판단이다. 리포에 그 두 watchdog task 가 아직 없어 현재 코드 동작 단정이 아니다.",
-      "reason": "design-decision"
+      "unit_sha256": "be6c3096fe362f22e3ecfebedc447b228f39597fa7937410ac196410ef34b6cc",
+      "unit_text": "✅ **세 경우의 단일 소유자는 공용 arbiter 하나로 구현됐다.** 한 요청이 control/delivery deadline을 함께 저장하고, ACK 전에는 control phase 하나만, ACK 뒤에는 delivery phase 하나만 무장한다 (`ios/FXi/Services/WebSocketService.swift:530-648` · `ios/FXi/Services/WebSocketService.swift:801-818`). 따라서 독립 watchdog `Task` 둘의 재개 순서에 의존하지 않고 아래 전이표를 한 소유자가 집행한다.",
+      "classification": "code_fact",
+      "detail": "현재 WebSocketService가 control/delivery deadline을 단일 arbiter와 phase 전환으로 소유한다는 구현 사실이다. 독립 watchdog 재개 순서에 의존하지 않는다는 결론을 두 구현 범위에서 직접 확인했다.",
+      "provenance": [
+        "file:ios/FXi/Services/WebSocketService.swift:530-648",
+        "file:ios/FXi/Services/WebSocketService.swift:801-818"
+      ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-24",
-      "unit_sha256": "c96d33303555d709820be6452c8202478ae1faf30c87167f69b1473302bf53a9",
-      "unit_text": "- 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를 초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다 (`ios/FXi/Utils/Constants.swift:277-284` · `ios/FXi/Services/WebSocketService.swift:2035-2093`).",
+      "unit_sha256": "714d36cf8b836dae7cbc947322be4e38164950cc3036c4fd935be5ee5e48fef9",
+      "unit_text": "- 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를 초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다 (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2032-2090`).",
       "classification": "code_fact",
       "detail": "pinned iOS commit에서 reconnect jitter·5회 상한과 30초 안정 연결 뒤 attempt reset을 확인했다.",
       "provenance": [
-        "file:ios/FXi/Services/WebSocketService.swift:2035-2093",
-        "file:ios/FXi/Utils/Constants.swift:277-284"
+        "file:ios/FXi/Services/WebSocketService.swift:2032-2090",
+        "file:ios/FXi/Utils/Constants.swift:270-277"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-24",
-      "unit_sha256": "ee3f3b5da057ddbc29fd55dce56ee7517e0819432657c8be9a036169e05eaa9d",
-      "unit_text": "- 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의 subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와 중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1602-1623` · `ios/FXi/Services/WebSocketService.swift:1851-1870`).",
+      "unit_sha256": "7b8cd2fe3309ba8ac9292e173c8b0a500a624b8959b2c53fad45e0d40a1d7bf6",
+      "unit_text": "- 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의 subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와 중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1607-1628` · `ios/FXi/Services/WebSocketService.swift:1856-1875`).",
       "classification": "code_fact",
       "detail": "pinned iOS commit에서 자동 reconnect 복구 batch 전용 jitter와 최초 연결 무지연 경계를 확인했다.",
       "provenance": [
-        "file:ios/FXi/Services/WebSocketService.swift:1602-1623",
-        "file:ios/FXi/Services/WebSocketService.swift:1851-1870"
+        "file:ios/FXi/Services/WebSocketService.swift:1607-1628",
+        "file:ios/FXi/Services/WebSocketService.swift:1856-1875"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-24",
-      "unit_sha256": "96b02d5b06c6e1630fad6aae7f773c6ce7043945926f9b3015fd13436ce056c0",
-      "unit_text": "- 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초 시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다 (`ios/FXi/Utils/Constants.swift:255` · `ios/FXi/Services/WebSocketService.swift:1410-1562` · `ios/FXi/Services/WebSocketService.swift:1664-1673`).",
+      "unit_sha256": "8b3109034bf91befa9aaafcce734f57fd8e2ba06a42556797cec07ce5d8da309",
+      "unit_text": "- 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초 시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다 (`ios/FXi/Utils/Constants.swift:248` · `ios/FXi/Services/WebSocketService.swift:1415-1567` · `ios/FXi/Services/WebSocketService.swift:1669-1678`).",
       "classification": "code_fact",
       "detail": "pinned iOS commit에서 topic retry 상한·additive jitter·exact-scope cooldown·cleanup 취소를 확인했다.",
       "provenance": [
-        "file:ios/FXi/Services/WebSocketService.swift:1410-1562",
-        "file:ios/FXi/Services/WebSocketService.swift:1664-1673",
-        "file:ios/FXi/Utils/Constants.swift:255"
+        "file:ios/FXi/Services/WebSocketService.swift:1415-1567",
+        "file:ios/FXi/Services/WebSocketService.swift:1669-1678",
+        "file:ios/FXi/Utils/Constants.swift:248"
       ]
     },
     {
@@ -282,12 +288,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-4",
-      "unit_sha256": "38b434eee145c5c6f726b8d35d14df16230c7986038b2d3817a92dcfb976c1d6",
-      "unit_text": "⚠️ **만약 나중에 시간 deadline 을 둘 이상 두게 되면**, `startFreshnessMonitorIfNeeded` 는 `guard freshnessMonitor == nil` 이라 **이미 도는 monitor 를 재무장하지 않는다** (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:289-290`). 균일 임계에서는 새 deadline 이 항상 기존보다 뒤라 안전하지만, 임계가 갈리면 더 이른 deadline 이 생겨 **monitor 가 자면서 지나친다** = 2026-08-08 결함의 재생산. 그때는 *\"새 최근접 deadline 이 현재 수면 목표보다 이르면 재무장\"* 이 **필수 동반**이다.",
+      "unit_sha256": "fc9b9c9b2b59e21bd016c5f6d7c59526093e047bdcd276c073e4272e02380b93",
+      "unit_text": "⚠️ **만약 나중에 시간 deadline 을 둘 이상 두게 되면**, `startFreshnessMonitorIfNeeded` 는 `guard freshnessMonitor == nil` 이라 **이미 도는 monitor 를 재무장하지 않는다** (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:334-335`). 균일 임계에서는 새 deadline 이 항상 기존보다 뒤라 안전하지만, 임계가 갈리면 더 이른 deadline 이 생겨 **monitor 가 자면서 지나친다** = 2026-08-08 결함의 재생산. 그때는 *\"새 최근접 deadline 이 현재 수면 목표보다 이르면 재무장\"* 이 **필수 동반**이다.",
       "classification": "code_fact",
       "detail": "startFreshnessMonitorIfNeeded 가 guard freshnessMonitor == nil 로 조기 return 해 이미 도는 monitor 를 재무장하지 않는다는 현재 iOS 코드 동작 단정이다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:289-290"
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:334-335"
       ]
     },
     {
@@ -304,50 +310,40 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "02540f0a05ca9004812f563e847ec4e9fe936d6603ae8ff45b585c3b63be9a30",
-      "unit_text": "**클라에 이미 있는 것**: `SubscriptionError.isTerminal`(invalid_token/invalid_request/request_too_large), `isRetryable`(temporarily_unavailable), `premium_required` 복구 집합. ✅ **다섯 거부 코드가 모두 배선됐다.** `handleSubscriptionAck` 가 `topicRejection(from:)` 으로 `topics_disabled`·`topic_unavailable`·`unknown_topic`·`premium_required`·`krx_entitlement_required` 를 각각 `TopicRejectionReason` 으로 옮기고 (`ios/FXi/Services/WebSocketService.swift:1086-1095`), **이번 배치로 보낸 topic 에 한해** `topicStateStore.applyAck(rejections:)` 로 per-topic 기록한다 (`ios/FXi/Services/WebSocketService.swift:1043-1056` · `ios/FXi/Models/TopicSubscriptionState.swift:165-186`). 기록된 사유는 접근 상태 (`accessState(authResolution:)` — `ios/FXi/Models/TopicSubscriptionState.swift:72-86`)와 재시도 trigger(`rejectionRetryTriggers(for:)` — 같은 파일 `117-137`)에서 위 표대로 서로 다르게 갈라지므로, `topic_unavailable`·`unknown_topic`·`topics_disabled` 도 더는 로그만 남기지 않는다. 그 위에 **추가로** 전용 콜백을 갖는 것은 `premium_required`(`onPremiumAccessRejected`)와 `krx_entitlement_required`(`onKrxAccessRejected`) 둘뿐이다 (`ios/FXi/Services/WebSocketService.swift:1073-1078`). `SubscriptionError.isTerminal`/`isRetryable` 은 그대로다 (`ios/FXi/Models/TopicMessage.swift:224-246`).",
+      "unit_sha256": "0a18271f7527e4d078f044806b04339bc3739992017f4b437966d42a1431980c",
+      "unit_text": "**클라에 이미 있는 것**: `SubscriptionError.isTerminal`(invalid_token/invalid_request/request_too_large), `isRetryable`(temporarily_unavailable), `premium_required` 복구 집합. ✅ **다섯 거부 코드가 모두 배선됐다.** `handleSubscriptionAck` 가 `topicRejection(from:)` 으로 `topics_disabled`·`topic_unavailable`·`unknown_topic`·`premium_required`·`krx_entitlement_required` 를 각각 `TopicRejectionReason` 으로 옮기고 (`ios/FXi/Services/WebSocketService.swift:1091-1100`), **이번 배치로 보낸 topic 에 한해** `topicStateStore.applyAck(rejections:)` 로 per-topic 기록한다 (`ios/FXi/Services/WebSocketService.swift:1048-1061` · `ios/FXi/Models/TopicSubscriptionState.swift:165-186`). 기록된 사유는 접근 상태 (`accessState(authResolution:)` — `ios/FXi/Models/TopicSubscriptionState.swift:72-86`)와 재시도 trigger(`rejectionRetryTriggers(for:)` — 같은 파일 `117-137`)에서 위 표대로 서로 다르게 갈라지므로, `topic_unavailable`·`unknown_topic`·`topics_disabled` 도 더는 로그만 남기지 않는다. 그 위에 **추가로** 전용 콜백을 갖는 것은 `premium_required`(`onPremiumAccessRejected`)와 `krx_entitlement_required`(`onKrxAccessRejected`) 둘뿐이다 (`ios/FXi/Services/WebSocketService.swift:1078-1083`). `SubscriptionError.isTerminal`/`isRetryable` 은 그대로다 (`ios/FXi/Models/TopicMessage.swift:237-259`).",
       "classification": "code_fact",
       "detail": "다섯 거부 코드가 모두 per-topic 으로 배선돼 더는 로그만 남기지 않는다는 현재 iOS 동작 단정이다.",
       "provenance": [
-        "file:ios/FXi/Models/TopicMessage.swift:224-246",
+        "file:ios/FXi/Models/TopicMessage.swift:237-259",
         "file:ios/FXi/Models/TopicSubscriptionState.swift:165-186",
         "file:ios/FXi/Models/TopicSubscriptionState.swift:72-86",
-        "file:ios/FXi/Services/WebSocketService.swift:1043-1056",
-        "file:ios/FXi/Services/WebSocketService.swift:1073-1078",
-        "file:ios/FXi/Services/WebSocketService.swift:1086-1095"
+        "file:ios/FXi/Services/WebSocketService.swift:1048-1061",
+        "file:ios/FXi/Services/WebSocketService.swift:1078-1083",
+        "file:ios/FXi/Services/WebSocketService.swift:1091-1100"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "38e204a6e41cd4e4a05085a6cdd8932d00436db5c68ea420c5f2516d4caf069d",
-      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:874-915`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
+      "unit_sha256": "88adb98821a4ec5840731d5df3899de6bce11a5e9cc922bd51fb90e2b4265a83",
+      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:278-323` (stage 별 partition) · `app/topic_dispatcher.py:874-915`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
       "classification": "code_fact",
       "detail": "고정 planner와 dispatcher는 FX/USDT의 premium_required가 최종 stage에서만 발생하고 앞선 두 stage에서는 identity-only임을 보여준다. 이는 클라이언트 처리 계약이며 production stage를 주장하지 않는다.",
       "provenance": [
         "file:app/topic_dispatcher.py:874-915",
-        "file:app/topic_policy.py:285-330"
+        "file:app/topic_policy.py:278-323"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-7",
-      "unit_sha256": "30e754b2044452f83b59e12ca92a4d268a21259676b7d4b044426d1f4cf5a7ce",
-      "unit_text": "<a id=\"r-cli-7\"></a> ### R-CLI-7 — 두 축(`subscribedTopics`/`confirmedTopics`)으로는 전이표를 표현할 수 없다",
-      "classification": "normative",
-      "detail": "절 제목으로, 제안 중인 전이표(R-CLI-6)를 기존 두 축만으로는 표현할 수 없다는 모델링 판단을 요약한다. 전이표 자체가 아직 코드에 없어 현재 동작 단정이 될 수 없고, 두 필드의 현재 의미 단정은 같은 RID 본문 단위가 근거와 함께 진다.",
-      "reason": "design-decision"
-    },
-    {
-      "destination": "CLIENT",
-      "rid": "R-CLI-7",
-      "unit_sha256": "bbe3c7ee12952b9f45dc94ae39206c96fd663c00fb389fdfe70eebe0519c789e",
-      "unit_text": "`subscribedTopics`(의도, `ios/FXi/Services/WebSocketService.swift:55-57`) / `confirmedTopics`(서버 확인, `ios/FXi/Services/WebSocketService.swift:747-749`) 두 축으로는 위 표를 표현할 수 없다.",
+      "unit_sha256": "df5019b5dbf20a06db59fea1a9abe56e5e22703155cf9d0607f17ac46b6891e6",
+      "unit_text": "`subscribedTopics`/`confirmedTopics`는 기존 호출부를 위한 compatibility projection으로 남아 있다. canonical source는 `TopicSubscriptionSnapshot`/`TopicSubscriptionState`이며, 의도·서버 확인·수신 세대·delivery·거부 사유를 저장하고 접근 상태와 재시도 trigger를 파생한다 (`ios/FXi/Models/TopicSubscriptionState.swift:64-137`).",
       "classification": "code_fact",
-      "detail": "subscribedTopics=의도 / confirmedTopics=서버 ack 확인이라는 현행 클라 두 필드의 현재 의미·존재 단정을 담고 있어, 모델링 판단과 섞여도 code_fact 로 분류했다.",
+      "detail": "subscribedTopics/confirmedTopics는 compatibility projection이고 canonical source는 TopicSubscriptionState/Snapshot이라는 현재 구현 단정이다. 저장 상태와 파생 상태의 소유권을 모델 범위에서 직접 확인했다.",
       "provenance": [
-        "file:ios/FXi/Services/WebSocketService.swift:55-57",
-        "file:ios/FXi/Services/WebSocketService.swift:747-749"
+        "file:ios/FXi/Models/TopicSubscriptionState.swift:64-137"
       ]
     },
     {
@@ -361,11 +357,22 @@
     },
     {
       "destination": "CLIENT",
+      "rid": "R-CLI-7",
+      "unit_sha256": "27b7bee281193425521183db4d9474c7354b567d40229531a33266c2521086c6",
+      "unit_text": "✅ 위 저장/파생 구조와 복수 trigger 집합은 현재 구현에 반영됐다. `desired`·`confirmed`· `receiveGeneration`·`deliveryState`·`rejection`은 canonical 저장이고, `accessState`와 `rejectionRetryTriggers`는 그 값에서 계산된다 (`ios/FXi/Models/TopicSubscriptionState.swift:64-137`).",
+      "classification": "code_fact",
+      "detail": "desired/confirmed/receiveGeneration/deliveryState/rejection이 canonical 저장이고 accessState/retry trigger가 파생된다는 현재 구현 사실이다.",
+      "provenance": [
+        "file:ios/FXi/Models/TopicSubscriptionState.swift:64-137"
+      ]
+    },
+    {
+      "destination": "CLIENT",
       "rid": "R-CLI-8",
       "unit_sha256": "21542d02f244a0370f31712014f40152e680ecb295e2fce41f53cdf6d81ad15d",
       "unit_text": "⛔ **`desired`/`confirmed`/`rejectionReason`/`retryPolicy` 만으로는 재검증([R-CLI-11](#r-cli-11))과 김프 정책([R-DEC-2](../DECISIONS.md#r-dec-2))을 표현할 수 없다.** 아래 둘이 **같은 튜플**이 된다 — `desired=true, confirmed=true, rejectionReason=nil` 인데 ① snapshot 을 정상 수신한 상태 ② ack 은 받았지만 snapshot 을 **한 번도 못 받은** 상태. tether 45초 후의 `suspect → revalidating → degraded` 도 거부가 없으므로 나타나지 않는다. → **per-topic `deliveryState`** 를 별도 축으로 둔다:",
       "classification": "normative",
-      "detail": "desired/confirmed/rejectionReason/retryPolicy 는 이 문서가 제안한 모델의 필드명이고 (현행 클라는 subscribedTopics/confirmedTopics), 그 네 축으로는 두 상태가 같은 튜플이 되므로 per-topic deliveryState 축을 추가하겠다는 설계 결정이다.",
+      "detail": "네 축만으로는 ACK-only와 실제 delivery를 구분할 수 없으므로 per-topic deliveryState가 필요하다는 모델링 제약이다. 구현 완료 사실은 같은 RID의 별도 code_fact 단위가 진다.",
       "reason": "design-decision"
     },
     {
@@ -374,8 +381,19 @@
       "unit_sha256": "6bf4cf836aea9aa90ea696f82907990e534493facab777c993fcfbadd09c12b5",
       "unit_text": "⛔ **그리고 축 개수를 세지 말고 _저장/파생_ 을 나눠라.** `rejectionReason`·`accessState`·`retryPolicy` 를 **셋 다 저장하면 서로 불일치**할 수 있다(같은 사실의 세 사본).",
       "classification": "normative",
-      "detail": "제안 모델 안에서 rejectionReason·accessState·retryPolicy 를 셋 다 저장하면 같은 사실의 세 사본이 되니 저장/파생을 나누라는 설계 규칙이다. 세 이름 모두 미구현 필드라 현재 코드 동작 단정이 아니다.",
+      "detail": "rejection/access/retry 표현을 모두 저장해 drift를 만들지 말고 canonical 저장과 파생을 나누라는 설계 규칙이다. 구현 완료 사실은 같은 RID의 별도 code_fact 단위가 진다.",
       "reason": "design-decision"
+    },
+    {
+      "destination": "CLIENT",
+      "rid": "R-CLI-8",
+      "classification": "code_fact",
+      "detail": "TopicSubscriptionState/Snapshot이 canonical 저장을 구현하고 접근 상태와 수동 재시도 표면을 파생한다는 현재 코드 사실이다.",
+      "provenance": [
+        "file:ios/FXi/Models/TopicSubscriptionState.swift:64-137"
+      ],
+      "unit_sha256": "942475b8c7cfc49f392480a8f71922473fc1ef4735d96b6573a498b33c1eca99",
+      "unit_text": "✅ 이 canonical 저장 구조는 `TopicSubscriptionState`와 `TopicSubscriptionSnapshot`에 구현됐고, 접근 상태·수동 재시도 표면은 저장 사본을 추가하지 않고 파생된다 (`ios/FXi/Models/TopicSubscriptionState.swift:64-137`)."
     },
     {
       "destination": "CLIENT",
@@ -383,7 +401,7 @@
       "unit_sha256": "63372e83613e7ed259373cf1b6dc9ee86ed256fb9264bffdae2762eec70dbdfc",
       "unit_text": "⛔ **재시도와 재검증은 _다른 정책_ 이다. 하나로 합치면 45초 무수신을 표현할 수 없다.** 45초 무수신에는 `WholeRequestFailure` 도 `TopicRejection` 도 **없다** — 서버가 거부한 게 아니라 아무 말이 없는 것이다. 그래서 거부 3입력만으로는 `suspect → revalidating` 재구독을 도출할 수 없다.",
       "classification": "normative",
-      "detail": "재시도(거부 대응)와 재검증(무수신 대응)을 하나의 정책으로 합치지 말라는 설계 결정이다. WholeRequestFailure/TopicRejection 은 같은 RID 계열이 제안한 Swift enum 이며 아직 클라 코드에 존재하지 않는다.",
+      "detail": "거부 대응 재시도와 무수신 재검증을 서로 다른 정책으로 유지하라는 설계 제약이다. 특정 타입의 구현 유무를 이 normative 단위에서 단정하지 않는다.",
       "reason": "design-decision"
     },
     {
@@ -392,7 +410,7 @@
       "unit_sha256": "690311c40c4f334e8cb6c10f175d13195386c2b38e10e24101d5b3ba4612e7af",
       "unit_text": "⛔ **`deliveryState` + `receiveGeneration` 둘로는 부족하다** — \"45초가 지났나 / 이미 한 번 물었나 / 연결은 살아 있나\"를 판단할 수 없다. 필요한 입력:",
       "classification": "normative",
-      "detail": "제안 축인 deliveryState + receiveGeneration 둘만으로는 재검증 판정을 내릴 수 없으니 6개 입력을 받는 파생 함수로 두겠다는 설계 결정이다. 두 필드 모두 미구현이라 현재 동작 단정이 아니다.",
+      "detail": "deliveryState와 receiveGeneration만으로는 시간·episode·연결 상태를 판정할 수 없으므로 추가 입력을 받는 파생 정책이 필요하다는 설계 제약이다. 구현 완료 사실은 별도 code_fact 단위가 진다.",
       "reason": "design-decision"
     },
     {
@@ -429,81 +447,58 @@
     },
     {
       "destination": "CUT",
-      "rid": "R-CUT-1",
-      "unit_sha256": "8b32b7a4e0c0d6805c89608edd2c08302aba6343459aa21cd61079620198a5e5",
-      "unit_text": "⚠️ **`usdtDisplayState` 의 최외곽 게이트가 `if RealtimeV2Config.isTetherTopicEnabled` 이고 그 else 가 `sourceRates()` 다**(baseline F13). Release 기본값은 topic **OFF** 다(baseline F14) — 그러므로 arming 없이 출시하면 테더 탭은 간헐이 아니라 **상시 legacy reference subset** 으로 간다. 그 subset 은 SourceRegistry 와 legacy 가 겹치는 investing/kb/hana 후보뿐이며 사용자 visibility 에 따라 더 줄 수 있다(`ios/FXi/Models/RateSource.swift:32-91` · `ios/FXi/Services/SourcePreferenceManager.swift:133-161`). 즉 거래소 5 + KRX 는 표시되지 않는다. legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.",
-      "classification": "code_fact",
-      "detail": "topic OFF fallback은 sourceRates이고, SourceRegistry와 legacy가 겹치는 후보는 investing/kb/hana뿐이다. 실제 visibility는 더 줄 수 있어 기존 상시 은행 3행 표현을 제거했다.",
-      "provenance": [
-        "baseline:F13",
-        "baseline:F14",
-        "file:ios/FXi/Models/RateSource.swift:32-91",
-        "file:ios/FXi/Services/SourcePreferenceManager.swift:133-161"
-      ]
-    },
-    {
-      "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "048466ecc23710d1fc8491b710e9c02040f91a2a7e11408f0ba743bca4fa8c93",
-      "unit_text": "| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ **이미 있다** — `testUsdtDisplay_coldStart_returnsEmpty_noCachedNoPartialLegacy`(`ios/FXiTests/TetherDataPathTests.swift:741-763`). 감사만 |",
+      "unit_sha256": "a9ddb0bcb89dc8b7caac379672cf77b7458b3a27f6afb4494a2de3cf0957c70d",
+      "unit_text": "| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ legacy cache를 seed해도 FX 미수신 표면이 비어 있고(`ios/FXiTests/TetherDataPathTests.swift:467-485`), 빈 tether snapshot도 legacy로 채우지 않는다(`:604-615`) |",
       "classification": "code_fact",
       "detail": "cold-start 빈 결과 회귀 테스트가 이미 존재한다는 현재 테스트 상태를 단정한다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:741-763"
+        "file:ios/FXiTests/TetherDataPathTests.swift:467-485"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "5bcac561bd2d0ddae412c458dfda85a1f0d73a0270de1db743a09e90439f5a83",
-      "unit_text": "| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | 🔶 **A1([R-CUT-2](#r-cut-2)) 과 함께** — 현재는 cache roundtrip·저장만 있고(`ios/FXiTests/TetherDataPathTests.swift:549-564`) *재기동 후 표시*는 미검증 |",
+      "unit_sha256": "4bb484970879267f36f21986c0dd04297121f2a6dc1e45ea98a08d1ef5ed1420",
+      "unit_text": "| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:879-897`) · FX와 은행 알림(`:685-706`) · DXY(`:394-409`) cold-start 복원을 잠근다 |",
       "classification": "code_fact",
-      "detail": "pinned 테스트는 topic cache 저장/roundtrip까지만 검증하고 재기동 후 표시 행위는 검증하지 않는다. 현재 테스트 범위와 미래 작업을 한 표 행에서 구분했다.",
+      "detail": "USDT·FX/은행 알림·DXY 각각의 disk last-known을 cold-start에서 복원하는 행동 테스트가 현재 존재한다는 테스트 범위 단정이다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:549-564"
+        "file:ios/FXiTests/TetherDataPathTests.swift:879-897"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "42cf219147550e6668372f8b52b428926cbe6800bf02215a75906f3737a3e4f8",
-      "unit_text": "| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | 🔶 **A1([R-CUT-2](#r-cut-2)) 과 함께** — 현행 코드에선 **통과 불가**(`onRatesReceived` 가 `appState = .connected` 를 직접 세팅 — `ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-979`) |",
+      "unit_sha256": "0e1d658371801f3e8213e6becdcca01c9ee07235608832d1f3c02413c4f03b6b",
+      "unit_text": "| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:394-409`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |",
       "classification": "code_fact",
-      "detail": "onRatesReceived 가 appState 를 직접 세팅해 현행 코드에선 통과 불가라는 현재 코드 사실을 단정한다.",
+      "detail": "legacy rates/indices 프레임을 주입해도 DXY topic owner와 transport lifecycle이 유지되고, architecture test가 legacy handler 복원을 거부한다는 현재 행동 테스트 사실이다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-979"
+        "file:ios/FXiTests/TetherDataPathTests.swift:394-409",
+        "file:ios/FXiTests/TopicMessageTests.swift:386-428"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "86ad466a23f3638f5dd3db2744f439b7cb3c74e03a7b1db0455eab02e0d813c3",
-      "unit_text": "| B4 | 무료 티어가 `ExchangeRate` **타입**으로 계속 디코드된다 | ✅ **이미 있다** — 무료 스냅샷 디코드 테스트(`ios/FXiTests/TopicMessageTests.swift:513-522`)가 잠근다. 감사만 |",
+      "unit_sha256": "cd53bae40778bc21dea5bd72b2f29b89313970db8b17d622ed182d6b3c94d78b",
+      "unit_text": "| B4 | 무료 티어가 `ExchangeRate` **타입**으로 계속 디코드된다 | ✅ 무료 스냅샷의 `rate.entries`를 `ExchangeRate`로 디코드한다(`ios/FXiTests/TopicMessageTests.swift:494-520`) |",
       "classification": "code_fact",
       "detail": "무료 스냅샷 디코드 테스트가 ExchangeRate 타입을 이미 잠근다는 현재 테스트 상태를 단정한다.",
       "provenance": [
-        "file:ios/FXiTests/TopicMessageTests.swift:513-522"
+        "file:ios/FXiTests/TopicMessageTests.swift:494-520"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "111912979a158067e5f2300376d8132d43aa5e3d6beb15bd0c2a4e7a3f89a0c4",
-      "unit_text": "| B6 | **DXY topic 이 live tip 을 공급**한다 | 🔶 `dxy:spot`([R-INV-4](../DECISIONS.md#r-inv-4)) 구현과 함께 |",
-      "classification": "normative",
-      "detail": "보존할 행위 목표를 적은 매트릭스 행이다. DXY 는 지금 legacy envelope 의 indices 로 오고 dxy:spot topic 은 아직 없어, 이 행은 그 구현과 함께 성립하는 미래 작업이지 현재 코드 동작 단정이 아니다.",
-      "reason": "future-work"
-    },
-    {
-      "destination": "CUT",
-      "rid": "R-CUT-13",
-      "unit_sha256": "cfa1ba083687feaf63feda7db495ab121837191c20602d31fd00b7a29c20c7c8",
-      "unit_text": "| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | 🔶 A2([R-CUT-3](#r-cut-3)) 신설과 함께 (지금은 legacy 만 본다 = 현행 버그; `ios/FXi/Views/Components/AlertAddSheet.swift:96-103` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553`) |",
+      "unit_sha256": "e8754acbb44c2a817a01c6bd5ceb53c9f7f3ab2229966c9e11c56aa7dace1061",
+      "unit_text": "| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |",
       "classification": "code_fact",
-      "detail": "AlertAddSheet가 appState.rates 직결 helper를 사용해 FX topic 경로를 보지 않는 현재 배선을 pinned iOS 두 파일에서 확인했다.",
+      "detail": "FX topic disk last-known 복원 뒤 rates(for:)가 은행 알림 현재가를 제공한다는 현재 행동 테스트 사실이다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553",
-        "file:ios/FXi/Views/Components/AlertAddSheet.swift:96-103"
+        "file:ios/FXiTests/TetherDataPathTests.swift:685-706"
       ]
     },
     {
@@ -512,7 +507,7 @@
       "unit_sha256": "cc4b8239735f32dfe94aa3a0004641da59840308812950a9fd9f3126aedfc010",
       "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:648`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:619`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |",
       "classification": "code_fact",
-      "detail": "topics_disabled purge 는 두 테스트로 잠겼고 재활성화 복구는 테스트가 0건이라는, cutover 테스트 매트릭스의 현재 커버리지 단정이다.",
+      "detail": "topics_disabled purge의 메모리·디스크·파생 상태 제거와 다음 연결 세대의 자동 복구를 실 transport 테스트까지 포함해 잠갔다는 현재 커버리지 단정이다.",
       "provenance": [
         "file:ios/FXiTests/TetherDataPathTests.swift:619",
         "file:ios/FXiTests/TetherDataPathTests.swift:648",
@@ -525,7 +520,7 @@
       "unit_sha256": "f5f73c8c225e7cf9b4453128d22dfc09b13f06bcd06abe1dde9e230899253a25",
       "unit_text": "| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5923`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6139`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |",
       "classification": "code_fact",
-      "detail": "lease hard-expiry 의 '같은 id 는 연장 못 함' 과 '세대당 1회 강제 reconnect' 가 둘 다 테스트로 잠겼다는 커버리지 단정이다. 후자는 두 topic 동시 만료 형태여야 판별된다.",
+      "detail": "같은 lease id의 만료 불연장과 같은 lease 세대에서 강제 reconnect 1회 불변식을 현재 행동 테스트가 잠근다는 커버리지 단정이다.",
       "provenance": [
         "file:ios/FXiTests/TopicMessageTests.swift:5923",
         "file:ios/FXiTests/TopicMessageTests.swift:6139"
@@ -533,113 +528,38 @@
     },
     {
       "destination": "CUT",
-      "rid": "R-CUT-2",
-      "unit_sha256": "f6934d3d62416348600070b6868a7b4f8857722c71c370e05a0d12b5268c0808",
-      "unit_text": "| A1 | **`AppState` enum 자체** — `.connected(rates:)` / `.offline(cachedRates:)` / `.refreshingCached(cachedRates:)` | legacy 배열이 **enum payload** 이고 `AppState.rates` 가 모든 소비의 단일 관문이다(`ios/FXi/Models/AppState.swift:11-35`). 지우면 앱 **최상위 화면 라우팅**(loading/error/tab — `ios/FXi/ContentView.swift:121-134`)과 배너 3종(`ios/FXi/Views/Components/OfflineBanner.swift:102-152`)의 판정 근거가 통째로 사라진다. topic 쪽엔 전역 lifecycle 상태 개념이 없고 `tetherReceived`/`fxReceivedAssets`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:27-47`) 로 흩어져 있다. ⚠️ 여기 있던 `freshFxAssets` 인용은 **삭제된 심볼**이라 뺐다 — 고정 iOS commit 전수 검색 0건이고 동등 rename 도 없다(현행 `ios/FXi/ViewModels/ExchangeRateViewModel.swift:224` 는 무관한 `freshnessGeneration` 이다). FX 시간 만료 개념 자체가 `R-CLI-1`(`spec/ios-topic-state-machine.md:31`) 로 제거돼, 지금 FX 가용성은 `fxTopicRates(asset:)`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:364-377`) 가 연결·ACK·lease·명시적 거절만 보고 판정한다. 남은 시간 만료 신호는 tether 전용 `tetherIsFresh`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:218`) 하나다. **흩어져 있다는 사실 자체는 그대로**라 → **앱 수명주기 상태머신 재설계**다 |",
-      "classification": "code_fact",
-      "detail": "AppState enum payload · rates 단일 관문 · topic 측 상태 분산을 현재 코드 구조로 단정한다.",
-      "provenance": [
-        "file:ios/FXi/ContentView.swift:121-134",
-        "file:ios/FXi/Models/AppState.swift:11-35",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:218",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:224",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:27-47",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:364-377",
-        "file:ios/FXi/Views/Components/OfflineBanner.swift:102-152",
-        "file:spec/ios-topic-state-machine.md:31"
-      ]
-    },
-    {
-      "destination": "CUT",
-      "rid": "R-CUT-21",
-      "unit_sha256": "445db8489571afe06ed303d16aeff44e3141bf34239028b2a3314a2ceb6da39e",
-      "unit_text": "⛔ **정정: 지금 새로 쓸 테스트는 사실상 없다.** B1·B4 는 **이미 잠겨 있어 감사만** 하면 되고, B1 은 `ios/FXiTests/TetherDataPathTests.swift:741-763`, B4 는 `ios/FXiTests/TopicMessageTests.swift:513-522` 가 잠근다. B2·B3 는 **A1([R-CUT-2](#r-cut-2), `AppState` 대체) 구현과 같은 커밋**에 들어가야 한다 — 특히 B3 는 legacy 가 `AppState` 를 직접 갱신하는 현행 구조 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-979`)에서 **원리적으로 통과할 수 없다**. → 즉 **\"테스트부터 시작\"이라는 착수 경로는 없다.** 계약을 닫는 것이 실제 다음 단계다.",
-      "classification": "code_fact",
-      "detail": "B1과 B4의 기존 테스트 위치를 같은 단위에 추가했고, B3가 legacy AppState 직접 갱신 구조에서 통과 불가임을 기존 인용으로 확인했다.",
-      "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-979",
-        "file:ios/FXiTests/TetherDataPathTests.swift:741-763",
-        "file:ios/FXiTests/TopicMessageTests.swift:513-522"
-      ]
-    },
-    {
-      "destination": "CUT",
       "rid": "R-CUT-3",
-      "unit_sha256": "c6c36ef58eab9a777d696ec1fc1457ae787979b9a6d428790b28975781c4ca77",
-      "unit_text": "| A2 | **은행 가격알림 시트** — `AlertAddSheet.rate(for:)`(`ios/FXi/Views/Components/AlertAddSheet.swift:96-103`) → `rateViewModel.rates(for:)` → `appState.rates` **직결**(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553`) | `baseRates`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:592-608`) 를 **안 거친다**. 즉 fx topic 이 켜져 있어도 이 시트는 **topic 값을 못 본다**(오늘도 그렇다 — 탭은 topic, 알림 시트는 legacy). 배선 교체가 아니라 **topic 경로 신설**이다 |",
+      "unit_sha256": "b2a614b168f6f2fadbcf3a3b6545c75565028efb50f3c94775f09cd84c28fd6e",
+      "unit_text": "| A2 | **은행 가격알림 시트** | `AlertAddSheet.rate(for:)`는 `rateViewModel.rates(for:)`를 쓰고(`ios/FXi/Views/Components/AlertAddSheet.swift:90-103`), 그 조회는 탭과 같은 `baseRates(for:)`의 FX topic live/last-known으로 수렴한다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625`). cold-start 캐시 기반 현재가도 행동 시험이 잠근다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |",
       "classification": "code_fact",
-      "detail": "알림 시트가 baseRates 를 거치지 않고 appState.rates 로 직결된다는 현재 배선을 단정한다.",
+      "detail": "AlertAddSheet가 rateViewModel.rates(for:)를 통해 탭과 같은 FX topic live/last-known 경로로 수렴하고, cold-start 현재가도 행동 테스트가 잠근다는 현재 배선 사실이다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:592-608",
-        "file:ios/FXi/Views/Components/AlertAddSheet.swift:96-103"
-      ]
-    },
-    {
-      "destination": "CUT",
-      "rid": "R-CUT-4",
-      "unit_sha256": "1273959a22373bdd4ccb3f1896a98b1eb8df7c8b15f6aff3c62564a5948e532d",
-      "unit_text": "| A3 | **WS `handleLegacyRatesMessage` 3-in-1 envelope** — `rates` + `indices`(DXY) + `graph_buckets` 동거(`ios/FXi/Services/WebSocketService.swift:1892-1910`) | `rates` 만 지워도 `graph_buckets` callback 소유자(`GraphViewModel` — `ios/FXi/ViewModels/GraphViewModel.swift:553-557`)가 남아 디코드를 못 지운다. ⚠️ **단 서버 계약 변경은 불필요** — 그 VM 은 런타임에 생성·주입되고 callback/observer 를 설치하지만(`ios/FXi/FXiApp.swift:24-28` · `ios/FXi/ViewModels/GraphViewModel.swift:86-101`), premium `ContentView` 는 legacy graph 를 시작하거나 mount 하지 않는다(`ios/FXi/ContentView.swift:89-96`). `RootView` 에 남은 실제 소비는 로그아웃/구독 전환의 `stop()`뿐이다(`ios/FXi/FXiApp.swift:134-140` · `ios/FXi/FXiApp.swift:178-188`). **클라에서 VM·callback·환경 주입과 stop 배선을 함께 제거**하면 끝이고, 서버는 구버전용으로 `graph_buckets` 를 계속 보내면 된다 |",
-      "classification": "code_fact",
-      "detail": "legacy envelope/callback은 남지만 premium ContentView는 legacy graph를 시작하거나 mount하지 않는다. RootView에 남은 stop 소비까지 확인해 제거 범위를 VM·callback·환경 주입·stop 배선으로 교정했다.",
-      "provenance": [
-        "file:ios/FXi/ContentView.swift:89-96",
-        "file:ios/FXi/FXiApp.swift:134-140",
-        "file:ios/FXi/FXiApp.swift:178-188",
-        "file:ios/FXi/FXiApp.swift:24-28",
-        "file:ios/FXi/Services/WebSocketService.swift:1892-1910",
-        "file:ios/FXi/ViewModels/GraphViewModel.swift:553-557",
-        "file:ios/FXi/ViewModels/GraphViewModel.swift:86-101"
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625",
+        "file:ios/FXi/Views/Components/AlertAddSheet.swift:90-103",
+        "file:ios/FXiTests/TetherDataPathTests.swift:685-706"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-5",
-      "unit_sha256": "84a8ca176ba32c3f13b085eeb28b8a5b0159be22c6e1562b80a8acb2567b2de4",
-      "unit_text": "| A4 | `usdtDisplayState` 5분기 사다리(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707`) | 각 분기가 서로 다른 실측 버그(행 reflow / blank flash / MODE 2 frozen)의 대응이고 근거가 주석에 박혀 있다. 마지막 두 분기만 떼면 `isOffline`/`isRefreshingCached` 조건이 함께 무의미해진다 |",
+      "unit_sha256": "9adb79c3c8c6e86dc2d7d28fba8f9e0fff6fc41311eb653d42c4c42695940a31",
+      "unit_text": "| A4 | `usdtDisplayState` fallback 단순화 | topic gate가 꺼지면 빈 상태, 켜지면 live `tetherTopicRates` 또는 disk `cachedTopicRates`만 쓴다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`). 빈 snapshot과 legacy cache를 다시 노출하지 않는 행동 시험이 있다(`ios/FXiTests/TetherDataPathTests.swift:467-485` · `:604-615`) |",
       "classification": "code_fact",
-      "detail": "usdtDisplayState 가 5분기이고 isOffline/isRefreshingCached 를 쓴다는 현재 코드를 단정한다.",
+      "detail": "현재 usdtDisplayState는 gate OFF에서 빈 상태, ON에서 live tether 또는 disk topic cache만 사용하며 legacy cache를 다시 노출하지 않는다는 코드·행동 테스트 사실이다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707"
+        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714",
+        "file:ios/FXiTests/TetherDataPathTests.swift:467-485"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-6",
-      "unit_sha256": "3de649c94543350029b1a368a1992c6417b5afa99824b060b326419ef7eadbc4",
-      "unit_text": "사용처가 **0** 인 데드 코드: `RateGraphView` 전체(사용처=자기 `#Preview` — `ios/FXi/Views/RateGraphView.swift:1446-1458`) / `PeriodTabBar`(`ios/FXi/Views/Components/PeriodTabBar.swift:11-58`) / `WebSocketService` 의 `latestRates`·`lastUpdated` 사본(`ios/FXi/Services/WebSocketService.swift:42`) / `WebSocketMessage.updateGraphCache`(`ios/FXi/Models/WebSocketMessage.swift:33`) / `ExchangeRateViewModel.referenceRate(for:)`·`rateRange(for:)`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:555-563`). 여기서 0은 고정 iOS commit 의 production tree 전수 검색 결과다. 각 심볼의 정의/Preview 를 제외한 호출을 `git grep` 으로 확인했고 `RateGraphView`·`PeriodTabBar` 는 자기 Preview 외 0건, `updateGraphCache`·두 ViewModel helper 는 호출 0건이었다. → **cutover 전에 지운다.** 지우고 나면 남는 소비처가 줄어 나머지 작업이 작아진다. ⚠️ **\"위험 0\"은 과장이다** — `RateGraphView`/`PeriodTabBar` 는 Preview 외 사용처가 없지만, `GraphViewModel` 은 **런타임에 생성되어**(`ios/FXi/FXiApp.swift:24-28`) **legacy graph callback 과 observer 를 설치**한다(`ios/FXi/ViewModels/GraphViewModel.swift:86-101`). 저위험이되 **동작 변화 0 은 아니다** → Debug/Release 양쪽 빌드 + callback 소유권 확인이 필요하다.",
+      "unit_sha256": "1325861359614ccf7fa52c2a493184a7e3997a942df6754bb1d2f67392233f82",
+      "unit_text": "`RateGraphView`·`PeriodTabBar`·`GraphViewModel`·`WebSocketMessage` 파일과 legacy 사본/helper를 `0f2a3f8`에서 제거했다. `SampleGraphView`가 소유하던 정책 설명은 지역화해 삭제된 파일을 문서 정본으로 가리키지 않는다. Debug suite 776개와 Release OFF/임시 ON 빌드가 통과했고, architecture test가 callback 소유권과 파일 복원을 함께 감시한다 (`ios/FXiTests/TopicMessageTests.swift:386-428`).",
       "classification": "code_fact",
-      "detail": "고정 iOS tree에서 정의와 Preview를 제외한 호출을 전수 검색했다. 열거한 심볼은 production 호출 0건이며 GraphViewModel 자체는 런타임 생성·callback/observer 설치가 있어 별도 제거가 필요하다.",
+      "detail": "legacy graph/socket 파일이 실제로 제거됐고 architecture test가 해당 파일과 callback/API 소비 경로의 복원을 함께 거부한다는 현재 cutover 사실이다.",
       "provenance": [
-        "file:ios/FXi/FXiApp.swift:24-28",
-        "file:ios/FXi/Models/WebSocketMessage.swift:33",
-        "file:ios/FXi/Services/WebSocketService.swift:42",
-        "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:555-563",
-        "file:ios/FXi/ViewModels/GraphViewModel.swift:86-101",
-        "file:ios/FXi/Views/Components/PeriodTabBar.swift:11-58",
-        "file:ios/FXi/Views/RateGraphView.swift:1446-1458"
-      ]
-    },
-    {
-      "destination": "CUT",
-      "rid": "R-CUT-7",
-      "unit_sha256": "9b89750e827d44d5bb161e0e7d1795fbb78e2f79a793f8081a49acca85959be8",
-      "unit_text": "정확히는 **envelope 1차 디코드 테스트는 있다**(`TopicMessageTests.testEnvelopeDecodes_legacyRates_topicAbsent` — `ios/FXiTests/TopicMessageTests.swift:18-24`). 없는 것은 **사용자 행위** 커버리지다 — `ExchangeRateResponse`/`IndicesPayload`/`DxyLiveTick` 를 참조하는 테스트가 **0건**(부정 사실이라 행 번호가 없다 — 명령·범위·결과로 단다: `git grep -n \"ExchangeRateResponse\\|IndicesPayload\\|DxyLiveTick\" <pinned ios> -- FXiTests` → 0건)이라 DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.",
-      "classification": "code_fact",
-      "detail": "envelope 디코드 테스트가 존재하고 세 legacy 타입을 참조하는 테스트는 0건이라는 현재 테스트 상태를 단정한다.",
-      "provenance": [
-        "file:ios/FXiTests/TopicMessageTests.swift:18-24"
-      ]
-    },
-    {
-      "destination": "CUT",
-      "rid": "R-CUT-8",
-      "unit_sha256": "150228b2fd429f2d5bdd3580efb20ce8373648c31b7a3a17b9ac9940318f0ab6",
-      "unit_text": "`ExchangeRate` **struct 자체는 무료 티어 스냅샷이 verbatim 디코드**해 재사용한다 (`ios/FXi/Models/FreeSnapshotModels.swift:27-31`). 제거 대상은 `ExchangeRateResponse` / `Metadata` / `IndicesPayload` 이지 `ExchangeRate` 가 아니다.",
-      "classification": "code_fact",
-      "detail": "무료 티어 스냅샷이 ExchangeRate 를 verbatim 디코드해 재사용한다는 현재 모델을 단정한다.",
-      "provenance": [
-        "file:ios/FXi/Models/FreeSnapshotModels.swift:27-31"
+        "file:ios/FXiTests/TopicMessageTests.swift:386-428"
       ]
     },
     {
@@ -669,8 +589,8 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
-      "unit_sha256": "215cff6a1fb9adf77d7852b02d51aab8228b488a7dba56cfbd6d7d7a341a84b9",
-      "unit_text": "서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다 (`app/topic_dispatcher.py:858-948`; baseline D5). LOAD-S3/S7 구현 뒤 snapshot deadline·transient build 실패와 active cooldown은 **1013**, fatal 실패는 **1011**로 닫힌다(`app/topic_initial_snapshot.py:1049-1075`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:1077-1078`). FX publisher도 build/publish **전** 예외를 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).",
+      "unit_sha256": "a782a0e62d9fe2e0ca1ef5c24cb4bf5e73c665bc5d922d5a89d4a2da097af30f",
+      "unit_text": "서버는 **registry 등록과 ack 를 먼저 끝낸 뒤** initial snapshot 을 만든다 (`app/topic_dispatcher.py:858-948`; baseline D5). LOAD-S3/S7 구현 뒤 snapshot deadline·transient build 실패와 active cooldown은 **1013**, fatal 실패는 **1011**로 닫힌다(`app/topic_initial_snapshot.py:1072-1098`; baseline D3). 다만 builder의 `None`은 여전히 연결을 유지한 채 조용히 skip한다(`app/topic_initial_snapshot.py:1100-1101`). FX publisher도 build/publish **전** 예외를 격리하고 `False`만 반환한다(`app/fx_topic_publisher.py:291-323`).",
       "classification": "code_fact",
       "detail": "고정 C1에서 dispatcher가 register→ack→snapshot 순서를 유지하고, snapshot module이 deadline/transient와 active server cooldown을 1013, fatal을 1011로 닫는 반면 None은 skip함을 확인했다. FX publisher의 선행 build 예외 격리는 별도 잔여다.",
       "provenance": [
@@ -678,8 +598,8 @@
         "baseline:D5",
         "file:app/fx_topic_publisher.py:291-323",
         "file:app/topic_dispatcher.py:858-948",
-        "file:app/topic_initial_snapshot.py:1049-1075",
-        "file:app/topic_initial_snapshot.py:1077-1078"
+        "file:app/topic_initial_snapshot.py:1072-1098",
+        "file:app/topic_initial_snapshot.py:1100-1101"
       ]
     },
     {
@@ -696,77 +616,65 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-1",
-      "unit_sha256": "7ffcd48b2892770c5790b923f0880ac2c8cbb2f9748d0012bd59a5d4c84db4a7",
-      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:991-992`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
+      "unit_sha256": "a5a3884ecfd09f0a1b7a3ae91e1f9e87fb85ef73aa42ce1383a28b65f8164853",
+      "unit_text": "⛔ **\"ack 전에 전부 build 한다\"(초안 (a))도 철회한다.** 그러면 두 가지가 깨진다 — ① build↔register 사이에 발생한 publish 를 놓치고(조용한 FX 는 낡은 prebuilt 로 오래 남는다), ② **\"지원되지만 아직 데이터가 없음\"을 거부로 오분류**한다. 실제로 KRX 는 데이터가 없어도 구독을 유지하도록 설계돼 있고(`app/topic_initial_snapshot.py:1014-1015`), iOS 모델은 `usd_krw_futures: null` 인 **빈 snapshot 을 이미 표현**한다(`ios/FXi/Models/TopicMessage.swift:100-101`). 이를 `topic_unavailable` 로 거부하면 첫 데이터가 생겨도 **그 연결에서는 영영 못 받는다.**",
       "classification": "code_fact",
       "detail": "초안 철회라는 결정과 함께 현행 코드 단정 둘이 근거로 들어가 있다 — KRX 는 entry 가 없어도 snapshot 만 skip 하고 register 를 유지하며, iOS KrxTopicData 의 usdKrwFutures 가 optional 이라 빈 snapshot 을 이미 표현한다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:991-992",
+        "file:app/topic_initial_snapshot.py:1014-1015",
         "file:ios/FXi/Models/TopicMessage.swift:100-101"
       ]
     },
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "e26a01bc7d19cbc6587ad9790df24c710fcd00d05da3004ed180cdc40da08a33",
-      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:792-948`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
+      "unit_sha256": "7c56150c2c9a6ffbea16ae567079aabb5ae0d0116e4fae19fe569f8d3067f79d",
+      "unit_text": "`0cfe474` 는 WS FX/USDT 인증 + premium 판정 + premium lease 경로를 구현했다 (`app/topic_policy.py:278-323` · `app/topic_dispatcher.py:792-948`, ADR-039 Stage A). Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와 운영 실측**을 요구한다.",
       "classification": "code_fact",
       "detail": "고정 C1의 authenticated planner부터 dispatcher 등록까지가 FX/USDT premium 인가와 lease 경로를 구현한다. Release arming은 별도 운영 활성화와 실측 조건으로 남는다.",
       "provenance": [
         "file:app/topic_dispatcher.py:792-948",
-        "file:app/topic_policy.py:285-330"
+        "file:app/topic_policy.py:278-323"
       ]
     },
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "420924334cd336bbae1dd14eaada8c02801afed861a7753534af49d18ab01c84",
-      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:285-330`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3176-3180`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:244-282`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
+      "unit_sha256": "d4e4495be983aabed39dbbd2ceafc3302ff056c25509ca437cb9065595defaa5",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:278-323`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3176-3180`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:237-275`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
       "classification": "code_fact",
       "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
       "provenance": [
         "file:app/main.py:3176-3180",
         "file:app/topic_authorization.py:372-402",
-        "file:app/topic_policy.py:244-282",
-        "file:app/topic_policy.py:285-330"
-      ]
-    },
-    {
-      "destination": "HAND",
-      "rid": "R-HAND-19",
-      "unit_sha256": "5a13c32147c2b9d87c2d16d782187ac353c03687b8f64390ddd54e00a0285c1d",
-      "unit_text": "**(b) DXY 는 현재 legacy envelope 로만 온다 → `dxy` topic 신설이 출시 선행조건이다.** (근거: baseline F12 · 서버 지원 topic 집합 `app/topic_initial_snapshot.py:323-328`)",
-      "classification": "code_fact",
-      "detail": "출시 선행조건이라는 규범과 'DXY 는 현재 legacy envelope 로만 온다'는 현행 코드 단정이 한 단위에 섞였다 — 섞이면 code_fact 다. iOS 는 legacy indices 로 DXY 를 받고 서버 지원 topic 집합에 dxy 가 없다.",
-      "provenance": [
-        "baseline:F12",
-        "file:app/topic_initial_snapshot.py:323-328"
+        "file:app/topic_policy.py:237-275",
+        "file:app/topic_policy.py:278-323"
       ]
     },
     {
       "destination": "HAND",
       "rid": "R-HAND-20",
-      "unit_sha256": "78cff6acd9ba28fa8a972b7d69a049888700cbc58bf73783eea81a391e57c959",
-      "unit_text": "[R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + KRX)은 `0cfe474`의 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:87-93` · `app/topic_policy.py:231-241`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한 `dxy:spot` 은 현재 지원 topic 집합에 없고 DXY 는 legacy envelope 로 수신되므로 (`app/topic_initial_snapshot.py:323-328` · `ios/FXi/Services/WebSocketService.swift:1892-1899`), DXY 수직 슬라이스가 publisher + snapshot + 정책행을 함께 추가할 때 이 요구가 완료된다.",
+      "unit_sha256": "d91919d21aeb6af562a55f79d6c3bfb68a547882c4fb3e98b74aa7d4549bf8b8",
+      "unit_text": "[R-OPEN-1](../DECISIONS.md#r-open-1) 이 확정한 Stage A 범위(**비-KRX 최신 topic = Firebase 인증 + premium / KRX = premium + entitlement**) 중 현재 구현 topic(FX 3 + USDT + KRX)은 `0cfe474`의 명시적 정책표에 들어갔고, 미지정 topic 은 fail-closed 다(`app/topic_policy.py:78-85` · `app/topic_policy.py:224-234`). [R-INV-4](../DECISIONS.md#r-inv-4) 가 출시 범위로 확정한 `dxy:spot`도 명시적 `PREMIUM_ONLY` 정책행과 fail-closed universe 검사를 갖고 (`app/topic_policy.py:78-100` · `app/topic_policy.py:224-234`), 지원 집합과 snapshot builder에 포함된다(`app/topic_initial_snapshot.py:312-344` · `app/topic_initial_snapshot.py:972-995`). publisher·snapshot·정책행을 함께 추가한다는 요구는 `8755510`에서 완료됐다.",
       "classification": "code_fact",
-      "detail": "고정 C1의 리터럴 정책표는 현재 구현된 FX 3종, USDT, KRX를 열거하고 미지정 topic을 거부한다. 서버 지원 집합에는 dxy:spot이 없고 iOS는 DXY를 legacy envelope로 받으므로 DXY 수직 슬라이스가 남는다.",
+      "detail": "정책표가 FX 3종·USDT·KRX·dxy:spot을 명시적으로 분류하고 미지 topic을 fail-closed하며, dxy:spot이 지원 집합과 snapshot builder에 배선됐다는 현재 서버 코드 사실이다.",
       "provenance": [
-        "file:app/topic_initial_snapshot.py:323-328",
-        "file:app/topic_policy.py:231-241",
-        "file:app/topic_policy.py:87-93",
-        "file:ios/FXi/Services/WebSocketService.swift:1892-1899"
+        "file:app/topic_initial_snapshot.py:312-344",
+        "file:app/topic_initial_snapshot.py:972-995",
+        "file:app/topic_policy.py:224-234",
+        "file:app/topic_policy.py:78-100",
+        "file:app/topic_policy.py:78-85"
       ]
     },
     {
       "destination": "HAND",
       "rid": "R-HAND-3",
-      "unit_sha256": "2a8c0cb56183cea2b0332190c7d9b2df6cb816da42c2afe4005acf736f882b70",
-      "unit_text": "- ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 초안은 *\"build 총예산 < iOS 20초\"* 라고 썼는데 **틀렸다** — iOS 는 ACK 수신 시 `takePending` 이 timeout task 를 **즉시 취소**한다(baseline F3 · F3-inf). build 는 ACK **뒤**라 그 20초는 이미 사라졌고, 클라 쪽에 build 를 묶는 상한이 **없다**. 서버의 실제 순서도 ack 전송 뒤 `send_initial_snapshots` 호출이다(`app/topic_dispatcher.py:922-948`).",
+      "unit_sha256": "dcfb6d00ec3f1991b03ad0d7f38aba0767e0a4b2f3652f12b7c6d0f30a713141",
+      "unit_text": "- ⛔ **경계는 넷이고(클라 2 · 서버 2), 제약은 둘이다.** 서버는 ACK 뒤에 `send_initial_snapshots`를 호출한다(`app/topic_dispatcher.py:922-948`). iOS는 송신 시점부터 control과 delivery deadline을 한 arbiter에 등록하고 ACK 뒤 delivery phase로 전환한다(baseline F3). 따라서 ACK watchdog을 snapshot 상한으로 오독하지 않으면서도 build 무기한 대기는 허용하지 않는다.",
       "classification": "code_fact",
-      "detail": "iOS ACK가 20초 watchdog을 취소한다는 F3/F3-inf와 서버가 ack 뒤 snapshot builder를 호출하는 실제 순서를 함께 확인했다.",
+      "detail": "서버가 ACK 뒤 initial snapshot을 호출하고 iOS는 송신 시점부터 control/delivery deadline을 단일 arbiter에 등록해 ACK 뒤 delivery phase로 전환한다는 현재 경계 사실이다.",
       "provenance": [
         "baseline:F3",
-        "baseline:F3-inf",
         "file:app/topic_dispatcher.py:922-948"
       ]
     },
@@ -788,14 +696,14 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-6",
-      "unit_sha256": "fd9f890d396f93cdd0a4a95d53c6ae76986c4abc0143122780f2b92a8d13a88f",
-      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* 앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:769`)뿐 아니라 snapshot 실패의 `1013`/`1011`도 있다(`app/topic_initial_snapshot.py:75-110` · `app/topic_initial_snapshot.py:1049-1075`). 16KB 초과의 transport `1009`는 별도 축이다.",
+      "unit_sha256": "d996cb9276ecea76d693a12300425dc5c94e1f5eb55dc093f4b9e69cf129d291",
+      "unit_text": "`topic_dispatcher.remove_websocket` docstring 이 스스로 적어 뒀다(baseline D1) — *\"main.py 의 disconnect 경로와 **publish 송신 실패 격리**에서 호출된다 … 이 메서드는 '연결이 죽었다'의 동의어가 아니다.\"* 앱 레벨 close는 인증 충돌의 `1008`(`app/topic_dispatcher.py:769`)뿐 아니라 snapshot 실패의 `1013`/`1011`도 있다(`app/topic_initial_snapshot.py:75-110` · `app/topic_initial_snapshot.py:1072-1098`). 16KB 초과의 transport `1009`는 별도 축이다.",
       "classification": "code_fact",
-      "detail": "pinned C1에는 인증 1008과 snapshot 실패·active cooldown의 1013, fatal 1011 close가 존재한다. 별개인 live publish send 실패 경로는 예외 시 registry.remove_websocket만 호출하고 소켓을 닫지 않아 R-HAND-6 잔여가 유지된다.",
+      "detail": "remove_websocket이 disconnect와 publish 실패 격리 양쪽에서 쓰여 연결 생존의 동의어가 아니라는 identity 경계와, 인증/snapshot/transport close code가 서로 다른 축이라는 배경 사실이다. live publish send 실패의 client-visible close 구현은 같은 RID의 후속 문단이 별도로 소유한다.",
       "provenance": [
         "baseline:D1",
         "file:app/topic_dispatcher.py:769",
-        "file:app/topic_initial_snapshot.py:1049-1075",
+        "file:app/topic_initial_snapshot.py:1072-1098",
         "file:app/topic_initial_snapshot.py:75-110"
       ]
     },
@@ -913,8 +821,8 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-3",
-      "unit_sha256": "34910917cf7d3955ad35f8591684246fe63916eb28b216bb2dfbae7ae4f30d31",
-      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은 flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은 iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현**됐고, 아래 좌표는 **pinned** iOS `99316a9` 트리에서 재도출한 것이다 — 구현 시점 commit 과 pin 은 같지 않다 (`ios/FXi/Services/WebSocketService.swift:1410-1428` · `ios/FXi/Services/WebSocketService.swift:1523-1563` · `ios/FXi/Services/WebSocketService.swift:1602-1624` · `ios/FXi/Services/WebSocketService.swift:2035-2094`). 그리고 pinned 트리에는 이 네 좌표가 덮지 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는 \"재구독을 흩뜨린다\"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2` (`ios/FXi/Utils/Constants.swift:275-276`)를 `topicRevalidationDelayNanoseconds` (`ios/FXi/Services/WebSocketService.swift:927-934`)가 `U(0, 2초)`로 바꾸고, `revalidateSilencedTopic` 이 그만큼 기다린 **뒤에야** 재검증 subscribe 를 보낸다 (`ios/FXi/Services/WebSocketService.swift:1182-1195`). jitter seam 의 프로덕션 기본값은 `Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:95` · `ios/FXi/Services/WebSocketService.swift:162`), 이미 예약된 재검증이 있거나 channel 이 없거나 변환이 실패하면 **지연 없이 보내는 fallback 대신** degraded 로 접는다 (`ios/FXi/Services/WebSocketService.swift:1182-1190`). ⚠️ 이 축은 `45a8a12` 에는 **없었다**(그 트리의 `FXi/Utils/Constants.swift` 에 `topicRevalidationJitterMaxSeconds` 부재) — 그러니 \"`45a8a12` 에서 구현됐다\"를 pinned 트리의 클라 절반 **전체**로 읽으면 안 된다. 서버 기본 1초와 클라이언트 jitter를 사용한 45초 다중 클라이언트 LOAD-S4 리허설은 GO였지만 waiter 개수 hard cap과 영구 activation은 별도다. 따라서 리허설 통과를 메모리 상한이나 운영 활성화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
+      "unit_sha256": "cc34bab21a12bfda8abe647bfd064d10b999e2687c518d17bf51fc9fedd24056",
+      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1064-1076`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은 flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은 iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현**됐고, 아래 좌표는 **pinned** iOS `99316a9` 트리에서 재도출한 것이다 — 구현 시점 commit 과 pin 은 같지 않다 (`ios/FXi/Services/WebSocketService.swift:1415-1433` · `ios/FXi/Services/WebSocketService.swift:1528-1568` · `ios/FXi/Services/WebSocketService.swift:1607-1629` · `ios/FXi/Services/WebSocketService.swift:2032-2091`). 그리고 pinned 트리에는 이 네 좌표가 덮지 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는 \"재구독을 흩뜨린다\"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2` (`ios/FXi/Utils/Constants.swift:268-269`)를 `topicRevalidationDelayNanoseconds` (`ios/FXi/Services/WebSocketService.swift:946-951`)가 `U(0, 2초)`로 바꾸고, `revalidateSilencedTopic` 이 그만큼 기다린 **뒤에야** 재검증 subscribe 를 보낸다 (`ios/FXi/Services/WebSocketService.swift:1185-1218`). jitter seam 의 프로덕션 기본값은 `Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:94` · `ios/FXi/Services/WebSocketService.swift:160`), 이미 예약된 재검증이 있거나 channel 이 없거나 변환이 실패하면 **지연 없이 보내는 fallback 대신** degraded 로 접는다 (`ios/FXi/Services/WebSocketService.swift:1185-1207`). ⚠️ 이 축은 `45a8a12` 에는 **없었다**(그 트리의 `FXi/Utils/Constants.swift` 에 `topicRevalidationJitterMaxSeconds` 부재) — 그러니 \"`45a8a12` 에서 구현됐다\"를 pinned 트리의 클라 절반 **전체**로 읽으면 안 된다. 서버 기본 1초와 클라이언트 jitter를 사용한 45초 다중 클라이언트 LOAD-S4 리허설은 GO였지만 waiter 개수 hard cap과 영구 activation은 별도다. 따라서 리허설 통과를 메모리 상한이나 운영 활성화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
       "classification": "code_fact",
       "detail": "고정 server commit에서 LOAD-S5/S6/S7 shared build·FIFO admission·transient failure cooldown과 S3/S2 예산 경계를 확인했다. pinned iOS 45a8a12의 jitter·retry cap과 45초 LOAD-S4 리허설은 완료됐지만 waiter queue 개수 hard cap과 영구 activation은 별도라 메모리 상한이나 운영 활성화 완료를 뜻하지 않는다.",
       "provenance": [
@@ -928,21 +836,21 @@
         "file:app/database.py:36-38",
         "file:app/database_settings.py:113",
         "file:app/database_settings.py:85-86",
-        "file:app/topic_initial_snapshot.py:1041-1053",
+        "file:app/topic_initial_snapshot.py:1064-1076",
         "file:app/topic_initial_snapshot.py:497-838",
         "file:app/topic_initial_snapshot.py:651-709",
         "file:app/topic_initial_snapshot.py:733-817",
         "file:app/topic_initial_snapshot.py:841-895",
-        "file:ios/FXi/Services/WebSocketService.swift:1182-1190",
-        "file:ios/FXi/Services/WebSocketService.swift:1182-1195",
-        "file:ios/FXi/Services/WebSocketService.swift:1410-1428",
-        "file:ios/FXi/Services/WebSocketService.swift:1523-1563",
-        "file:ios/FXi/Services/WebSocketService.swift:1602-1624",
-        "file:ios/FXi/Services/WebSocketService.swift:162",
-        "file:ios/FXi/Services/WebSocketService.swift:2035-2094",
-        "file:ios/FXi/Services/WebSocketService.swift:927-934",
-        "file:ios/FXi/Services/WebSocketService.swift:95",
-        "file:ios/FXi/Utils/Constants.swift:275-276"
+        "file:ios/FXi/Services/WebSocketService.swift:1185-1207",
+        "file:ios/FXi/Services/WebSocketService.swift:1185-1218",
+        "file:ios/FXi/Services/WebSocketService.swift:1415-1433",
+        "file:ios/FXi/Services/WebSocketService.swift:1528-1568",
+        "file:ios/FXi/Services/WebSocketService.swift:160",
+        "file:ios/FXi/Services/WebSocketService.swift:1607-1629",
+        "file:ios/FXi/Services/WebSocketService.swift:2032-2091",
+        "file:ios/FXi/Services/WebSocketService.swift:94",
+        "file:ios/FXi/Services/WebSocketService.swift:946-951",
+        "file:ios/FXi/Utils/Constants.swift:268-269"
       ]
     },
     {

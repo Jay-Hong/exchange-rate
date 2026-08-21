@@ -29,6 +29,56 @@ def test_ios_provenance_root_honors_ci_override(monkeypatch, tmp_path):
     assert module.provenance_root("server") == REPO
 
 
+def test_canonical_only_citation_change_reaches_codechanged(tmp_path):
+    """baseline에 없는 canonical RID 근거도 provenance 변경 감지까지 이어진다."""
+    module = _validator_module()
+    repo = tmp_path / "server"
+    (repo / "app").mkdir(parents=True)
+    cited_file = repo / "app" / "canonical_only.py"
+    cited_file.write_text("VALUE = 1\n")
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "app/canonical_only.py"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "pin"], check=True)
+    pinned = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    document = tmp_path / "canonical.md"
+    document.write_text(
+        "<!-- rid: R-TEST-1 -->\n"
+        "현재 값은 `app/canonical_only.py:1`에 있다.\n"
+        "<!-- /rid: R-TEST-1 -->\n"
+    )
+    paths = module.canonical_cited_paths([document])
+    assert paths == {"server": ["app/canonical_only.py"], "ios": []}
+
+    cited_file.write_text("VALUE = 2\n")
+    errors = module.default_provenance(
+        "server", paths["server"], pinned, roots={"server": repo, "ios": tmp_path / "ios"}
+    )
+    assert any("E_CODECHANGED" in error and "canonical_only.py" in error for error in errors)
+
+
+def test_verify_unions_canonical_citations_into_provenance(monkeypatch):
+    """Parser와 runner가 따로 살아 있어도 verify 배선이 빠지면 근거 대조는 공허하다."""
+    module = _validator_module()
+    sentinel = "app/__canonical_only_probe__.py"
+    monkeypatch.setattr(
+        module,
+        "canonical_cited_paths",
+        lambda *args, **kwargs: {"server": [sentinel], "ios": []},
+    )
+    calls = {}
+
+    def record(repo_key, paths, pinned):
+        calls[repo_key] = {"paths": set(paths), "pinned": pinned}
+        return []
+
+    assert module.verify(provenance=True, provenance_fn=record) == 0
+    assert sentinel in calls["server"]["paths"]
+    assert calls["server"]["pinned"] == module._DEFAULT_CTX.pinned_commit["server"]
+
+
 def test_mutation_corpus_anchors_are_unique():
     """⛔ 검증기를 고치고 코퍼스를 재동기화하지 않으면 앵커가 **조용히 stale** 이 된다.
     그 상태로 `--mutations` 를 돌리면 그 항목은 주입조차 안 된 채 시간만 쓴다(2026-08-10 두 번 발생).

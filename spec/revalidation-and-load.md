@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
-- iOS 기준 commit: `cfe06f6028ec030f6d5913a54eb87262488d6f83`
+- server 기준 commit: `875551082ccd3ac51c9de4285430660948b32773`
+- iOS 기준 commit: `c90470e0f8887387cd49c528e67edfbe635de217`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c`
-- baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
+- manifest SHA: `9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee`
+- baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -89,7 +89,7 @@ I/O 상한 · 서버 실패 cooldown).
 **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본
 30초). 아래 "그대로 쌓인다" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤
 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이
-서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053`은 요청 topic을
+서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1064-1076`은 요청 topic을
 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은
 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초
 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는
@@ -104,20 +104,20 @@ admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 �
 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은
 iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현**됐고, 아래 좌표는
 **pinned** iOS `99316a9` 트리에서 재도출한 것이다 — 구현 시점 commit 과 pin 은 같지 않다
-(`ios/FXi/Services/WebSocketService.swift:1410-1428` ·
-`ios/FXi/Services/WebSocketService.swift:1523-1563` ·
-`ios/FXi/Services/WebSocketService.swift:1602-1624` ·
-`ios/FXi/Services/WebSocketService.swift:2035-2094`). 그리고 pinned 트리에는 이 네 좌표가 덮지
+(`ios/FXi/Services/WebSocketService.swift:1415-1433` ·
+`ios/FXi/Services/WebSocketService.swift:1528-1568` ·
+`ios/FXi/Services/WebSocketService.swift:1607-1629` ·
+`ios/FXi/Services/WebSocketService.swift:2032-2091`). 그리고 pinned 트리에는 이 네 좌표가 덮지
 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는
 "재구독을 흩뜨린다"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2`
-(`ios/FXi/Utils/Constants.swift:275-276`)를 `topicRevalidationDelayNanoseconds`
-(`ios/FXi/Services/WebSocketService.swift:927-934`)가 `U(0, 2초)`로 바꾸고,
+(`ios/FXi/Utils/Constants.swift:268-269`)를 `topicRevalidationDelayNanoseconds`
+(`ios/FXi/Services/WebSocketService.swift:946-951`)가 `U(0, 2초)`로 바꾸고,
 `revalidateSilencedTopic` 이 그만큼 기다린 **뒤에야** 재검증 subscribe 를 보낸다
-(`ios/FXi/Services/WebSocketService.swift:1182-1195`). jitter seam 의 프로덕션 기본값은
-`Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:95` ·
-`ios/FXi/Services/WebSocketService.swift:162`), 이미 예약된 재검증이 있거나 channel 이 없거나
+(`ios/FXi/Services/WebSocketService.swift:1185-1218`). jitter seam 의 프로덕션 기본값은
+`Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:94` ·
+`ios/FXi/Services/WebSocketService.swift:160`), 이미 예약된 재검증이 있거나 channel 이 없거나
 변환이 실패하면 **지연 없이 보내는 fallback 대신** degraded 로 접는다
-(`ios/FXi/Services/WebSocketService.swift:1182-1190`).
+(`ios/FXi/Services/WebSocketService.swift:1185-1207`).
 ⚠️ 이 축은 `45a8a12` 에는 **없었다**(그 트리의 `FXi/Utils/Constants.swift` 에
 `topicRevalidationJitterMaxSeconds` 부재) — 그러니 "`45a8a12` 에서 구현됐다"를 pinned 트리의 클라
 절반 **전체**로 읽으면 안 된다. 서버 기본 1초와 클라이언트 jitter를 사용한

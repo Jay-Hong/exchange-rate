@@ -116,6 +116,52 @@ _CLAUDE_CITE = re.compile(
     r"(?P<path>CLAUDE\.md)(?!\.?[A-Za-z0-9_-])"
 )
 
+CANONICAL_CITATION_DOCUMENTS = (
+    REPO / "DECISIONS.md",
+    REPO / "spec" / "topic-snapshot-handoff.md",
+    REPO / "spec" / "ios-topic-state-machine.md",
+    REPO / "spec" / "legacy-cutover.md",
+    REPO / "spec" / "revalidation-and-load.md",
+    REPO / "spec" / "publisher-health-slo.md",
+)
+_RID_BLOCK = re.compile(
+    r"<!-- rid: (?P<rid>R-[A-Z]+-\d+) -->.*?<!-- /rid: (?P=rid) -->",
+    re.S,
+)
+_CANONICAL_BACKTICK_LINE = re.compile(
+    r"`(?P<path>(?:(?:exchange-rate|ios)/)?"
+    r"(?:[^`\n\s:]+/)*[^`\n\s/:]+\.[^`\n\s/:]+):"
+    r"\d+(?:-\d+)?`"
+)
+
+
+def _canonical_repo_path(path: str) -> tuple[str, str]:
+    clean = path.removeprefix("exchange-rate/")
+    if clean.startswith("ios/"):
+        return "ios", clean.removeprefix("ios/")
+    if clean.startswith(("FXi/", "FXiTests/", "FXi.xcodeproj/")):
+        return "ios", clean
+    return "server", clean
+
+
+def canonical_cited_paths(
+    documents: tuple[pathlib.Path, ...] | list[pathlib.Path] | None = None,
+) -> dict[str, list[str]]:
+    """Canonical RID 블록의 pinned ``file:line`` 근거 경로를 도출한다.
+
+    baseline은 최초 사실 집합이고 canonical 문서는 그 사실을 현재 요구사항에 결속한다. 둘 중
+    baseline만 provenance에 넘기면 canonical 문서가 새로 인용한 파일은 변경돼도
+    ``E_CODECHANGED``가 보지 못한다.
+    """
+    out: dict[str, set[str]] = {"server": set(), "ios": set()}
+    for document in documents or CANONICAL_CITATION_DOCUMENTS:
+        text = document.read_text()
+        for block in _RID_BLOCK.finditer(text):
+            for match in _CANONICAL_BACKTICK_LINE.finditer(block.group(0)):
+                repo_key, relative = _canonical_repo_path(match.group("path"))
+                out[repo_key].add(relative)
+    return {key: sorted(paths) for key, paths in out.items()}
+
 
 def cited_paths(baseline: pathlib.Path | None = None) -> dict[str, list[str]]:
     """⛔ 손으로 적지 않는다 — baseline 본문에서 **도출**한다.
@@ -748,7 +794,12 @@ def verify(manifest_path: pathlib.Path | None = None, *, provenance: bool = Fals
             return 0
         return report(fail)
     runner = provenance_fn or default_provenance
-    cited = cited_paths(ctx.baseline)
+    baseline_cited = cited_paths(ctx.baseline)
+    canonical_cited = canonical_cited_paths()
+    cited = {
+        repo_key: sorted(set(baseline_cited[repo_key]).union(canonical_cited[repo_key]))
+        for repo_key in ("server", "ios")
+    }
     broad = broad_cited_paths(ctx.baseline)
     emphasized = underscore_citations(ctx.baseline)
     if emphasized:
@@ -763,11 +814,13 @@ def verify(manifest_path: pathlib.Path | None = None, *, provenance: bool = Fals
     for repo_key in ("server", "ios"):
         # ⛔ 교차검증을 **한 방향만** 보면 넓은 그물이 좁아지는 퇴행을 불변식으로 못 잡는다
         #    (지금은 합성 프로브 행 하나에만 기댄다). 양방향으로 본다 — 현재 두 차집합 모두 공집합이다.
-        lost = sorted(set(cited.get(repo_key, [])) - set(broad[repo_key]) - CITATION_EXCLUSIONS)
+        lost = sorted(
+            set(baseline_cited.get(repo_key, [])) - set(broad[repo_key]) - CITATION_EXCLUSIONS
+        )
         if lost:
             fail.append(f"[E_CITEBROADMISS] narrow 는 뽑는데 넓은 그물이 놓친 {repo_key} 경로 "
                         f"{len(lost)}개: {lost[:5]} — 그물이 좁아졌거나 _KNOWN_EXT 가 낡았다")
-        missed = sorted(set(broad[repo_key]) - set(cited.get(repo_key, [])))
+        missed = sorted(set(broad[repo_key]) - set(baseline_cited.get(repo_key, [])))
         if missed:
             fail.append(f"[E_CITEMISS] baseline 이 인용하는데 도출에서 빠진 {repo_key} 경로 "
                         f"{len(missed)}개: {missed[:5]} — 정규식이 좁아졌거나 "
@@ -775,9 +828,9 @@ def verify(manifest_path: pathlib.Path | None = None, *, provenance: bool = Fals
     for repo_key in ("server", "ios"):
         paths = sorted(cited.get(repo_key, []))
         if not paths:
-            # baseline 서식이 바뀌어 정규식이 빗나가면 **조용히 아무것도 검사하지 않는다**
-            fail.append(f"[E_NOCITED] baseline 에서 도출한 {repo_key} 인용 경로가 0개 "
-                        f"— 정규식이 빗나갔거나 baseline 이 비었다")
+            # baseline/canonical 서식이 바뀌어 두 추출기가 모두 빗나가면 **조용히 아무것도 검사하지 않는다**
+            fail.append(f"[E_NOCITED] baseline/canonical 에서 도출한 {repo_key} 인용 경로가 0개 "
+                        f"— 정규식이 빗나갔거나 정본이 비었다")
             continue
         fail.extend(runner(repo_key, paths, ctx.pinned_commit[repo_key]))
 

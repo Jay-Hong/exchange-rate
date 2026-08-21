@@ -97,7 +97,9 @@ EXPECTED_MARKDOWN_LINK_DOCS = {
     REPO / "spec/topic-snapshot-handoff.md",
 }
 RID_BACKTICK_LOCATOR_INVENTORY = {
-    "ADR": 32,
+    # 2026-08-21 topic-only cutover semantic C2: Release OFF fail-closed 분기 +1,
+    #                cutover 완료 단정을 architecture test/DXY publisher에 직접 결속해 +3 (35 → 39).
+    "ADR": 39,
     # 2026-08-20 R-CLI-24 C2: reconnect/stability + reconnect-resubscribe + topic cooldown
     #                구현 근거 7건을 추가해 24 → 31.
     # 2026-08-21 R-GATE-3 C2: 구현이 요구를 충족하며 "미충족" 서술이 거짓이 된 단위들을 현재
@@ -109,10 +111,15 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-21 codex NO-GO 반영: R-HAND-6 구현 근거(4곳) · R-CLI-11 배너 렌더 근거(3곳) ·
     #                cutover B5/B8/B9 실제 테스트 좌표(6곳)를 결속해
     #                183 → 195 / ios 103 → 111 / server 80 → 84.
-    "CLIENT": 44,
+    # 2026-08-21 topic-only cutover semantic C2: 공용 deadline arbiter와 canonical topic-state
+    #                구현 근거를 직접 결속해 +3 (44 → 47).
+    "CLIENT": 47,
     # 2026-08-21 B8 회귀 결속: safety-stop 재활성화 복구 테스트 좌표 +1 (199 → 200 / ios 111 → 112).
     # 2026-08-21 R-CLI-16 변이 커버리지: 두 topic 동시 만료 회귀 좌표 +1 (200 → 201 / ios 112 → 113).
-    "CUT": 56,
+    # 2026-08-21 topic-only cutover C2: 삭제된 legacy 구조를 반복 인용하던 R-CUT-1..8/13/21을
+    #                현재 topic/cache/state-machine 근거로 통합해 CUT 56 -> 40. 같은 의미를
+    #                가리키는 좌표 수를 보존하지 않고, 남은 각 동작 단위의 직접 근거만 센다.
+    "CUT": 40,
     # 2026-08-19 LOAD-S3 C2: 실패 close/None 잔여, worker checkpoint, live publish close 잔여를
     #                현재 코드에 결속하면서 server locator 5건 증가 (19 → 24).
     # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 "각 phase 앞 checkpoint" 를 실제 worker 결속
@@ -121,7 +128,9 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     # 2026-08-20 LOAD-S6 C2: shared task/permit 소유와 실제 worker를 분리 인용해 +1 (25 → 26).
     # 2026-08-20 LOAD-S7 C2: admission/caller 취소가 cooldown을 arm하지 않는 경계를 shared task
     #                범위에 직접 결속해 +1 (26 → 27).
-    "HAND": 31,
+    # 2026-08-21 DXY 수직 슬라이스 C2: R-HAND-19/20 구현 근거와 R-HAND-3의 현행 deadline
+    #                arbiter 근거를 재결속해 HAND 31 -> 33.
+    "HAND": 33,
     "HEALTH": 8,
     # 2026-08-16 S1a: E3 근거가 즉시거절 기각(:20-22)과 SimpleQueue 무제한(:34-36)
     #                **둘로 갈리며** +1 (6 → 7).
@@ -418,9 +427,13 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-20 LOAD-S7 C2: HAND +1, LOAD +3 (139 → 143 / server 75 → 79).
     # 2026-08-20 R-CLI-24 C2: CLIENT +7, LOAD +3
     #                (143 → 153 / ios 64 → 74, server 79 불변).
-    assert len(references) == 201
+    # 2026-08-21 topic-only cutover C2: legacy 소비 구조의 중복 locator를 제거하고 DXY/topic-only
+    #                직접 근거로 교체해 201 -> 190 (server 88 -> 92, ios 113 -> 98).
+    # 2026-08-21 semantic C2: OFF fail-closed·cutover 완료·arbiter·canonical state의 직접 근거
+    #                7건을 보강해 190 → 197 (server 92 → 94, ios 98 → 103).
+    assert len(references) == 197
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 88, "ios": 113}
+    assert by_repo == {"server": 94, "ios": 103}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
@@ -467,8 +480,10 @@ def test_baseline_backtick_locator_inventory_keeps_both_repositories_visible():
     # 2026-08-20 LOAD-S7 C2: cooldown 기본값·arm/prune·shared-task 경계를 분리해 server +3.
     # 2026-08-20 R-CLI-24 C2: F2 reconnect 복구 분기와 F5 cooldown cleanup을 별도 근거로
     #                결속해 ios +2 (50 → 52 / ios 10 → 12).
-    assert len(references) == 52
-    assert by_repo == {"server": 40, "ios": 12}
+    # 2026-08-21 topic-only cutover C2: F1-F7/F10-F14를 현행 상태기계·lease·topic cache에
+    #                다시 결속하며 iOS locator +3 (52 -> 55 / ios 12 -> 15).
+    assert len(references) == 55
+    assert by_repo == {"server": 40, "ios": 15}
 
 
 def test_file_line_extractor_matches_extension_independent_oracle():
@@ -541,7 +556,10 @@ def test_reviewed_adr_030_and_031_targets_do_not_regress_to_stale_worktree_lines
         "https://github.com/Jay-Hong/exchange-rate/blob/"
         "a499a08d210ab1e6b8c5309357eab3bcf1283fa5/"
         "app/latest_rates_cache.py#L885-L890",
-        "app/latest_rates_cache.py#L2009-L2032",
+        # 2026-08-21 dxy:spot C2: `get_latest_dxy_rate_from_sync_job` 추가로 per-key stale 블록이
+        #                아래로 밀렸다. 2009-2032 는 이제 MGET/circuit 구간이라 주장("현재 per-key
+        #                freshness 판정과 fallback 위치")과 어긋난다 — 내용 확인 후 2040-2063 으로 교정.
+        "app/latest_rates_cache.py#L2040-L2063",
         "https://github.com/Jay-Hong/exchange-rate/blob/"
         "2d5c8adfd7a46944617c854d8221a5535bb1a95b/"
         "app/usdt_topic_payload.py#L326-L330",
@@ -671,9 +689,15 @@ CLAIM_LEDGER_INVENTORY = {
     # 2026-08-21 /ws limit_req C1(463c880) C2: R-LOAD-2 의 "둘 다 없다" 와 baseline E4 가
     #                구현으로 거짓이 돼 재작성했고, 10r/s 선택 근거 단정이 새 code_fact 로 생겼다.
     #                74 → 75 (code_fact 63 → 64).
-    "claim_candidates": 75,
-    "code_fact_entries": 64,
-    "normative_entries": 11,
+    # 2026-08-21 topic-only cutover C2: legacy 미충족 서술을 완료된 topic-only 동작으로 합치며
+    #                후보 75 -> 66, code_fact 64 -> 55. normative 11은 불변이다.
+    # 2026-08-21 semantic C2: cutover 완료와 canonical state 구현 단위 2건이 새 후보가 됐고,
+    #                arbiter·canonical projection·legacy-frame lifecycle 3건은 미래 규범이 아니라
+    #                직접 근거를 가진 현재 구현 사실로 전환됐다.
+    #                후보 66 → 68 / code_fact 55 → 60 / normative 11 → 8.
+    "claim_candidates": 68,
+    "code_fact_entries": 60,
+    "normative_entries": 8,
 }
 
 

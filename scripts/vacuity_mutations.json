@@ -132,7 +132,7 @@
     {
       "name": "빈 도출 거절 제거(verify)",
       "file": "validator",
-      "old_snippet": "        if not paths:\n            # baseline 서식이 바뀌어 정규식이 빗나가면 **조용히 아무것도 검사하지 않는다**\n            fail.append(f\"[E_NOCITED] baseline 에서 도출한 {repo_key} 인용 경로가 0개 \"\n                        f\"— 정규식이 빗나갔거나 baseline 이 비었다\")\n            continue\n",
+      "old_snippet": "        if not paths:\n            # baseline/canonical 서식이 바뀌어 두 추출기가 모두 빗나가면 **조용히 아무것도 검사하지 않는다**\n            fail.append(f\"[E_NOCITED] baseline/canonical 에서 도출한 {repo_key} 인용 경로가 0개 \"\n                        f\"— 정규식이 빗나갔거나 정본이 비었다\")\n            continue\n",
       "new_snippet": "",
       "why_uncaught": "baseline 정규식이 빗나가면 근거 대조가 통째로 사라진다",
       "origin": "codex-R27+MCP-2026-08-09"
@@ -204,10 +204,18 @@
     {
       "name": "인용 경로 교차검증(E_CITEMISS) 제거",
       "file": "validator",
-      "old_snippet": "        missed = sorted(set(broad[repo_key]) - set(cited.get(repo_key, [])))\n        if missed:\n            fail.append(f\"[E_CITEMISS] baseline 이 인용하는데 도출에서 빠진 {repo_key} 경로 \"\n                        f\"{len(missed)}개: {missed[:5]} — 정규식이 좁아졌거나 \"\n                        f\"CITATION_EXCLUSIONS 판단이 필요하다\")\n",
+      "old_snippet": "        missed = sorted(set(broad[repo_key]) - set(baseline_cited.get(repo_key, [])))\n        if missed:\n            fail.append(f\"[E_CITEMISS] baseline 이 인용하는데 도출에서 빠진 {repo_key} 경로 \"\n                        f\"{len(missed)}개: {missed[:5]} — 정규식이 좁아졌거나 \"\n                        f\"CITATION_EXCLUSIONS 판단이 필요하다\")\n",
       "new_snippet": "",
       "why_uncaught": "'리포별 0개 금지'만 남으면 server 11개를 1개로 줄여도 통과한다(실측 rc=0)",
       "origin": "codex-mcp-2026-08-10-r2"
+    },
+    {
+      "name": "canonical RID 인용을 provenance 합집합에서 제거",
+      "file": "validator",
+      "old_snippet": "    cited = {\n        repo_key: sorted(set(baseline_cited[repo_key]).union(canonical_cited[repo_key]))\n        for repo_key in (\"server\", \"ios\")\n    }\n",
+      "new_snippet": "    cited = baseline_cited\n",
+      "why_uncaught": "canonical parser와 default_provenance를 각각 직접 시험해도 verify가 둘을 잇지 않으면 baseline 밖 RID 근거 변경은 E_CODECHANGED에 도달하지 않는다",
+      "origin": "codex-review-2026-08-21-topic-only-c2"
     },
     {
       "name": "넓은 그물을 narrow 와 같은 규칙으로(교차검증 무력화)",
@@ -412,7 +420,7 @@
     {
       "name": "역방향 교차검증(E_CITEBROADMISS) 제거",
       "file": "validator",
-      "old_snippet": "        lost = sorted(set(cited.get(repo_key, [])) - set(broad[repo_key]) - CITATION_EXCLUSIONS)\n        if lost:\n            fail.append(f\"[E_CITEBROADMISS] narrow 는 뽑는데 넓은 그물이 놓친 {repo_key} 경로 \"\n                        f\"{len(lost)}개: {lost[:5]} — 그물이 좁아졌거나 _KNOWN_EXT 가 낡았다\")\n",
+      "old_snippet": "        lost = sorted(\n            set(baseline_cited.get(repo_key, [])) - set(broad[repo_key]) - CITATION_EXCLUSIONS\n        )\n        if lost:\n            fail.append(f\"[E_CITEBROADMISS] narrow 는 뽑는데 넓은 그물이 놓친 {repo_key} 경로 \"\n                        f\"{len(lost)}개: {lost[:5]} — 그물이 좁아졌거나 _KNOWN_EXT 가 낡았다\")\n",
       "new_snippet": "",
       "why_uncaught": "한 방향만 보면 넓은 그물이 좁아지는 퇴행을 불변식으로 못 잡고 합성 프로브 행 하나에만 기댄다",
       "origin": "claude-probe-2026-08-10-r2"

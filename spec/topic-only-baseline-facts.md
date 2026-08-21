@@ -55,7 +55,7 @@
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
   stage 정의·엄격 파서·코드 기본값 `app/config.py:741-784` · **정책 정본**
-  `app/topic_policy.py:244-282`(`plan_anonymous`) · 그 위임 wrapper
+  `app/topic_policy.py:237-275`(`plan_anonymous`) · 그 위임 wrapper
   `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:620-648` ·
   production 주입 `app/main.py:313-321`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
@@ -80,8 +80,8 @@
   `app/main.py:3173` `verify_firebase_token(request)` → `app/main.py:3176`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
-- **C4 [코드]** `app/topic_policy.py:87-93` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
-  KRX = `PREMIUM_AND_ENTITLEMENT`. `app/topic_policy.py:285-330` 이 stage 별로 partition 을
+- **C4 [코드]** `app/topic_policy.py:78-85` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
+  KRX = `PREMIUM_AND_ENTITLEMENT`. `app/topic_policy.py:278-323` 이 stage 별로 partition 을
   파생하고, `compatibility`·`reject_anonymous_fx` 에서는 비-KRX 가 identity-only 로 남는다.
 - **C5 [코드]** `app/topic_authorization.py:372-402` — coordinator. RC 는 요청당 **≤1회**,
   entitlement 는 premium 승인 뒤 KRX 요청이 있을 때만 **≤1회**. `Unavailable` 은 전체-요청,
@@ -99,13 +99,13 @@
   ⚠️ 이 함수는 자신을 *"모든 발행 경로가 공유하는 단일 게이트"* 라고 적지만, `882d92b`
   이전에는 **initial snapshot 경로가 우회**했다(그 모듈에 `lease` 참조 0건). 지금은 D6 이
   그 경로를 같은 함수에 태운다.
-- **D3 [코드]** `app/topic_initial_snapshot.py:1049-1078` — build deadline·transient 실패와 active
+- **D3 [코드]** `app/topic_initial_snapshot.py:1072-1101` — build deadline·transient 실패와 active
   server cooldown은 연결을
   **1013**, fatal 실패는 **1011**로 닫는다. `None`(미지원/flag off/데이터 없음)은 여전히 조용히 skip한다.
 - **D4 [결정]** `app/topic_dispatcher.py:426` §8-B-term —
   *"식별된 요청은 반드시 종결된다 … 종결 프레임 하나 **또는 연결 종료**"*.
 - **D5 [코드]** 같은 파일 — `registry.register(...)` 가 ack send 보다 **먼저**. outbound 직렬화 없음.
-- **D6 [코드]** `app/topic_initial_snapshot.py:1080-1098` — initial snapshot 도 **전송 직전**에
+- **D6 [코드]** `app/topic_initial_snapshot.py:1103-1121` — initial snapshot 도 **전송 직전**에
   `leased_subscribers(topic)` 멤버십을 다시 본다(`882d92b`). 게이트에 걸리면 **해당 topic skip**
   이고 연결 실패가 아니다.
   **D6-inf [추론]** ⇒ 검사가 build **뒤**여야 하는 이유는 `_build_snapshot_sync` 가 `to_thread`
@@ -125,7 +125,7 @@
   구 상태는 **SQLAlchemy 기본 30초**였다. 즉 최대 5 커넥션이 찬 뒤 대기하던 요청이 이제
   10초에 접힌다(`sqlalchemy.exc.TimeoutError` → 503). 같은 파일 `:118` 의 online
   `statement_timeout = 60초`도 구 상태가 **0(무제한)** 이었다 — 운영 실측 근거는 그 모듈 docstring.
-- **E2 [코드]** `app/topic_initial_snapshot.py:1041-1053` —
+- **E2 [코드]** `app/topic_initial_snapshot.py:1064-1076` —
   `for topic in topics: ... payload = await build_snapshot_observed(topic, budget=request_budget)`. 그 공유 래퍼가
   `app/topic_initial_snapshot.py:497-838` 에서 같은 topic generation의 동시 요청을 shared build 하나로
   합치고 성공 결과만 최대 1초 cache한다. 새 shared flight는
@@ -155,46 +155,39 @@
 
 ## F. 클라이언트 현재 동작
 
-- **F1 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:283` `recomputeFreshness` —
-  불리언 `tetherIsFresh`/`freshFxAssets` **만** 갱신. 재구독 호출 없음.
-- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift:1038`은 foreground 복귀에서 즉시
-  `resendSubscriptions()`를 호출한다. 연결 확인 분기는 같은 파일 `:1159-1178`에서 최초 연결은
-  즉시 재전송하고 자동 reconnect 뒤 복구 batch만 별도 `U(0, 2초)` jitter에 태운다.
-  **F2-inf [추론]** ⇒ reconnect handshake가 같은 시각에 끝나도 복구 subscribe를 다시 흩뜨리지만,
-  **45초 무수신 자체가 재구독 trigger인 것은 아직 아니다**.
-- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:427` `takePending` —
-  `topicRequestTimeoutTasks.removeValue(...)?.cancel()`.
-  **F3-inf [추론]** ⇒ ack 수신 즉시 20초 watchdog 소멸 → 그 뒤 build 에 클라 상한 없음.
-- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:245` `sendTopicCommand` — subscribe 는
+- **F1 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-323` — tether 45초 deadline이
+  fresh→stale로 바뀌면 `revalidateSilencedTopic("usdt:krw")`을 호출한다. 화면 값은 지우지 않는다.
+- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift:1164-1183`은 foreground/수동 복구에서
+  desired topic을 재검증하고, 자동 reconnect 뒤 복구 batch는 별도 `U(0, 2초)` jitter를 거친다.
+- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:528-625` — 단일 deadline arbiter가 송신
+  시점부터 control deadline과 delivery deadline을 함께 소유한다. ACK 뒤에는 control task를 취소하고
+  같은 arbiter를 delivery phase로 전환하므로 initial snapshot에도 클라이언트 상한이 남는다.
+- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:250` `sendTopicCommand` — subscribe 는
   **배치**(한 요청에 여러 topic).
-- **F5 [코드]** `ios/FXi/Services/WebSocketService.swift:845-900` —
-  `shouldRetryCommandFailure`(denylist) + 최초 시도 포함 최대 3회 bounded retry. 서버 최소 cooldown 뒤
-  `U(0, base)` additive jitter를 더하고 exact `(verb, sorted topics)` 실패는 저장 cooldown task 하나를
-  공유한다. cleanup은 같은 파일 `:987-995`에서 그 task를 취소·제거한다.
-  **F5-inf [추론]** ⇒ 공백은 재시도 소진 이후이며, source 수준 client cooldown은 구현됐지만
-  운영값 승인은 LOAD-S4가 소유한다.
-- **F6 [코드·부정]** `confirmedTopics` 와 `subscribedTopics` 를 **비교하는 코드 없음**.
-  증거: ⚠️ "같은 줄에 없다"는 다중 행 비교·helper 를 배제하지 못해 **약하다**. 그래서
-  `subscribedTopics` **전 참조 14곳(47·227·235·412·416·454·489·741·836·906·923·930·935·1001)을
-  열거해 읽었다**. 412/416은 *의도*와의 재대조, 741은 `premiumGatedTopics`와의 교집합, 935는
-  reconnect 복구 범위 캡처이고 나머지는 선언·삽입·삭제·주석·재전송이다 — `confirmedTopics`와
-  대조하는 곳은 **없다**.
-  ⚠️ 923 주석이 같은 주장을 하지만 그 주석의 일부 호출처 서술은 stale이므로
-  주석이 아니라 위 전수 열거를 근거로 삼을 것.
-- **F7 [코드]** `applyLeaseSchedule` — 만료 전 재구독 예약(jitter 포함).
-  **F7-inf [추론]** 실패 시 F5 재시도, 소진되면 hard-expiry 집행 **없음**.
+- **F5 [코드]** `ios/FXi/Services/WebSocketService.swift:850-905` —
+  `shouldRetryCommandFailure` denylist + 최초 시도 포함 최대 3회 bounded retry. 서버 최소 cooldown 뒤
+  `U(0, base)` additive jitter를 더하고 exact `(verb, sorted topics)` 실패는 cooldown task 하나를 공유한다.
+- **F6 [코드]** desired/confirmed/receive-generation/delivery/rejection은
+  `TopicSubscriptionSnapshot`이 canonical하게 소유하고, ACK는 sent scope에 한해 confirmed와 rejection을
+  수렴시킨다(`ios/FXi/Services/WebSocketService.swift:1057-1088`).
+- **F7 [코드]** lease는 topic별 절대 만료를 추적한다. 새 lease id만 만료를 연장하고, hard-expiry는
+  desired를 보존한 채 confirmed를 제거한 뒤 lease 세대당 한 번 reconnect한다
+  (`ios/FXi/Services/WebSocketService.swift:750-849`).
 - **F8 [코드]** `ios/FXi/Services/TopicSnapshotMerger.swift:38` —
   `mergeAt <= existing.mergeAt` 이면 entry 를 버린다.
   **F8-inf [추론]** 서버가 rate 불변 시 `rate_changed_at` 보존(B2 파일) ⇒ 평평하면 store timestamp 가
   마지막 변동 시각에 **동결**.
 - **F9 [코드]** `ios/FXi/Views/Components/GraphV2Section.swift:153` `liveFreshnessThreshold` —
   600초(hana 1200초). 주석이 *"timestamp=last-change … calm flat 을 과도 skip"* 이라 자인.
-- **F10 [코드]** `ios/FXi/Models/AppState.swift:13` — `.connected(rates: [ExchangeRate])` 등
-  **legacy 배열이 enum payload**.
-- **F11 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:505` `rates(for:)` →
-  `appState.rates` 직결. `ios/FXi/Views/Components/AlertAddSheet.swift` 가 이걸 쓴다(`baseRates` 미경유).
-- **F12 [코드]** `ios/FXi/Services/WebSocketService.swift:1207` — DXY 는 legacy envelope 의 `indices` 로 수신(`onIndicesReceived`).
-- **F13 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:623` `func usdtDisplayState` —
-  최외곽 게이트 = `if RealtimeV2Config.isTetherTopicEnabled`, 그 else 는 `sourceRates()`.
-- **F14 [코드]** `ios/FXi/Utils/RealtimeV2Config.swift:32` `isTetherTopicEnabled` —
-  Release 기본값 topic **OFF** (`#if DEBUG` / `#elseif TOPIC_V2_RELEASE_ON` / else false).
+- **F10 [코드]** `ios/FXi/Models/AppState.swift:11-18` — `AppState`는 payload 없는 lifecycle만
+  표현한다. topic last-known은 ViewModel store와 topic 전용 disk cache가 소유한다.
+- **F11 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625` — 은행 알림과 탭은
+  `baseRates(for:)`의 FX topic live/last-known을 함께 쓴다. `appState.rates`는 존재하지 않는다.
+- **F12 [코드]** DXY는 `dxy:spot` REST/WS topic으로 수신·merge되고 legacy `indices` 소비는 없다
+  (`ios/FXi/Services/TopicSnapshotService.swift:53-58` ·
+  `ios/FXi/ViewModels/ExchangeRateViewModel.swift:980-1010`).
+- **F13 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714` `usdtDisplayState` —
+  topic live/last-known만 사용하며 legacy subset fallback은 없다.
+- **F14 [코드]** `ios/FXi/Utils/RealtimeV2Config.swift:31` `isTetherTopicEnabled` —
+  Release 기본값 topic **OFF**다. topic-only 앱은 OFF artifact로 출시할 수 없으므로 Archive에서
+  `TOPIC_V2_RELEASE_ON`을 fail-closed로 확인해야 한다.

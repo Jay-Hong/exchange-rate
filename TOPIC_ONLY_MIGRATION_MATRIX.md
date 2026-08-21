@@ -81,32 +81,27 @@ iOS 근거는 source locator 규약(`XCTestCase/testMethod` · 클래스 본문 
 ⚠️ 구조 검사와 reviewer 기록은 자연어 의미가 참임을 기계적으로 증명하지 않는다. 특히 deploy reference는
 외부 시스템에서 dereference하지 않는다. `verified` reviewer가 근거와 RID 주장 사이의 의미 적합성을 책임진다.
 
-### ⚠️ pin 된 인용 경로 13개는 사실상 읽기 전용이다 (2026-08-12 갱신)
+### ⚠️ pin 된 baseline + canonical RID 인용 경로는 사실상 읽기 전용이다 (2026-08-21 갱신)
 
-`preflight` 의 `E_CODECHANGED` 는 **경로 단위**로 검사한다 — 인용된 파일이 pin 이후 한 줄이라도
-바뀌면 빨강이다. 그래서 아래 경로들은 **재-baseline 없이는 수정할 수 없다**:
+`preflight` 의 `E_CODECHANGED` 는 **경로 단위**로 검사한다. baseline뿐 아니라 ADR/spec의 RID 블록이
+직접 인용한 코드 경로도 합집합으로 대조하므로, 어느 쪽에서든 인용된 파일이 pin 이후 한 줄이라도
+바뀌면 빨강이다. 현재 C2 작업 트리 기준 보호 범위는 server 22개 + iOS 22개이며, 정적 목록을 이
+문서에 복제하지 않는다. 실제 집합은 아래처럼 검증기 자체에서 도출한다:
 
-```
-  CLAUDE.md
-  app/auth_executor.py
-  app/config.py
-  app/database.py
-  app/fx_topic_publisher.py
-  app/latest_rates_cache.py
-  app/legacy_policy.py
-  app/main.py
-  app/topic_auth_rollout.py
-  app/topic_dispatcher.py
-  app/topic_initial_snapshot.py
-  app/topic_wire.py
-  nginx/conf.d/default.conf
+```bash
+python3 - <<'PY'
+import scripts.topic_migration_manifest as m
+b, c = m.cited_paths(), m.canonical_cited_paths()
+for repo in ("server", "ios"):
+    print(repo, *sorted(set(b[repo]) | set(c[repo])), sep="\n  ")
+PY
 ```
 
-pin 은 `spec/topic-only.lock.json` **과** 동결 manifest **양쪽**에 박혀 있어(`E_PINNED`),
-옮기려면 **baseline → lock → manifest → 이행 대장·원장·독립 리뷰** 순서로 연쇄 갱신해야 한다
-(⛔ 순서가 중요하다 — lock 이 pin 의 정본이고 manifest 는 거기서 **생성**된다. 한때 이 절이
-`manifest → lock` 이라 적었는데 거꾸로였다). manifest 는 `skeleton --force` 로 덮지 않는다 —
-40블록의 disposition·requirements 를 잃는다. **작은 문서 수정 때문에 할 일이 아니다.**
+pin 은 `spec/topic-only.lock.json` **과** 동결 manifest **양쪽**에 박혀 있다(`E_PINNED`). baseline
+사실 자체가 바뀐 경우에는 **baseline → lock → manifest → 이행 대장·원장·독립 리뷰** 순서로 연쇄
+갱신한다. canonical-only 근거가 바뀐 경우에는 baseline을 억지로 다시 쓰지 않고 **pin/manifest →
+해당 RID 인용 → claim ledger → 독립 semantic review**를 갱신한다. ⛔ lock 이 pin의 정본이고 manifest는
+거기서 생성된다. manifest를 `skeleton --force`로 덮으면 40블록의 disposition·requirements를 잃는다.
 
 ✅ **CI 서술 drift 해소**: `CLAUDE.md` 의 2026-06-11 항목대로 전체 pytest workflow
 (`.github/workflows/tests.yml`)는 Markdown-only 변경을 다시 건너뛴다. 대신

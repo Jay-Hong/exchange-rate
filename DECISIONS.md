@@ -3732,7 +3732,7 @@ PR Z-2e Step 3b(`a499a08`, 2026-05-13)로 bank/investing crawler가 commit 직�
 - [ADR-026](#adr-026-redis-first-broadcast-hot-path--latest-mirror--dxy-mirror로-db-free-달성): Redis-first broadcast hot path (latest:index 도입 결정)
 - [ADR-029](#adr-029-usdt-source는-mirror-cycle-미경유--direct-write--read-path-db-fallback): USDT direct write (mirror cycle 미경유)
 - [USDT_TOPIC_MIGRATION_PLAN.md Z-2f](USDT_TOPIC_MIGRATION_PLAN.md): 본 ADR 구현 PR 추적
-- [app/latest_rates_cache.py:2009-2032](app/latest_rates_cache.py#L2009-L2032): 현재 per-key freshness 판정과 fallback 위치
+- [app/latest_rates_cache.py:2040-2063](app/latest_rates_cache.py#L2040-L2063): 현재 per-key freshness 판정과 fallback 위치
 
 ---
 
@@ -6528,11 +6528,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
-- iOS 기준 commit: `cfe06f6028ec030f6d5913a54eb87262488d6f83`
+- server 기준 commit: `875551082ccd3ac51c9de4285430660948b32773`
+- iOS 기준 commit: `c90470e0f8887387cd49c528e67edfbe635de217`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c`
-- baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
+- manifest SHA: `9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee`
+- baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6581,8 +6581,13 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 서버의 legacy 병행은 오직 구버전 출시 앱을 위한 것이다.
 ```
 
-> ⛔ **이것은 목표 상태다. 현재 구현은 이걸 만족하지 않는다.** 아래 [R-INV-2](#r-inv-2) ·
-> [R-INV-3](#r-inv-3) 의 격차를 먼저 읽을 것.
+> ✅ **코드 불변식은 충족됐다.** 서버 `8755510`과 iOS `0f2a3f8`이 신규 앱의 legacy
+> REST/WS/cache/graph 소비를 제거하고 `dxy:spot`까지 topic 경로로 옮겼다. 다만 운영
+> `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다.
+> iOS architecture test가 legacy API/callback/파일의 복원을 거부하고
+> (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을
+> 소유한다 (`app/dxy_topic_publisher.py:20-26` · `app/dxy_topic_publisher.py:112-145`).
+> 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다.
 
 **불변식의 근거는 두 겹이다 — 둘 다 적어 둔다.** 하나만 남기면 다른 하나가 잊힌다.
 
@@ -6601,12 +6606,10 @@ legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이
 `app/legacy_policy.py` 의 `LEGACY_RATE_SOURCES` 는 investing + 은행 9곳뿐이고 docstring 이
 doctest 로 못 박는다:
 `should_include_source_in_legacy_rates("upbit", "usdt-krw") → False`.
-테더 화면이 legacy `sourceRates()` 로 전환되면 SourceRegistry 와 겹치는 USD reference 후보는
-investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 그보다 더 줄 수 있다
-(`ios/FXi/Models/RateSource.swift:32-91` ·
-`ios/FXi/Services/SourcePreferenceManager.swift:133-161` ·
-`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707`). 따라서 이 전환은 fallback 이 아니라
-**거래소 5 + KRX 를 잃고 일부 USD reference 만 남기는 순수 손실 교환**이다.
+과거 테더 화면의 legacy fallback은 USDT/KRX를 공급하지 못하는 **데이터 손실**이었다. 현재 iOS는 그 fallback 자체를
+제거했으며, topic gate가 OFF면 legacy reference 행을 대신 그리지 않고 빈 topic 표면을 반환한다
+(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-697`). 따라서 unarmed artifact는 usable한
+fallback 빌드가 아니며 출시할 수 없다.
 근거: `app/legacy_policy.py:35-38` · `app/legacy_policy.py:59-60`.
 <!-- /evidence: E-INV-2 -->
 <!-- /rid: R-INV-1 -->
@@ -6617,7 +6620,7 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 ### R-INV-2 — 격차 (a): WS 의 FX/USDT premium 강제 — **경로 구현됨, 운영 활성화 미확인**
 
 **(a)** `0cfe474`에서 WS FX/USDT premium 강제 경로가 추가됐다
-(`app/topic_policy.py:285-330` · `app/topic_dispatcher.py:792-948`). 적용 여부는
+(`app/topic_policy.py:278-323` · `app/topic_dispatcher.py:792-948`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
 코드 기본값은 `compatibility` 다(`app/config.py:782-784`). production 의 실제 값은 아래 표가
@@ -6637,8 +6640,8 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 근거: `app/config.py:741-784`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
-구현 근거: `app/config.py:741-784`(stage) · `app/topic_policy.py:87-93`(정책표) ·
-`app/topic_policy.py:244-282`(익명 planner) · `app/topic_policy.py:285-330`(식별 planner) ·
+구현 근거: `app/config.py:741-784`(stage) · `app/topic_policy.py:78-85`(정책표) ·
+`app/topic_policy.py:237-275`(익명 planner) · `app/topic_policy.py:278-323`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:792-948`(배선·등록) ·
 `app/main.py:3176-3180`(REST twin).
 
@@ -6649,17 +6652,20 @@ investing/kb/hana 뿐이고, 실제 표시는 사용자 visibility 에 따라 �
 <!-- rid: R-INV-3 -->
 <!-- requirement-meta: disposition=active owner=ADR -->
 <a id="r-inv-3"></a>
-### R-INV-3 — 격차 (b): DXY 는 legacy envelope 로만 온다 (출시 차단)
+### R-INV-3 — 격차 (b) 해소: DXY 는 `dxy:spot` topic 으로 온다
 
-`WebSocketService` 가 legacy `rates` 프레임의 `indices` 를 통해 DXY 를 받는다
-(`onIndicesReceived?(response.indices)`).
-근거: `ios/FXi/Services/WebSocketService.swift:1892-1910`.
+당시 격차는 `8755510`(서버) + `0f2a3f8`(iOS)에서 해소됐다. 서버는 `dxy:spot` publisher와
+initial snapshot을 제공하고(`app/dxy_topic_publisher.py:20-129` ·
+`app/topic_initial_snapshot.py:972-995`), iOS는 인증 REST bootstrap과 WS topic frame을 같은
+`DxyLiveTick`으로 merge한다(`ios/FXi/Services/TopicSnapshotService.swift:53-58` ·
+`ios/FXi/ViewModels/ExchangeRateViewModel.swift:980-1010`). 신규 앱의 legacy `indices` 소비는 제거됐다.
 
 ⛔ **초안은 여기서 "legacy rate 값만 금지"로 불변식을 좁히고 envelope 예외를 두려 했다. 철회한다.**
 `FREE_TIER_ACCESS_MODEL_PLAN.md` §6 롤아웃이 **이미** 순서를 정해 뒀다 —
 *"4. iOS legacy 이탈: 4a REST/WS 토큰 전달 → **4b `dxy:spot` topic 신설** → 4c 부팅·offline·stale 를
 topic snapshot/cache 기준 전환 → 4d /api/rates + legacy WS 제거"*.
-4a 는 끝났다(1B/1C). **지금이 4b 다.** 예외를 두는 것은 합의된 로드맵을 되돌리는 것이다.
+4a와 4b는 끝났고 4c/4d도 같은 iOS cutover commit에 land했다. 남은 것은 최종 WS 인증 stage와
+dispatcher를 포함한 운영 canary, 실기기 smoke, Release arming의 별도 GO다.
 <!-- /rid: R-INV-3 -->
 
 <!-- rid: R-INV-5 -->
@@ -6682,7 +6688,9 @@ topic snapshot/cache 기준 전환 → 4d /api/rates + legacy WS 제거"*.
 근거 — premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` 의 live state 는 없다.
 따라서 futures topic 은 **legacy 이탈에 불필요**하며 phased 로 미룬다.
 (테더 1d 그래프의 DXY_futures 계열은 그래프 데이터 경로이지 live tail 이 아니다.)
-근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989`.
+근거: `ios/FXi/Models/ExchangeRate.swift:53-58` ·
+`ios/FXi/ViewModels/ExchangeRateViewModel.swift:21-24` ·
+`ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-987`.
 <!-- /rid: R-INV-4 -->
 
 <!-- rid: R-DEC-1 -->
@@ -6711,7 +6719,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 - **KRX**: 위 coalesce 는 **Stage E tick writer 경로에서만** 같다(`KRX_REDIS_TICK_WRITE_ENABLED`,
   코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다.
   그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2).
-  근거: baseline B3 · B3-op · `app/latest_rates_cache.py:787-793` ·
+  근거: baseline B3 · B3-op · `app/latest_rates_cache.py:818-824` ·
   `app/latest_rates_cache.py:662-667` · `app/config.py:392`.
 <!-- /evidence: E-B-2 -->
 
@@ -6726,7 +6734,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.
-  근거: baseline B1 · `ios/FXi/Utils/Constants.swift:250`.
+  근거: baseline B1 · `ios/FXi/Utils/Constants.swift:243`.
 <!-- /evidence: E-B-4 -->
 
 <!-- evidence: E-B-5 supports=R-DEC-1 -->
@@ -6898,8 +6906,10 @@ usd 탭 KRX tail 결합 해소 / 역사 ADR 정리(단, **운영에 쓰는 런�
 <a id="r-gate-2"></a>
 ### R-GATE-2 — Release arming(`TOPIC_V2_RELEASE_ON`)은 사용자 소유의 마지막 게이트
 
-고정 iOS commit 에서 Release 는 `TOPIC_V2_RELEASE_ON` 이 정의될 때만 topic 을 켜고, 그 외에는
-legacy 기본값으로 빌드된다(`ios/FXi/Utils/RealtimeV2Config.swift:32-40`). 같은 commit 의
+고정 iOS commit 에서 Release 는 `TOPIC_V2_RELEASE_ON` 이 정의될 때만 topic 을 켠다. 그 외에는
+fail-closed로 topic 표면이 비며 legacy fallback으로 돌아가지 않는다
+(`ios/FXi/Utils/RealtimeV2Config.swift:31-39` ·
+`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-697`). 같은 commit 의
 `FXi.xcodeproj/project.pbxproj` 에서 해당 플래그를 찾는 `git grep` 결과는 0건이다.
 
 ⚠️ archive 가 기록한 "현재 미커밋 변경 한 건"은 동결 baseline 이 명시적으로 제외한 worktree
@@ -7003,7 +7013,9 @@ health 결과를 클라에 전달하는 status signal 이 필요하다(후속).
 1. ~~`dxy:spot` / `dxy:futures` 분리~~ → **확정: 이번 출시는 `dxy:spot` 만**(로드맵 4b 그대로).
    근거: premium live bridge 가 **spot 만** `dxyLive` 로 보충하고 `dxy_futures` live state 는 없다
    → futures topic 은 legacy 이탈에 **불필요**, phased.
-   근거: `ios/FXi/Models/ExchangeRate.swift:68-70` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:987-989`.
+   근거: `ios/FXi/Models/ExchangeRate.swift:53-58` ·
+   `ios/FXi/ViewModels/ExchangeRateViewModel.swift:21-24` ·
+   `ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-987`.
 
 <!-- relation: references target=R-INV-4 -->
 - references: [R-INV-4](#r-inv-4)

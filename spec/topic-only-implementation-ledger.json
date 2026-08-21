@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c",
+  "manifest_sha256": "9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
@@ -507,91 +507,216 @@
     },
     {
       "rid": "R-CUT-1",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/ViewModels/ExchangeRateViewModel.swift",
+            "FXi/Services/WebSocketService.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::TopicOnlyCutoverArchitectureTests/testPremiumRuntimeHasNoLegacyRateOrGraphConsumer"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "Premium legacy 소비 제거 완료. Release arming은 별도 R-GATE이며 OFF 상태라 이 done이 arming 완료를 뜻하지 않는다."
     },
     {
       "rid": "R-CUT-2",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/Models/AppState.swift",
+            "FXi/ViewModels/ExchangeRateViewModel.swift",
+            "FXi/ContentView.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testFailedWithTetherLastKnown_staysOfflineNotError"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testRetryConnectionOnActiveService_opensNewChannel"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "AppState legacy payload 제거 + topic last-known/transport lifecycle 재설계. 세 회귀축은 mutation 판별력까지 실증됨."
     },
     {
       "rid": "R-CUT-3",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/ViewModels/ExchangeRateViewModel.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testFxTopicCacheRestoresAtColdStartForDisplayAndBankAlertLookup"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "은행 알림 현재가는 탭과 같은 FX topic live/last-known 원천을 쓴다."
     },
     {
       "rid": "R-CUT-4",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/Services/WebSocketService.swift",
+            "FXi/Models/WebSocketMessage.swift",
+            "FXi/ViewModels/GraphViewModel.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::TopicOnlyCutoverArchitectureTests/testPremiumRuntimeHasNoLegacyRateOrGraphConsumer"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "신규 앱의 legacy rates/indices/graph envelope consumer와 callback owner를 함께 제거했다."
     },
     {
       "rid": "R-CUT-5",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/ViewModels/ExchangeRateViewModel.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testTetherEmptySnapshot_staysEmptyUntilValidTopicDataArrives"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "usdtDisplayState는 topic live/last-known만 사용하며 legacy fallback 사다리를 제거했다."
     },
     {
       "rid": "R-CUT-6",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/Views/RateGraphView.swift",
+            "FXi/Views/Components/PeriodTabBar.swift",
+            "FXi/ViewModels/GraphViewModel.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::TopicOnlyCutoverArchitectureTests/testPremiumRuntimeHasNoLegacyRateOrGraphConsumer"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "Dead code와 런타임 callback owner를 함께 제거하고 Debug/Release 빌드를 통과했다."
     },
     {
       "rid": "R-CUT-7",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXiTests/TetherDataPathTests.swift",
+            "FXiTests/TopicMessageTests.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testDxyCacheRestoresAtColdStartAndLegacyEnvelopeCannotOverwriteTopicOwner"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "삭제 예정 envelope가 아니라 보존할 사용자 행위를 검증하는 cutover 테스트를 추가했다."
     },
     {
       "rid": "R-CUT-8",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "2.1 삭제 범위 — 전수 inventory",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/Models/ExchangeRate.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::FreeSnapshotTests/test_freeDecode1d_keyedPoints_noKrx"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "Legacy wrapper는 제거했지만 무료 snapshot이 공유하는 ExchangeRate는 유지했다."
     },
     {
       "rid": "R-CUT-9",
@@ -623,14 +748,74 @@
     },
     {
       "rid": "R-CUT-13",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "11.1 테스트 매트릭스",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXiTests/TetherDataPathTests.swift",
+            "FXiTests/TopicMessageTests.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testUsdtDisplay_coldStart_restoresTopicLastKnownAndRefreshesInPlace"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testDxyTopicFrameRoutesButAFrameAfterRejectionIsDropped"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testFxDisplayState_notReceived_ignoresLegacyRateCache"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testFxTopicCacheRestoresAtColdStartForDisplayAndBankAlertLookup"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testDxyCacheRestoresAtColdStartAndLegacyEnvelopeCannotOverwriteTopicOwner"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::FreeSnapshotTests/test_freeDecode1d_keyedPoints_noKrx"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testTopicStatusBannerAppearsOnlyAfterQuietRevalidationFails"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testFetchDxySnapshot_buildsExactTopicQueryAndDecodes"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testTopicsDisabledRecoversOnTheNextConnectionAfterServerReactivation"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testHardExpiryReconnectsOnceWhenMultipleTopicsExpireTogether"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "B1~B9 자동 회귀 완료. 운영 인증/UI 통합과 실기기 smoke는 R-CUT-12/14에 남는다."
     },
     {
       "rid": "R-CUT-15",
@@ -673,14 +858,29 @@
     },
     {
       "rid": "R-CUT-21",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "11.1 매트릭스 — 나머지",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "0f2a3f8904a0638e3772313672b678ba5b9d2730",
+          "paths": [
+            "FXi/Models/AppState.swift",
+            "FXiTests/TetherDataPathTests.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TetherDataPathTests.swift::TetherDataPathTests/testDxyCacheRestoresAtColdStartAndLegacyEnvelopeCannotOverwriteTopicOwner"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "B2/B3를 AppState 대체와 같은 commit에 넣어 기존 경로를 잠그는 모순 없이 replacement 행위를 검증했다."
     },
     {
       "rid": "R-DEC-1",
@@ -992,25 +1192,60 @@
     },
     {
       "rid": "R-HAND-19",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "HAND",
       "block_title": "2.0 현재 상태와의 격차 (출시 차단)",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "server_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "server",
+          "sha": "875551082ccd3ac51c9de4285430660948b32773",
+          "paths": [
+            "app/dxy_topic_publisher.py",
+            "app/topic_initial_snapshot.py"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "server",
+          "node_id": "tests/test_dxy_topic_publisher.py::TestDxyPayload::test_topic_and_schema"
+        },
+        {
+          "kind": "test",
+          "repo": "server",
+          "node_id": "tests/test_topic_initial_snapshot.py::TestDxySnapshotBranch::test_builds_dxy_payload_via_redis_first_loader"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "출시 범위 dxy:spot의 publisher와 initial snapshot 구현 완료. 운영 배포/canary는 별도다."
     },
     {
       "rid": "R-HAND-20",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "HAND",
       "block_title": "13.2 미결 → 실제로는 해소됨",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "server_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "server",
+          "sha": "875551082ccd3ac51c9de4285430660948b32773",
+          "paths": [
+            "app/topic_policy.py",
+            "app/topic_initial_snapshot.py"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "server",
+          "node_id": "tests/test_topic_policy.py::TestInvariants::test_dxy_vertical_slice_is_policy_covered"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "dxy:spot을 명시적 PREMIUM_ONLY 정책행, implemented universe, supported snapshot 집합에 함께 추가했다."
     },
     {
       "rid": "R-HLT-1",
@@ -1058,14 +1293,20 @@
     },
     {
       "rid": "R-INV-3",
-      "status": "unreviewed",
+      "status": "non_actionable",
       "owner": "ADR",
       "block_title": "2.0 현재 상태와의 격차 (출시 차단)",
       "work_kind": null,
-      "evidence": [],
-      "non_actionable_reason": null,
-      "reviewer": null,
-      "note": ""
+      "evidence": [
+        {
+          "kind": "doc",
+          "path": "DECISIONS.md",
+          "anchor": "R-INV-3"
+        }
+      ],
+      "non_actionable_reason": "resolved_open",
+      "reviewer": "OpenAI Codex",
+      "note": "DXY legacy-only 격차는 R-HAND-19/20의 server 8755510과 iOS 0f2a3f8에서 해소됐다."
     },
     {
       "rid": "R-INV-4",

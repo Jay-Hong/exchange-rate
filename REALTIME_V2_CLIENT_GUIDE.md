@@ -399,13 +399,12 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   ⚠️ **background·연결 generation을 "이벤트 취소 조건"에서 내린 근거**(2026-07-26 최종, codex).
   구 표기는 이벤트 계약처럼 적어 놓고 기전은 시간만 검사해 **표와 구현이 불일치**했다.
 
-  근거 — **이벤트 crossing 자체는 무해**하다: 실제 해악은 늦게 도착한 응답이
-  `tetherReceived`/테더 freshness deadline·`fxReceivedAssets`/FX freshness deadline을 **무조건 갱신**해
-  topic을 fresh로 오인시키는 것(→ legacy fallback 최대 45초 억제)인데, 이건 **경과 시간**의 함수다.
-  background 직후 3초 만에 도착한 응답은 데이터가 실제로 신선하고 freshness 마킹도 정확하다
-  (그 뒤 5분 backgrounded면 deadline이 지나 정상적으로 stale 판정된다).
-  reconnect 직전 발행돼 직후 도착한 응답도 마찬가지다. → **일반 latency 상한이 해악을 정확히 덮고,
-  이벤트 세대 카운터는 오탐(빠른 응답 폐기)만 늘린다.**
+  근거 — **이벤트 crossing 자체는 무해**하다. 실제 해악은 (a) 이전 UID로 인증된 응답이 계정 전환
+  뒤 새 세션에 적용되거나, (b) cold-start 가속기인 REST 응답이 너무 늦게 도착해 더 최신인 WS 상태를
+  덮는 것이다. 현재 클라는 요청 발행 시 UID를 캡처하고 적용 직전 live UID를 다시 대조하며, 직접
+  계정 전환에서는 in-flight bootstrap도 취소한다. 같은 UID에서 background/reconnect를 빠르게
+  가로지른 응답은 10초 예산 안이면 여전히 유효하고, 예산을 넘으면 폐기한다. 따라서 일반 latency
+  상한과 UID fence가 실제 해악을 덮고, 별도 이벤트 generation은 빠른 정상 응답을 버리는 오탐만 늘린다.
 
   **latency budget 계약** (test-first 가능한 수준으로 확정, 2026-07-26):
 
@@ -415,7 +414,7 @@ Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
   | 예산 | **10초**. 요청 **발행** 시각 → 적용 직전까지의 경과 |
   | 시계 | **`ContinuousClock`**(monotonic, 기기 sleep 중에도 진행). wall-clock `Date`는 NTP·사용자 변경으로 점프 가능해 부적합 |
   | 캡처 단위 | **시도마다 재캡처** — 예산은 요청 1건의 latency지 bootstrap 세션 전체가 아니다(안 그러면 KRX 3회차가 1회차 경과를 물려받아 오폐기) |
-  | 초과 시 | **요청 실패와 동일 취급** — 값 merge ❌ / `tetherReceived`·`fxReceivedAssets` ❌ / freshness deadline 갱신 ❌ / `krxSnapshotRevision` bump ❌. 그리고 **재시도하지 않고 종료**(가속기 창이 이미 지났고 WS가 정본) |
+  | 초과 시 | **요청 실패와 동일 취급** — 값/store/cache merge ❌ / `tetherReceived`·`fxReceivedAssets` ❌ / freshness deadline 갱신 ❌ / `krxSnapshotRevision` bump ❌. 그리고 **재시도하지 않고 종료**(가속기 창이 이미 지났고 WS가 정본) |
   | 테스트 seam | 시계 **3개를 역할별로 분리**해 각각 주입한다 — 합치지 않는다 |
 
   **시계 3개** (2026-08-08 갱신 — staleness 를 저장 상태로 바꾸며 전용 시계가 생겼다):

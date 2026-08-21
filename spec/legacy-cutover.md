@@ -3,11 +3,11 @@
 - 책임: 삭제 범위 · 문서 정정 · 테스트 · 순서
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
-- iOS 기준 commit: `cfe06f6028ec030f6d5913a54eb87262488d6f83`
+- server 기준 commit: `875551082ccd3ac51c9de4285430660948b32773`
+- iOS 기준 commit: `c90470e0f8887387cd49c528e67edfbe635de217`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c`
-- baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
+- manifest SHA: `9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee`
+- baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 문서는 신규 앱이 legacy 소비를 걷어낼 때 **무엇을 지우고 · 무엇을 먼저 고쳐 쓰고 ·
@@ -24,17 +24,14 @@
 <a id="r-cut-1"></a>
 ### R-CUT-1
 
-**삭제 범위는 두 함수가 아니다** (2026-08-09 전수 inventory).
+초안은 `usdtDisplayState`의 legacy 분기와 `baseRates(for:)` 두 곳만 적어 범위를 크게 과소평가했다.
+`0f2a3f8`은 premium runtime의 legacy REST/WS/cache/graph 소비와 관련 dead code를 함께 제거했다.
+`testPremiumRuntimeHasNoLegacyRateOrGraphConsumer`가 제거된 파일과 금지 심볼의 복원을 잠근다
+(`ios/FXiTests/TopicMessageTests.swift:386-428`).
 
-초안은 `usdtDisplayState` 의 legacy 분기와 `baseRates(for:)` 두 곳만 적었다. **크게 과소평가였다.**
-
-⚠️ **`usdtDisplayState` 의 최외곽 게이트가 `if RealtimeV2Config.isTetherTopicEnabled` 이고 그 else 가
-`sourceRates()` 다**(baseline F13). Release 기본값은 topic **OFF** 다(baseline F14) — 그러므로 arming
-없이 출시하면 테더 탭은 간헐이 아니라 **상시 legacy reference subset** 으로 간다. 그 subset 은
-SourceRegistry 와 legacy 가 겹치는 investing/kb/hana 후보뿐이며 사용자 visibility 에 따라 더 줄 수
-있다(`ios/FXi/Models/RateSource.swift:32-91` ·
-`ios/FXi/Services/SourcePreferenceManager.swift:133-161`). 즉 거래소 5 + KRX 는 표시되지 않는다.
-legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.
+⚠️ Release 기본값은 여전히 topic **OFF**다(baseline F14). 이제 OFF는 legacy fallback이 아니라 빈
+topic 표면이므로 unarmed artifact를 출시할 수 없다. 따라서 코드 cutover 완료와 Release arming GO는
+서로 다른 상태이며, 후자는 여전히 미완료다.
 
 → 따라서 이 문서의 삭제 작업은 Release arming 게이트와 **묶여 있다**. arming 은 별도 GO 로만
 열리고 자동화가 커밋하지 않는다.
@@ -50,11 +47,11 @@ legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.
 <a id="r-cut-2"></a>
 ### R-CUT-2
 
-**(A) 단순 삭제로 끝나지 않는 것 — 각각 별도 작업이다**
+**(A) 단순 삭제로 끝나지 않았던 것 — `0f2a3f8`에서 완료**
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A1 | **`AppState` enum 자체** — `.connected(rates:)` / `.offline(cachedRates:)` / `.refreshingCached(cachedRates:)` | legacy 배열이 **enum payload** 이고 `AppState.rates` 가 모든 소비의 단일 관문이다(`ios/FXi/Models/AppState.swift:11-35`). 지우면 앱 **최상위 화면 라우팅**(loading/error/tab — `ios/FXi/ContentView.swift:121-134`)과 배너 3종(`ios/FXi/Views/Components/OfflineBanner.swift:102-152`)의 판정 근거가 통째로 사라진다. topic 쪽엔 전역 lifecycle 상태 개념이 없고 `tetherReceived`/`fxReceivedAssets`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:27-47`) 로 흩어져 있다. ⚠️ 여기 있던 `freshFxAssets` 인용은 **삭제된 심볼**이라 뺐다 — 고정 iOS commit 전수 검색 0건이고 동등 rename 도 없다(현행 `ios/FXi/ViewModels/ExchangeRateViewModel.swift:224` 는 무관한 `freshnessGeneration` 이다). FX 시간 만료 개념 자체가 `R-CLI-1`(`spec/ios-topic-state-machine.md:31`) 로 제거돼, 지금 FX 가용성은 `fxTopicRates(asset:)`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:364-377`) 가 연결·ACK·lease·명시적 거절만 보고 판정한다. 남은 시간 만료 신호는 tether 전용 `tetherIsFresh`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:218`) 하나다. **흩어져 있다는 사실 자체는 그대로**라 → **앱 수명주기 상태머신 재설계**다 |
+| A1 | **`AppState` lifecycle 재설계** | `.connected/.offline/.refreshingCached`의 legacy 배열 payload와 `AppState.rates`를 제거했다(`ios/FXi/Models/AppState.swift:11-18`). topic last-known 존재 여부와 transport 상태를 `applyConnectionState`가 결합하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:258-287`), 최상위 라우팅은 payload 없는 lifecycle만 본다(`ios/FXi/ContentView.swift:121-133`). tether-only last-known과 재연결 어포던스 회귀도 행동 시험으로 잠겼다(`ios/FXiTests/TetherDataPathTests.swift:3166-3287`) |
 
 <!-- /rid: R-CUT-2 -->
 
@@ -65,7 +62,7 @@ legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A2 | **은행 가격알림 시트** — `AlertAddSheet.rate(for:)`(`ios/FXi/Views/Components/AlertAddSheet.swift:96-103`) → `rateViewModel.rates(for:)` → `appState.rates` **직결**(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553`) | `baseRates`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:592-608`) 를 **안 거친다**. 즉 fx topic 이 켜져 있어도 이 시트는 **topic 값을 못 본다**(오늘도 그렇다 — 탭은 topic, 알림 시트는 legacy). 배선 교체가 아니라 **topic 경로 신설**이다 |
+| A2 | **은행 가격알림 시트** | `AlertAddSheet.rate(for:)`는 `rateViewModel.rates(for:)`를 쓰고(`ios/FXi/Views/Components/AlertAddSheet.swift:90-103`), 그 조회는 탭과 같은 `baseRates(for:)`의 FX topic live/last-known으로 수렴한다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625`). cold-start 캐시 기반 현재가도 행동 시험이 잠근다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |
 
 <!-- /rid: R-CUT-3 -->
 
@@ -76,7 +73,7 @@ legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A3 | **WS `handleLegacyRatesMessage` 3-in-1 envelope** — `rates` + `indices`(DXY) + `graph_buckets` 동거(`ios/FXi/Services/WebSocketService.swift:1892-1910`) | `rates` 만 지워도 `graph_buckets` callback 소유자(`GraphViewModel` — `ios/FXi/ViewModels/GraphViewModel.swift:553-557`)가 남아 디코드를 못 지운다. ⚠️ **단 서버 계약 변경은 불필요** — 그 VM 은 런타임에 생성·주입되고 callback/observer 를 설치하지만(`ios/FXi/FXiApp.swift:24-28` · `ios/FXi/ViewModels/GraphViewModel.swift:86-101`), premium `ContentView` 는 legacy graph 를 시작하거나 mount 하지 않는다(`ios/FXi/ContentView.swift:89-96`). `RootView` 에 남은 실제 소비는 로그아웃/구독 전환의 `stop()`뿐이다(`ios/FXi/FXiApp.swift:134-140` · `ios/FXi/FXiApp.swift:178-188`). **클라에서 VM·callback·환경 주입과 stop 배선을 함께 제거**하면 끝이고, 서버는 구버전용으로 `graph_buckets` 를 계속 보내면 된다 |
+| A3 | **WS 3-in-1 legacy envelope** | `handleLegacyRatesMessage`와 rates/indices/graph callback, `GraphViewModel` 생성·환경 주입·stop 배선을 함께 제거했다. 서버는 구버전용 legacy envelope를 유지하지만 신규 앱은 이를 소비하지 않는다. 금지 심볼과 삭제 파일은 architecture test가 잠근다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |
 
 <!-- /rid: R-CUT-4 -->
 
@@ -87,7 +84,7 @@ legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A4 | `usdtDisplayState` 5분기 사다리(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-707`) | 각 분기가 서로 다른 실측 버그(행 reflow / blank flash / MODE 2 frozen)의 대응이고 근거가 주석에 박혀 있다. 마지막 두 분기만 떼면 `isOffline`/`isRefreshingCached` 조건이 함께 무의미해진다 |
+| A4 | `usdtDisplayState` fallback 단순화 | topic gate가 꺼지면 빈 상태, 켜지면 live `tetherTopicRates` 또는 disk `cachedTopicRates`만 쓴다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`). 빈 snapshot과 legacy cache를 다시 노출하지 않는 행동 시험이 있다(`ios/FXiTests/TetherDataPathTests.swift:467-485` · `:604-615`) |
 
 <!-- /rid: R-CUT-5 -->
 
@@ -96,21 +93,13 @@ legacy 분기 제거는 곧 **arming 이 출시 전제**임을 뜻한다.
 <a id="r-cut-6"></a>
 ### R-CUT-6
 
-**(B) 선행 정리 — cutover 표면을 먼저 줄인다 (저위험, 순이익)**
+**(B) 선행 정리 완료**
 
-사용처가 **0** 인 데드 코드: `RateGraphView` 전체(사용처=자기 `#Preview` —
-`ios/FXi/Views/RateGraphView.swift:1446-1458`) / `PeriodTabBar`(`ios/FXi/Views/Components/PeriodTabBar.swift:11-58`) /
-`WebSocketService` 의 `latestRates`·`lastUpdated` 사본(`ios/FXi/Services/WebSocketService.swift:42`) /
-`WebSocketMessage.updateGraphCache`(`ios/FXi/Models/WebSocketMessage.swift:33`) /
-`ExchangeRateViewModel.referenceRate(for:)`·`rateRange(for:)`(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:555-563`).
-여기서 0은 고정 iOS commit 의 production tree 전수 검색 결과다. 각 심볼의 정의/Preview 를 제외한
-호출을 `git grep` 으로 확인했고 `RateGraphView`·`PeriodTabBar` 는 자기 Preview 외 0건,
-`updateGraphCache`·두 ViewModel helper 는 호출 0건이었다.
-→ **cutover 전에 지운다.** 지우고 나면 남는 소비처가 줄어 나머지 작업이 작아진다.
-⚠️ **"위험 0"은 과장이다** — `RateGraphView`/`PeriodTabBar` 는 Preview 외 사용처가 없지만,
-`GraphViewModel` 은 **런타임에 생성되어**(`ios/FXi/FXiApp.swift:24-28`) **legacy graph callback 과
-observer 를 설치**한다(`ios/FXi/ViewModels/GraphViewModel.swift:86-101`).
-저위험이되 **동작 변화 0 은 아니다** → Debug/Release 양쪽 빌드 + callback 소유권 확인이 필요하다.
+`RateGraphView`·`PeriodTabBar`·`GraphViewModel`·`WebSocketMessage` 파일과 legacy 사본/helper를
+`0f2a3f8`에서 제거했다. `SampleGraphView`가 소유하던 정책 설명은 지역화해 삭제된 파일을 문서
+정본으로 가리키지 않는다. Debug suite 776개와 Release OFF/임시 ON 빌드가 통과했고,
+architecture test가 callback 소유권과 파일 복원을 함께 감시한다
+(`ios/FXiTests/TopicMessageTests.swift:386-428`).
 
 <!-- /rid: R-CUT-6 -->
 
@@ -119,18 +108,11 @@ observer 를 설치**한다(`ios/FXi/ViewModels/GraphViewModel.swift:86-101`).
 <a id="r-cut-7"></a>
 ### R-CUT-7
 
-**(C) ⛔ 테스트 커버리지 공백 — 지금 상태로 제거하면 _맹목_ 이다**
+**(C) 사용자 행위 커버리지 완료**
 
-정확히는 **envelope 1차 디코드 테스트는 있다**(`TopicMessageTests.testEnvelopeDecodes_legacyRates_topicAbsent`
-— `ios/FXiTests/TopicMessageTests.swift:18-24`).
-없는 것은 **사용자 행위** 커버리지다 — `ExchangeRateResponse`/`IndicesPayload`/`DxyLiveTick` 를
-참조하는 테스트가 **0건**(부정 사실이라 행 번호가 없다 — 명령·범위·결과로 단다:
-`git grep -n "ExchangeRateResponse\|IndicesPayload\|DxyLiveTick" <pinned ios> -- FXiTests` → 0건)이라
-DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.
-
-⛔ **그렇다고 "제거 대상 경로"에 테스트를 다는 것은 틀렸다** — 곧 버릴 테스트를 만드는 셈이다.
-→ **보존해야 할 사용자 행위**를 먼저 테스트한다(테스트 매트릭스는 [R-CUT-13](#r-cut-13)).
-그 테스트는 cutover 후에도 산다.
+삭제된 envelope 자체가 아니라 cold-start/last-known, legacy frame 무시, DXY live/cache/purge,
+은행 알림 현재가, 연결 lifecycle을 테스트한다. 구체적인 행동 시험은 [R-CUT-13](#r-cut-13)에
+연결했고, architecture test는 legacy 소비 경로가 다시 생기는 것을 별도로 막는다.
 
 <!-- /rid: R-CUT-7 -->
 
@@ -141,9 +123,10 @@ DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.
 
 **(D) 타입은 남긴다**
 
-`ExchangeRate` **struct 자체는 무료 티어 스냅샷이 verbatim 디코드**해 재사용한다
-(`ios/FXi/Models/FreeSnapshotModels.swift:27-31`).
-제거 대상은 `ExchangeRateResponse` / `Metadata` / `IndicesPayload` 이지 `ExchangeRate` 가 아니다.
+`ExchangeRate` **struct 자체는 무료 티어 스냅샷이 verbatim 디코드**해 재사용하므로 남겼다
+(`ios/FXi/Models/FreeSnapshotModels.swift:27-31` ·
+`ios/FXiTests/TopicMessageTests.swift:494-520`). legacy wrapper인 `ExchangeRateResponse`와
+`IndicesPayload`는 제거됐다.
 
 <!-- /rid: R-CUT-8 -->
 
@@ -234,13 +217,13 @@ DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.
 
 | # | 보존할 행위 | 지금 쓸 수 있나 |
 |---|---|---|
-| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ **이미 있다** — `testUsdtDisplay_coldStart_returnsEmpty_noCachedNoPartialLegacy`(`ios/FXiTests/TetherDataPathTests.swift:741-763`). 감사만 |
-| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | 🔶 **A1([R-CUT-2](#r-cut-2)) 과 함께** — 현재는 cache roundtrip·저장만 있고(`ios/FXiTests/TetherDataPathTests.swift:549-564`) *재기동 후 표시*는 미검증 |
-| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | 🔶 **A1([R-CUT-2](#r-cut-2)) 과 함께** — 현행 코드에선 **통과 불가**(`onRatesReceived` 가 `appState = .connected` 를 직접 세팅 — `ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-979`) |
-| B4 | 무료 티어가 `ExchangeRate` **타입**으로 계속 디코드된다 | ✅ **이미 있다** — 무료 스냅샷 디코드 테스트(`ios/FXiTests/TopicMessageTests.swift:513-522`)가 잠근다. 감사만 |
+| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ legacy cache를 seed해도 FX 미수신 표면이 비어 있고(`ios/FXiTests/TetherDataPathTests.swift:467-485`), 빈 tether snapshot도 legacy로 채우지 않는다(`:604-615`) |
+| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:879-897`) · FX와 은행 알림(`:685-706`) · DXY(`:394-409`) cold-start 복원을 잠근다 |
+| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:394-409`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |
+| B4 | 무료 티어가 `ExchangeRate` **타입**으로 계속 디코드된다 | ✅ 무료 스냅샷의 `rate.entries`를 `ExchangeRate`로 디코드한다(`ios/FXiTests/TopicMessageTests.swift:494-520`) |
 | B5 | 45초 무수신 → **조용한 재구독** → 실패 확정 시에만 배너 | ✅ **구현·잠금 완료** — 실패 확정이 degraded 로 수렴하는 것을 재검증 경로(`ios/FXiTests/TopicMessageTests.swift:3816` · `ios/FXiTests/TopicMessageTests.swift:6073`)와 최초 인도 경로(`ios/FXiTests/TopicMessageTests.swift:6113`)에서 각각 잠근다 |
-| B6 | **DXY topic 이 live tip 을 공급**한다 | 🔶 `dxy:spot`([R-INV-4](../DECISIONS.md#r-inv-4)) 구현과 함께 |
-| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | 🔶 A2([R-CUT-3](#r-cut-3)) 신설과 함께 (지금은 legacy 만 본다 = 현행 버그; `ios/FXi/Views/Components/AlertAddSheet.swift:96-103` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553`) |
+| B6 | **DXY topic 이 live tip 을 공급**한다 | ✅ wire decode(`ios/FXiTests/TopicMessageTests.swift:342-353`) · REST bootstrap(`ios/FXiTests/TetherDataPathTests.swift:355-368`) · WS routing/거절 후 늦은 frame 차단(`ios/FXiTests/TopicMessageTests.swift:3807`)을 잠근다 |
+| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |
 | B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:648`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:619`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |
 | B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5923`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6139`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |
 
@@ -282,13 +265,10 @@ DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.
 <a id="r-cut-21"></a>
 ### R-CUT-21
 
-⛔ **정정: 지금 새로 쓸 테스트는 사실상 없다.** B1·B4 는 **이미 잠겨 있어 감사만** 하면 되고,
-B1 은 `ios/FXiTests/TetherDataPathTests.swift:741-763`, B4 는
-`ios/FXiTests/TopicMessageTests.swift:513-522` 가 잠근다.
-B2·B3 는 **A1([R-CUT-2](#r-cut-2), `AppState` 대체) 구현과 같은 커밋**에 들어가야 한다 —
-특히 B3 는 legacy 가 `AppState` 를 직접 갱신하는 현행 구조
-(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:977-979`)에서 **원리적으로 통과할 수 없다**.
-→ 즉 **"테스트부터 시작"이라는 착수 경로는 없다.** 계약을 닫는 것이 실제 다음 단계다.
+당시 결론대로 B2·B3는 A1([R-CUT-2](#r-cut-2), `AppState` 대체)와 같은 `0f2a3f8`에
+들어갔다. replacement 행동을 먼저 정의한 뒤 구현과 함께 green으로 만들었고, 현재 매트릭스
+B1~B9는 자동 회귀로 잠겼다. 이 완료는 실기기 smoke([R-CUT-12](#r-cut-12))나 Release arming을
+대체하지 않는다.
 
 <!-- relation: references target=R-CUT-2 -->
 - references: [R-CUT-2](#r-cut-2)

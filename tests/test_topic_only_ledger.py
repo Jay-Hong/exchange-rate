@@ -64,6 +64,9 @@ MARKDOWN_LITERAL_CANDIDATE_INVENTORY = {
     "test_krx_deploy_verifier.py",
     "test_topic_docs_semantic_drift.py",
     "test_topic_migration_doc_bundle.py",
+    # 2026-08-21 canonical-only provenance 행동 시험이 임시 canonical.md RID 문서를 만든다.
+    # workflow에는 이미 이 모듈이 명시돼 있으므로 inventory 축만 동기화한다.
+    "test_topic_migration_validator.py",
     "test_topic_only_ledger.py",
     "test_topic_wire.py",
     "test_ws_message_limit.py",
