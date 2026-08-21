@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import re
@@ -8,11 +9,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WATCHDOG = REPO_ROOT / "scripts" / "topic_flag_watchdog.sh"
 LINUX_TOOLS = ("flock", "setsid", "timeout")
+RETRYABLE_CLEANUP_ERRNOS = {errno.EEXIST, errno.ENOTEMPTY}
 
 
 def wait_for_text(path: Path, needle: str, timeout: float = 8.0) -> str:
@@ -23,6 +26,25 @@ def wait_for_text(path: Path, needle: str, timeout: float = 8.0) -> str:
             return text
         time.sleep(0.1)
     raise AssertionError(f"{needle!r} not found in {path}\n{text}")
+
+
+def cleanup_temporary_directory(temp, attempts: int = 30, delay: float = 0.1):
+    """Retry only transient non-empty-directory races during test cleanup.
+
+    CI observed one ENOTEMPTY failure, but its process-level cause was not
+    reproduced. Unrelated filesystem errors must remain immediate failures.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+
+    for attempt in range(attempts):
+        try:
+            temp.cleanup()
+            return
+        except OSError as exc:
+            if exc.errno not in RETRYABLE_CLEANUP_ERRNOS or attempt == attempts - 1:
+                raise
+            time.sleep(delay)
 
 
 class TestTopicFlagWatchdogSyntax(unittest.TestCase):
@@ -36,6 +58,57 @@ class TestTopicFlagWatchdogSyntax(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class TestTemporaryDirectoryCleanup(unittest.TestCase):
+    def test_retries_non_empty_directory_then_succeeds(self):
+        for error_number in (errno.ENOTEMPTY, errno.EEXIST):
+            with self.subTest(error_number=error_number):
+                temp = mock.Mock()
+                temp.cleanup.side_effect = [
+                    OSError(error_number, "Directory not empty"),
+                    None,
+                ]
+
+                with mock.patch.object(time, "sleep") as sleep:
+                    cleanup_temporary_directory(temp, attempts=3, delay=0.25)
+
+                self.assertEqual(temp.cleanup.call_count, 2)
+                sleep.assert_called_once_with(0.25)
+
+    def test_does_not_retry_unrelated_os_error(self):
+        temp = mock.Mock()
+        error = OSError(errno.EACCES, "Permission denied")
+        temp.cleanup.side_effect = error
+
+        with mock.patch.object(time, "sleep") as sleep:
+            with self.assertRaises(OSError) as raised:
+                cleanup_temporary_directory(temp)
+
+        self.assertIs(raised.exception, error)
+        temp.cleanup.assert_called_once_with()
+        sleep.assert_not_called()
+
+    def test_raises_after_retry_budget_is_exhausted(self):
+        temp = mock.Mock()
+        error = OSError(errno.ENOTEMPTY, "Directory not empty")
+        temp.cleanup.side_effect = error
+
+        with mock.patch.object(time, "sleep") as sleep:
+            with self.assertRaises(OSError) as raised:
+                cleanup_temporary_directory(temp, attempts=3, delay=0.25)
+
+        self.assertIs(raised.exception, error)
+        self.assertEqual(temp.cleanup.call_count, 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(0.25), mock.call(0.25)])
+
+    def test_rejects_empty_retry_budget(self):
+        temp = mock.Mock()
+
+        with self.assertRaisesRegex(ValueError, "attempts must be at least 1"):
+            cleanup_temporary_directory(temp, attempts=0)
+
+        temp.cleanup.assert_not_called()
+
+
 @unittest.skipUnless(
     all(shutil.which(tool) for tool in LINUX_TOOLS),
     "watchdog integration tests require Linux util-linux/coreutils",
@@ -43,7 +116,7 @@ class TestTopicFlagWatchdogSyntax(unittest.TestCase):
 class TestTopicFlagWatchdogIntegration(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._cleanup_temp)
+        self.addCleanup(cleanup_temporary_directory, self.temp)
         self.home = Path(self.temp.name)
         (self.home / "exchange-rate" / "scripts").mkdir(parents=True)
         (self.home / "logs").mkdir()
@@ -100,27 +173,6 @@ print(json.dumps({"command": "status", "state": state_path.read_text().strip()})
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
-
-    def _cleanup_temp(self, attempts: int = 30, delay: float = 0.1):
-        """임시 디렉터리 정리를 유계 재시도로 수렴시킨다.
-
-        ⛔ `TemporaryDirectory.cleanup()` 을 그대로 쓰면 CI 에서 간헐적으로
-           `OSError: [Errno 39] Directory not empty` 로 깨진다(실측:
-           `test_handoff_is_recursive_across_generations`, 2026-08-21 CI).
-           `rmtree` 의 scandir 과 rmdir 사이에 누군가 파일을 만들면 비어 있지 않다.
-        ⚠️ **"인계 세대가 살아남는다" 가설은 측정으로 반증됐다** — 로그의 `READY pid=`
-           세대를 tearDown 직후 조회하면 20/20 시험에서 **생존 0** 이었다. 즉 pid 를 열거해
-           죽이는 접근은 이 실패를 설명하지 못한다. 남는 설명은 열거되지 않는 **짧은 수명의
-           후손**(subshell·`sleep`·`flock`)이 SIGKILL 전파 중 파일을 남기는 창이다.
-           그래서 범인을 특정하는 대신 **수렴을 기다리고**, 그래도 남으면 시끄럽게 실패한다.
-        """
-        for _ in range(attempts - 1):
-            try:
-                self.temp.cleanup()
-                return
-            except OSError:
-                time.sleep(delay)
-        self.temp.cleanup()   # 마지막 시도의 예외는 그대로 올린다
 
     def start(self, fire_at: int, contract_at: int, log_name: str, extra_env=None):
         log = self.home / "logs" / log_name
