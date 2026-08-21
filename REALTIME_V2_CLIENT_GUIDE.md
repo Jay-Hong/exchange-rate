@@ -79,10 +79,12 @@
 | `fx:jpy-krw` | JPY/KRW 은행(≤8, Citi 제외) + reference | ✅ 구현 |
 | `fx:eur-krw` | EUR/KRW 은행(≤8, Citi 제외) + reference | ✅ 구현 |
 | `usdt:krw` | 테더 탭 (USDT 5거래소 + USD/KRW 은행[kb,hana] + reference) — **KRX 선물 미포함**(ADR-038 D2) | ✅ 구현 |
+| `dxy:spot` | 달러지수(DXY) 현물 단독 — legacy broadcast `data.indices.dxy` 의 topic 경로. 별도 availability flag 없음(`TOPIC_DISPATCHER_ENABLED` 만), **PREMIUM_ONLY** (`topic_policy.AUTHORIZATION_CLASSES`). source = investing/cnbc/yahoo | ✅ 구현 (2026-08-21) |
 | `krx:usd-krw-futures` | KRX 미국달러선물 단독 (ADR-038 D2 독립 topic — `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`[G2∧G3] on일 때만 발행/snapshot) | ✅ 구현 (2026-07-08) |
 
 **범위 밖 (topic publisher 미구현 — 구독해도 데이터 안 옴)**:
-- **DXY / news / graph**: 독립 topic 없음. DXY는 legacy broadcast `data.indices.dxy`, news/graph는 REST.
+- **news / graph**: 독립 topic 없음 — REST 로만 제공한다.
+- ⚠️ 구 서술 "DXY 는 독립 topic 없음"은 **더 이상 맞지 않는다** — `dxy:spot` 이 위 표대로 구현됐다. legacy broadcast `data.indices.dxy` 는 구 클라 호환으로 남아 있다.
 - 미지원 topic / 게이트 off 인 `krx:usd-krw-futures` 의 처리는 **요청이 식별됐는지에 따라 갈린다**
   (2026-08-01 개정 — 구 서술 "registry에는 등록되나 조용히 skip"은 미식별 경로에만 참이다):
   - **식별된 요청** → ack 의 `rejected_topics` 에 `unknown_topic` / `topic_unavailable` 로 실리고
@@ -139,7 +141,7 @@ Keep-alive:  "ping" (raw text) → 서버 {"type": "pong"}
   ②WS 인증(1C, ✅ 2026-08-03) ③**클라 bootstrap 3종의 인증 transport 이관**(✅ 2026-07-26 iOS `4cb050f`)
   — ⚠️ ③ 이 없으면 켜는 순간 클라 cold-start bootstrap 이 401 로 **조용히** 사라진다(`try?` 격리라
   크래시가 없어 더 안 보인다). 그래서 필수였고, 지금은 충족돼 있다.
-- FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`는 `TOPIC_DISPATCHER_ENABLED`만. `krx:usd-krw-futures`는 추가로 `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=`KRX_FUTURES_ENABLED`∧`KRX_CLIENT_DISTRIBUTION_ENABLED`, ADR-038 G2·G3) 필요.
+- FX topic(`fx:*`)은 추가로 `FX_TOPIC_ENABLED=true` 필요. `usdt:krw`·`dxy:spot`은 `TOPIC_DISPATCHER_ENABLED`만. `krx:usd-krw-futures`는 추가로 `KRX_CLIENT_DISTRIBUTION_EFFECTIVE`(=`KRX_FUTURES_ENABLED`∧`KRX_CLIENT_DISTRIBUTION_ENABLED`, ADR-038 G2·G3) 필요.
 - live 활성 = 별도 운영 GO (출시 직전).
 
 ### ack / error / auth

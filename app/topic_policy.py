@@ -75,20 +75,12 @@ class AuthorizationClass(enum.Enum):
 # ⛔ **리터럴 열거**(모듈 docstring 참조). publisher 상수로 comprehension 하지 말 것.
 #    MappingProxyType은 별칭을 통한 런타임 변이까지 막는다. AST 이름 검사만으로는
 #    `alias = TOPIC_POLICY; alias.update(...)` 같은 우회를 완전히 탐지할 수 없다.
-# ⚠️ `dxy:spot` 은 **의도적으로 없다** — publisher 미구현이라(R-HAND-19 가 출시 선행조건으로 둠)
-#    지금 행을 넣으면 소비자 없는 설계가 된다(ADR-040). DXY 수직 슬라이스가 publisher·snapshot·
-#    정책행을 **함께** 추가한다. 그 슬라이스가 DXY 를 `implemented_topic_universe()` 또는 runtime
-#    supported 집합에 연결하는 순간 두 coverage 검사가 정책행도 **강제**한다. publisher 파일만
-#    추가하고 어느 집합에도 연결하지 않은 상태를 자동 발견하는 검사는 아니다.
-#    ⚠️ 다만 그 조건은 실질적으로 "도달 가능해지는 순간"과 같다 — dispatcher 의 availability
-#    partition 은 `supported` 밖 topic 을 known-gated면 `topic_unavailable`, 그 밖에는
-#    `unknown_topic` 으로 거부한다. 따라서 구독 가능한 topic 은 **반드시** `supported` 에 있고,
-#    정책행 없이 열리는 topic 은 존재할 수 없다.
 TOPIC_POLICY: Mapping[str, AuthorizationClass] = MappingProxyType({
     "fx:usd-krw": AuthorizationClass.PREMIUM_ONLY,
     "fx:jpy-krw": AuthorizationClass.PREMIUM_ONLY,
     "fx:eur-krw": AuthorizationClass.PREMIUM_ONLY,
     "usdt:krw": AuthorizationClass.PREMIUM_ONLY,
+    "dxy:spot": AuthorizationClass.PREMIUM_ONLY,
     "krx:usd-krw-futures": AuthorizationClass.PREMIUM_AND_ENTITLEMENT,
 })
 
@@ -101,10 +93,11 @@ def implemented_topic_universe() -> frozenset:
     ⚠️ `TOPIC_POLICY` 에서 파생하지 않는다(그러면 등식이 항진명제다). 출처는 publisher 모듈이다.
     """
     from app.fx_topic_publisher import FX_TOPICS
+    from app.dxy_topic_publisher import DXY_TOPIC
     from app.krx_topic_publisher import KRX_TOPIC
     from app.tether_topic_publisher import TETHER_TOPIC
 
-    return frozenset(FX_TOPICS.values()) | {TETHER_TOPIC, KRX_TOPIC}
+    return frozenset(FX_TOPICS.values()) | {TETHER_TOPIC, DXY_TOPIC, KRX_TOPIC}
 
 
 def entitlement_gated_topics() -> frozenset:

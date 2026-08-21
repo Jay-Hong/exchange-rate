@@ -15,7 +15,7 @@ flakiness 방어 (feedback_flaky_sleep_async_tests):
 - conftest: firebase stub + file-backed sqlite. lifespan(scheduler)은 TestClient context
   manager 미사용으로 미진입.
 
-scope: connect→subscribe→snapshot 수신(fx + usdt) + reconnect→재수신. send-failure cleanup은
+scope: connect→subscribe→snapshot 수신(fx + usdt + dxy) + reconnect→재수신. send-failure cleanup은
 단위 테스트(test_topic_initial_snapshot.py), live/synthetic publish 수신은 별도 follow-up.
 """
 import asyncio
@@ -143,6 +143,14 @@ class TestSnapshotOnSubscribeE2E(unittest.TestCase):
                 snap = self._recv_snapshot(ws, "usdt:krw")
         self.assertEqual(snap["topic"], "usdt:krw")
 
+    def test_subscribe_dxy_receives_snapshot(self):
+        p1, p2, p3, p4 = self._ctx()
+        with p1, p2, p3, p4:
+            with self.client.websocket_connect("/ws") as ws:
+                ws.send_json({"type": "subscribe", "topics": ["dxy:spot"]})
+                snap = self._recv_snapshot(ws, "dxy:spot")
+        self.assertEqual(snap["data"], {"_canned": "dxy:spot"})
+
     def test_subscribe_multiple_topics_receives_each_snapshot(self):
         p1, p2, p3, p4 = self._ctx()
         with p1, p2, p3, p4:
@@ -219,6 +227,29 @@ class TestTopicSnapshotRestBootstrap(unittest.TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json(), canned)  # WS snapshot과 동일 contract
         self.assertEqual(r.headers.get("cache-control"), "no-store")
+
+    def test_dxy_topic_returns_snapshot_under_the_same_auth_gate(self):
+        canned = {
+            "type": "snapshot",
+            "version": 1,
+            "topic": "dxy:spot",
+            "data": {
+                "dxy": {
+                    "rate": 104.52,
+                    "timestamp": "2026-08-21T14:30:00+09:00",
+                    "source": "investing",
+                }
+            },
+        }
+        p_auth, p_prem = self._authed()
+        with patch.object(config, "TOPIC_DISPATCHER_ENABLED", True), p_auth, p_prem, patch(
+            "app.topic_initial_snapshot._build_snapshot_sync", return_value=canned
+        ):
+            r = self.client.get(
+                "/api/v2/topics/snapshot", params={"topic": "dxy:spot"}
+            )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), canned)
 
     def test_topic_unavailable_when_build_none(self):
         """지원 topic이나 _build_snapshot_sync None(예: fx FX_TOPIC_ENABLED off) → 404 topic_unavailable."""

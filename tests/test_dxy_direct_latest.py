@@ -8,8 +8,11 @@
 """
 from __future__ import annotations
 
+import ast
+import inspect
 import json
 import unittest
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import app.latest_rates_cache as lrc
@@ -58,6 +61,52 @@ class TestDxyDirectWriter(unittest.TestCase):
                 lrc.set_latest_dxy_rate_from_sync_job(1.0, "t", "investing"))
 
 
+class TestDxyDirectReader(unittest.TestCase):
+    def _serialized(self):
+        return lrc.serialize_dxy_value(
+            104.52,
+            "2026-08-21T14:30:00+09:00",
+            "investing",
+            datetime.now(lrc._KST),
+        )
+
+    def test_fresh_value_returns_topic_ready_shape(self):
+        client = MagicMock()
+        client.get.return_value = self._serialized()
+        with patch.object(lrc, "_get_sync_client", return_value=client):
+            got = lrc.get_latest_dxy_rate_from_sync_job()
+        self.assertEqual(
+            got,
+            {
+                "instrument": "dxy",
+                "rate": 104.52,
+                "timestamp": "2026-08-21T14:30:00+09:00",
+                "source": "investing",
+            },
+        )
+
+    def test_stale_value_returns_none_for_db_fallback(self):
+        client = MagicMock()
+        client.get.return_value = self._serialized()
+        with patch.object(lrc, "_get_sync_client", return_value=client), patch.object(
+            lrc, "is_stale", return_value=True
+        ):
+            self.assertIsNone(lrc.get_latest_dxy_rate_from_sync_job())
+
+    def test_miss_parse_failure_and_get_error_return_none(self):
+        values = (None, b"not-json", RuntimeError("redis down"))
+        for value in values:
+            client = MagicMock()
+            if isinstance(value, Exception):
+                client.get.side_effect = value
+            else:
+                client.get.return_value = value
+            with self.subTest(value=value), patch.object(
+                lrc, "_get_sync_client", return_value=client
+            ):
+                self.assertIsNone(lrc.get_latest_dxy_rate_from_sync_job())
+
+
 class TestEmitDxyDirectLatest(unittest.TestCase):
     """_emit_dxy_direct_latest — flag gate + get_latest_dxy_rate 재사용(mirror와 동일) + 격리."""
 
@@ -88,6 +137,56 @@ class TestEmitDxyDirectLatest(unittest.TestCase):
         with patch("app.config.DXY_DIRECT_LATEST_ENABLED", True), \
              patch("app.crud.get_latest_dxy_rate", side_effect=RuntimeError("db down")):
             dxy_spot._emit_dxy_direct_latest(MagicMock())
+
+
+class TestStoreDxyObservation(unittest.TestCase):
+    def test_changed_value_emits_latest_and_requests_topic(self):
+        db = MagicMock()
+        with patch("app.crud.insert_dxy_rate_into_db", return_value=True) as insert, patch.object(
+            dxy_spot, "_emit_dxy_direct_latest"
+        ) as emit, patch(
+            "app.dxy_topic_publisher.request_dxy_topic_publish"
+        ) as request:
+            changed = dxy_spot._store_dxy_observation(
+                db, rate=104.5, source="investing", reason="primary"
+            )
+        self.assertTrue(changed)
+        insert.assert_called_once_with(db=db, rate=104.5, source="investing")
+        emit.assert_called_once_with(db)
+        request.assert_called_once_with(db, reason="primary")
+
+    def test_same_value_keeps_heartbeat_but_does_not_publish(self):
+        db = MagicMock()
+        with patch("app.crud.insert_dxy_rate_into_db", return_value=False), patch.object(
+            dxy_spot, "_emit_dxy_direct_latest"
+        ) as emit, patch(
+            "app.dxy_topic_publisher.request_dxy_topic_publish"
+        ) as request:
+            changed = dxy_spot._store_dxy_observation(
+                db, rate=104.5, source="investing", reason="primary"
+            )
+        self.assertFalse(changed)
+        emit.assert_called_once_with(db)
+        request.assert_not_called()
+
+    def test_all_three_persist_paths_use_the_shared_helper(self):
+        tree = ast.parse(inspect.getsource(dxy_spot))
+        store_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_store_dxy_observation"
+        ]
+        raw_insert_calls = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "insert_dxy_rate_into_db"
+        ]
+        self.assertEqual(len(store_calls), 3)
+        self.assertEqual(len(raw_insert_calls), 1, "raw INSERT는 shared helper 안에만 있어야 한다")
 
 
 class TestS2bSilentStaleHeartbeat(unittest.TestCase):

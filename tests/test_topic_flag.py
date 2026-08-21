@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import os
 import signal
 import subprocess
@@ -15,19 +16,21 @@ from scripts.canary_monitor import Target
 
 
 def env_bytes(*, topic="false", krx="false", fx="true", env="production",
-              admin="test-secret"):
+              auth_stage=topic_flag.REQUIRED_AUTH_STAGE, admin="test-secret"):
     return (
         f"ENV={env}\n"
         f"ADMIN_PASSWORD={admin}\n"
         f"KRX_CLIENT_DISTRIBUTION_ENABLED={krx}\n"
         f"FX_TOPIC_ENABLED={fx}\n"
+        f"WS_TOPIC_AUTH_STAGE={auth_stage}\n"
         f"TOPIC_DISPATCHER_ENABLED={topic}\n"
         "OTHER=preserve-me\n"
     ).encode()
 
 
 def observation(data, runtime, *, inspect=None, endpoint=None, fx_ready=True,
-                backup=False):
+                file_auth_stage=topic_flag.REQUIRED_AUTH_STAGE,
+                auth_stage=topic_flag.REQUIRED_AUTH_STAGE, backup=False):
     inspect = runtime if inspect is None else inspect
     endpoint = runtime if endpoint is None else endpoint
     return {
@@ -35,9 +38,12 @@ def observation(data, runtime, *, inspect=None, endpoint=None, fx_ready=True,
         "file_readable": True,
         "file_value": topic_flag.read_key_value(data),
         "file_line_count": len(topic_flag.key_line_indexes(data)),
+        "file_auth_stage": file_auth_stage,
+        "file_auth_stage_line_count": 1,
         "container": runtime,
         "inspect": inspect,
         "dispatcher_endpoint": endpoint,
+        "auth_stage": auth_stage,
         "fx": ({name: bool(runtime and fx_ready) for name in topic_flag.FX_TOPICS}
                if fx_ready is not None else None),
         "fx_topic_enabled": fx_ready,
@@ -92,6 +98,30 @@ class TestClassification(unittest.TestCase):
     def test_fx_failure_cannot_be_called_on(self):
         state = topic_flag.classify(observation(env_bytes(topic="true"), True, fx_ready=False))
         self.assertEqual(state, topic_flag.STATE_DRIFTED)
+
+    def test_non_final_auth_stage_cannot_be_called_on(self):
+        state = topic_flag.classify(observation(
+            env_bytes(topic="true", auth_stage="compatibility"),
+            True,
+            auth_stage="compatibility",
+        ))
+        self.assertEqual(state, topic_flag.STATE_DRIFTED)
+
+    def test_pending_file_auth_downgrade_cannot_be_called_on(self):
+        state = topic_flag.classify(observation(
+            env_bytes(topic="true", auth_stage="compatibility"),
+            True,
+            file_auth_stage="compatibility",
+        ))
+        self.assertEqual(state, topic_flag.STATE_DRIFTED)
+
+    def test_auth_stage_does_not_block_emergency_off_status(self):
+        state = topic_flag.classify(observation(
+            env_bytes(auth_stage="compatibility"),
+            False,
+            auth_stage="compatibility",
+        ))
+        self.assertEqual(state, topic_flag.STATE_OFF)
 
     def test_fx_observation_failure_is_unknown(self):
         state = topic_flag.classify(observation(env_bytes(topic="true"), True, fx_ready=None))
@@ -216,6 +246,7 @@ class TestPreflight(unittest.IsolatedAsyncioTestCase):
             "ENV": "production",
             "KRX_CLIENT_DISTRIBUTION_ENABLED": "false",
             "FX_TOPIC_ENABLED": "true",
+            "WS_TOPIC_AUTH_STAGE": topic_flag.REQUIRED_AUTH_STAGE,
         }
         return (
             patch.object(topic_flag, "preflight_common", AsyncMock()),
@@ -260,10 +291,37 @@ class TestPreflight(unittest.IsolatedAsyncioTestCase):
                 "ENV": "production",
                 "KRX_CLIENT_DISTRIBUTION_ENABLED": "false",
                 "FX_TOPIC_ENABLED": "false",
+                "WS_TOPIC_AUTH_STAGE": topic_flag.REQUIRED_AUTH_STAGE,
             })
+
+    async def test_file_and_runtime_auth_stage_must_both_be_final(self):
+        self.path.write_bytes(env_bytes(auth_stage="compatibility"))
+        with self.assertRaises(topic_flag.Abort) as caught:
+            await self.run_preflight()
+        self.assertIn("WS_TOPIC_AUTH_STAGE", str(caught.exception))
+
+        self.path.write_bytes(env_bytes())
+        with self.assertRaises(topic_flag.Abort) as caught:
+            await self.run_preflight(live={
+                "ENV": "production",
+                "KRX_CLIENT_DISTRIBUTION_ENABLED": "false",
+                "FX_TOPIC_ENABLED": "true",
+                "WS_TOPIC_AUTH_STAGE": "compatibility",
+            })
+        self.assertIn("WS_TOPIC_AUTH_STAGE", str(caught.exception))
 
     async def test_empty_admin_password_is_rejected_before_recreate(self):
         self.path.write_bytes(env_bytes(admin=""))
+        with self.assertRaises(topic_flag.Abort):
+            await self.run_preflight()
+
+
+    async def test_padded_file_auth_stage_is_rejected_before_touching_production(self):
+        """⛔ 후행 공백은 관대한 파서(`read_env_values`)로 보면 통과한다 — 그런데
+        `app.config.parse_topic_auth_stage` 는 정확 일치만 받고 ValueError 를 던지므로
+        재생성하면 **컨테이너가 import 에서 죽는다**. 사전검사에서 막아야 한다.
+        """
+        self.path.write_bytes(env_bytes(auth_stage=topic_flag.REQUIRED_AUTH_STAGE + " "))
         with self.assertRaises(topic_flag.Abort):
             await self.run_preflight()
 
@@ -281,6 +339,7 @@ class TestTransactions(unittest.IsolatedAsyncioTestCase):
         data = self.path.read_bytes()
         with patch.object(topic_flag, "observe", AsyncMock(return_value={
                  "TOPIC_DISPATCHER_ENABLED": "false",
+                 "WS_TOPIC_AUTH_STAGE": topic_flag.REQUIRED_AUTH_STAGE,
              })), patch.object(topic_flag, "inspect_value", AsyncMock(return_value="")), \
              patch.object(topic_flag, "admin_json", AsyncMock(side_effect=[
                  {"enabled": False}, {},
@@ -291,6 +350,21 @@ class TestTransactions(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(value is None for value in result["fx"].values()))
         self.assertIsNone(result["fx_topic_enabled"])
         self.assertEqual(topic_flag.classify(result), topic_flag.STATE_UNKNOWN)
+
+    async def test_apply_rejects_non_final_runtime_auth_stage_after_recreate(self):
+        original = self.path.read_bytes()
+        planned = topic_flag.plan_enable(original)
+        incompatible = observation(planned, True, auth_stage="compatibility")
+
+        with patch.object(topic_flag, "recreate_and_verify_health", AsyncMock()), \
+             patch.object(topic_flag, "measure", AsyncMock(return_value=incompatible)):
+            with self.assertRaises(topic_flag.Abort) as caught:
+                await topic_flag._apply(
+                    self.target, self.path, original, planned, True,
+                    {"wrote": False, "recreated": False},
+                )
+
+        self.assertIn("auth_stage='compatibility'", str(caught.exception))
 
     async def test_apply_cas_runs_even_when_target_row_needs_no_write(self):
         original = env_bytes(topic="true")
@@ -613,6 +687,54 @@ class TestSignalContract(unittest.TestCase):
                 self.assertEqual(marker.read_text(), "cleanup-ran")
                 with env_operation_lock(env, "parent-after-signal"):
                     pass
+
+
+class TestAuthStageParserParity(unittest.TestCase):
+    """⛔ 파일 쪽 auth stage 는 **앱과 같은 strict 규칙**으로 봐야 한다.
+
+    `topic_flag` 는 두 파서를 쓴다: `read_env_values`(canary_monitor 에서 임포트, 행 전체를
+    `.strip()` 하는 **관대한** 파서)와 자기 `read_key_value`(raw). 후행 공백이 붙으면 둘이 갈리고,
+    관대한 쪽으로 사전검사를 하면 **통과 → 재생성 → 컨테이너가 import 에서 죽는다**
+    (`app.config` 는 모듈 레벨이고 `parse_topic_auth_stage` 는 정확 일치만 받는다).
+    그 뒤 판정은 raw 비교라 영구 DRIFTED — 재실행이 재생성을 반복한다.
+
+    ⚠️ 반대로 판정부를 strip 으로 "맞추면" 앱이 거부하는 값을 도구가 승인하게 된다.
+       방향은 항상 strict 쪽이다(`is_true` docstring 과 같은 이유).
+    """
+
+    def test_padded_value_diverges_and_app_rejects_it(self):
+        from app.config import parse_topic_auth_stage
+
+        padded = topic_flag.REQUIRED_AUTH_STAGE + " "
+        data = env_bytes(topic="true", auth_stage=padded)
+
+        lenient = topic_flag.read_env_values(data.decode(), [topic_flag.AUTH_STAGE_KEY])
+        self.assertEqual(
+            lenient[topic_flag.AUTH_STAGE_KEY], topic_flag.REQUIRED_AUTH_STAGE,
+            "관대한 파서가 후행 공백을 삼키지 않는다면 이 위험 자체가 없다 — 전제가 바뀌었다",
+        )
+        strict = topic_flag.read_key_value(data, topic_flag.AUTH_STAGE_KEY.encode()).decode()
+        self.assertNotEqual(strict, topic_flag.REQUIRED_AUTH_STAGE)
+        with self.assertRaises(ValueError):
+            parse_topic_auth_stage(padded)   # 앱은 실제로 죽는다
+
+    def test_exact_value_is_accepted_by_the_app(self):
+        """상수 drift 방어 — REQUIRED_AUTH_STAGE 가 앱 enum 과 갈라지면 여기서 잡힌다."""
+        from app.config import TopicAuthStage, parse_topic_auth_stage
+
+        self.assertIs(
+            parse_topic_auth_stage(topic_flag.REQUIRED_AUTH_STAGE),
+            TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM,
+        )
+
+    def test_preflight_on_reads_auth_stage_with_the_strict_parser(self):
+        source = inspect.getsource(topic_flag.preflight_on)
+        self.assertIn("read_key_value(data, AUTH_STAGE_KEY.encode())", source)
+        self.assertNotIn(
+            "pending.get(AUTH_STAGE_KEY)", source,
+            "관대한 파서로 auth stage 를 검사하면 앱이 거부하는 값이 운영에 배포된다",
+        )
+
 
 
 if __name__ == "__main__":

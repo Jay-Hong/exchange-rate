@@ -714,6 +714,37 @@ def set_latest_dxy_rate_from_sync_job(rate: float, timestamp: str, source: str) 
         return False
 
 
+def get_latest_dxy_rate_from_sync_job() -> Optional[Dict[str, Any]]:
+    """sync snapshot builder용 DXY Redis GET.
+
+    latest mirror와 direct writer가 공유하는 ``latest:dxy:current``를 읽는다. miss, 손상,
+    stale, Redis 오류는 ``None``으로 접어 호출자가 DB fallback을 사용하게 한다.
+    """
+    client = _get_sync_client()
+    if client is None:
+        return None
+    try:
+        raw = client.get(LATEST_DXY_KEY)
+    except Exception:
+        logger.warning(
+            "DXY sync Redis GET 실패 (best-effort, DB fallback에 의존)",
+            exc_info=True,
+            extra={"key": LATEST_DXY_KEY},
+        )
+        return None
+    if raw is None:
+        return None
+    parsed = deserialize_dxy_value(raw)
+    if parsed is None or is_stale(parsed["mirrored_at"]):
+        return None
+    return {
+        "instrument": "dxy",
+        "rate": parsed["rate"],
+        "timestamp": parsed["timestamp"],
+        "source": parsed["source"],
+    }
+
+
 # KRX Stage E — tick-level helper (KRX_REDIS_TICK_WRITE_ENABLED=true 시 사용).
 # USDT 5b-bis schema mirror — 5 fields + in-memory state.
 # 단일 source/asset이라 dict 불필요, 단일 dict[Optional] state 보관.
@@ -2264,6 +2295,7 @@ __all__ = [
     "deserialize_index",
     "serialize_dxy_value",
     "deserialize_dxy_value",
+    "get_latest_dxy_rate_from_sync_job",
     "is_stale",
     "fetch_rates_from_redis",
     "warmup_latest_rates",

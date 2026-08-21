@@ -80,7 +80,7 @@ class TestSupportedSnapshotTopics(unittest.TestCase):
         with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", False):
             self.assertEqual(
                 set(supported_snapshot_topics()),
-                {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw"},
+                {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw", "dxy:spot"},
             )
 
     def test_supported_set_includes_krx_when_gate_on(self):
@@ -90,7 +90,7 @@ class TestSupportedSnapshotTopics(unittest.TestCase):
         with patch.object(config, "KRX_CLIENT_DISTRIBUTION_EFFECTIVE", True):
             self.assertEqual(
                 set(supported_snapshot_topics()),
-                {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw",
+                {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw", "dxy:spot",
                  "krx:usd-krw-futures"},
             )
 
@@ -126,7 +126,10 @@ class TestVisibleSnapshotTopics(unittest.TestCase):
         topics, _, _, _ = self._visible(gate_on=True, krx_visible=False)
         self.assertNotIn(self._KRX, topics)
         # 나머지 topic은 그대로 (과잉 필터 회귀 차단)
-        self.assertEqual(set(topics), {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw"})
+        self.assertEqual(
+            set(topics),
+            {"fx:usd-krw", "fx:jpy-krw", "fx:eur-krw", "usdt:krw", "dxy:spot"},
+        )
 
     def test_global_gate_off_skips_session_and_lookup(self):
         """전역 게이트 off면 KRX가 애초에 없으므로 **세션도 열지 않는다**(불필요한 장애 표면 회피)."""
@@ -302,6 +305,35 @@ class TestResolveSnapshotTopicAccess(unittest.TestCase):
         self.assertTrue(
             filtered <= per_user_gated_snapshot_topics(),
             f"per-user 필터 대상인데 registry 미등록: {filtered - per_user_gated_snapshot_topics()}")
+
+
+class TestDxySnapshotBranch(unittest.TestCase):
+    _TOPIC = "dxy:spot"
+    _ENTRY = {
+        "rate": 104.52,
+        "timestamp": "2026-08-21T14:30:00+09:00",
+        "source": "investing",
+    }
+
+    def test_builds_dxy_payload_via_redis_first_loader(self):
+        fake_db = MagicMock()
+        with patch("app.database.SessionLocal", return_value=fake_db), patch(
+            "app.dxy_topic_publisher.load_dxy_topic_entry",
+            return_value=dict(self._ENTRY),
+        ) as load:
+            payload = _build_snapshot_sync(self._TOPIC)
+        load.assert_called_once_with(fake_db)
+        fake_db.close.assert_called_once()
+        self.assertEqual(payload["topic"], self._TOPIC)
+        self.assertEqual(payload["data"], {"dxy": self._ENTRY})
+
+    def test_no_latest_value_returns_none_and_closes_session(self):
+        fake_db = MagicMock()
+        with patch("app.database.SessionLocal", return_value=fake_db), patch(
+            "app.dxy_topic_publisher.load_dxy_topic_entry", return_value=None
+        ):
+            self.assertIsNone(_build_snapshot_sync(self._TOPIC))
+        fake_db.close.assert_called_once()
 
 
 class TestKrxSnapshotBranch(unittest.TestCase):

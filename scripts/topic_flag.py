@@ -100,6 +100,8 @@ from scripts.env_operation_lock import (  # noqa: E402
 )
 
 TARGET_KEY = b"TOPIC_DISPATCHER_ENABLED"
+AUTH_STAGE_KEY = "WS_TOPIC_AUTH_STAGE"
+REQUIRED_AUTH_STAGE = "enforce_authenticated_premium"
 TRUE = b"true"
 FALSE = b"false"
 PENDING_SUFFIX = TOPIC_FLAG_PENDING_SUFFIX
@@ -314,6 +316,22 @@ def classify(observation: dict) -> str:
     file_true = is_true(file_value)
     if file_true != runtime_true:
         return STATE_PENDING_RECREATE                 # 쓰기는 됐고 재생성이 남았다(양방향)
+    if runtime_true:
+        file_auth_stage = observation.get("file_auth_stage")
+        file_auth_stage_line_count = observation.get("file_auth_stage_line_count")
+        if file_auth_stage_line_count is None:
+            return STATE_UNKNOWN
+        if file_auth_stage_line_count > 1:
+            return STATE_AMBIGUOUS
+        if file_auth_stage != REQUIRED_AUTH_STAGE:
+            # 현재 런타임만 final이어도 파일이 compatibility면 다음 recreate에서 인증이 퇴행한다.
+            return STATE_DRIFTED
+        auth_stage = observation.get("auth_stage")
+        if auth_stage is None:
+            return STATE_UNKNOWN
+        if auth_stage != REQUIRED_AUTH_STAGE:
+            # Release dispatcher ON은 익명 FX/USDT를 허용하는 compatibility stage와 양립할 수 없다.
+            return STATE_DRIFTED
     fx_signals = [(observation.get("fx") or {}).get(topic) for topic in FX_TOPICS]
     if any(signal is None for signal in fx_signals):
         return STATE_UNKNOWN
@@ -359,15 +377,28 @@ async def measure(target: Target, env_path: Path, data: Optional[bytes] = None) 
         result["file_readable"] = True
         result["file_value"] = read_key_value(data)
         result["file_line_count"] = len(key_line_indexes(data))
+        auth_key = AUTH_STAGE_KEY.encode()
+        raw_file_auth_stage = read_key_value(data, auth_key)
+        result["file_auth_stage"] = (
+            raw_file_auth_stage.decode("utf-8", "replace")
+            if raw_file_auth_stage is not None
+            else None
+        )
+        result["file_auth_stage_line_count"] = len(key_line_indexes(data, auth_key))
     except OSError as exc:
         result["file_readable"] = False
         result["file_error"] = str(exc)
 
     try:
-        live = await observe(lambda: container_env([TARGET_KEY.decode()], target), "container_env")
+        live = await observe(
+            lambda: container_env([TARGET_KEY.decode(), AUTH_STAGE_KEY], target),
+            "container_env",
+        )
         result["container"] = is_true(live.get(TARGET_KEY.decode()))
+        result["auth_stage"] = live.get(AUTH_STAGE_KEY)
     except CollectorError:
         result["container"] = None
+        result["auth_stage"] = None
     try:
         result["inspect"] = (await inspect_value(target, MATCH_FMT % "true")) == "MATCH"
     except CollectorError:
@@ -439,10 +470,11 @@ async def preflight_on(target: Target, env_path: Path) -> bytes:
     data = env_path.read_bytes()                       # ⛔ 이 스냅샷이 계획·CAS 의 기준이 된다
     pending = read_env_values(
         data.decode("utf-8"),
-        ["ENV", "KRX_CLIENT_DISTRIBUTION_ENABLED", "FX_TOPIC_ENABLED", "ADMIN_PASSWORD"])
+        ["ENV", "KRX_CLIENT_DISTRIBUTION_ENABLED", "FX_TOPIC_ENABLED", AUTH_STAGE_KEY,
+         "ADMIN_PASSWORD"])
     live = await observe(
         lambda: container_env(
-            ["ENV", "KRX_CLIENT_DISTRIBUTION_ENABLED", "FX_TOPIC_ENABLED"], target),
+            ["ENV", "KRX_CLIENT_DISTRIBUTION_ENABLED", "FX_TOPIC_ENABLED", AUTH_STAGE_KEY], target),
         "preflight env")
 
     for label, value in (("파일", pending.get("ENV")), ("런타임", live.get("ENV"))):
@@ -458,6 +490,24 @@ async def preflight_on(target: Target, env_path: Path) -> bytes:
                          ("런타임", live.get("FX_TOPIC_ENABLED"))):
         if not is_true(value):
             raise Abort(f"{label} FX_TOPIC_ENABLED 가 true 가 아니다 — FX topic 이 서지 않는다")
+    # ⛔ compatibility에서 dispatcher를 켜면 익명 FX/USDT subscribe가 최신 snapshot을 받는다.
+    #    파일만 확인하면 recreate 전 런타임과 계획이 갈릴 수 있으므로 두 축 모두 정확히 일치시킨다.
+    # ⛔ **파일 쪽은 `read_env_values` 를 쓰지 않는다.** 그건 행 전체를 `.strip()` 하는 **관대한** 파서라
+    #    `WS_TOPIC_AUTH_STAGE=enforce_authenticated_premium ` (후행 공백)을 통과시킨다. 그런데
+    #    `app/config.parse_topic_auth_stage` 는 `.strip().lower()` 없이 **정확한 문자열만** 받고 아니면
+    #    ValueError 를 던진다 — config 는 모듈 레벨이라 **컨테이너가 import 에서 죽는다**.
+    #    관대한 파서로 통과시키면 사전검사는 OK 인데 재생성이 운영을 내려버린다(그 뒤 판정은 raw 비교라
+    #    영구 DRIFTED — 재실행이 재생성을 반복한다). 그래서 **앱과 같은 strict 규칙**으로 여기서 거른다.
+    #    ⚠️ 반대로 판정부를 strip 으로 "맞추면" 앱이 거부하는 값을 도구가 승인하게 된다 — `is_true` 의
+    #    docstring 과 같은 이유로 방향은 항상 strict 쪽이다.
+    raw_file_stage = read_key_value(data, AUTH_STAGE_KEY.encode())
+    file_stage = raw_file_stage.decode("utf-8", "replace") if raw_file_stage is not None else None
+    for label, value in (("파일", file_stage), ("런타임", live.get(AUTH_STAGE_KEY))):
+        if value != REQUIRED_AUTH_STAGE:
+            raise Abort(
+                f"{label} {AUTH_STAGE_KEY}={value!r} — Release ON은 "
+                f"{REQUIRED_AUTH_STAGE!r}만 허용한다(공백 포함 정확 일치)"
+            )
     # ⚠️ 사후 검증이 admin endpoint 를 쓴다 — 값이 비면 재생성 뒤 검증 자체가 불가능해진다.
     admin = pending.get("ADMIN_PASSWORD")
     if admin is None or not admin.strip():
@@ -520,12 +570,15 @@ async def _apply(target: Target, env_path: Path, planned_from: bytes, planned: b
         summary["fx"] = fx
     if expect_true:
         summary["fx_topic_enabled"] = observation.get("fx_topic_enabled")
+        summary["auth_stage"] = observation.get("auth_stage")
+        ok = ok and observation.get("auth_stage") == REQUIRED_AUTH_STAGE
     if not ok:
         raise Abort(f"런타임 검증 실패 — state={summary['state']} "
                     f"env_matches_plan={summary['env_matches_plan']} "
                     f"container={observation.get('container')} "
                     f"inspect={observation.get('inspect')} "
-                    f"dispatcher={observation.get('dispatcher_endpoint')}")
+                    f"dispatcher={observation.get('dispatcher_endpoint')} "
+                    f"auth_stage={observation.get('auth_stage')!r}")
 
 
 async def _converge_off(target: Target, env_path: Path) -> dict:
@@ -652,6 +705,8 @@ async def report_status(target: Target = PRODUCTION_TARGET, *,
         "container": observation.get("container"),
         "inspect_match": observation.get("inspect"),
         "dispatcher_endpoint": observation.get("dispatcher_endpoint"),
+        "file_auth_stage": observation.get("file_auth_stage"),
+        "auth_stage": observation.get("auth_stage"),
         "fx": observation.get("fx"),
         "fx_topic_enabled": observation.get("fx_topic_enabled"),
         "other_tool_backup": observation.get("other_tool_backup"),

@@ -7,7 +7,7 @@
 scope: 실제 구현된 topic만 — fx:usd-krw / fx:jpy-krw / fx:eur-krw + usdt:krw
 + krx:usd-krw-futures(ADR-038 D2 독립 topic — KRX_CLIENT_DISTRIBUTION_EFFECTIVE=true일 때만
 supported list 포함, G2 off면 snapshot 404 = 발행 중단과 동일 gate).
-DXY/news/graph는 publisher 미구현이라 범위 밖.
++ dxy:spot(`app/dxy_topic_publisher`). news/graph는 publisher 미구현이라 범위 밖.
 ⚠️ 구 서술("매핑에 없으면 register 는 유지하되 snapshot skip")은 **더 이상 맞지 않는다**
 (2026-08-02 `4a45173`): 무토큰 경로는 `supported_snapshot_topics()` 안이면서 gated 가 아닌
 topic 만 등록하고, 식별된 요청은 미지원 topic 을 `rejected_topics` 로 접는다 — 어느 경로도
@@ -313,14 +313,14 @@ def supported_snapshot_topics() -> tuple:
     """snapshot 빌드 가능한 topic 목록 (구현상 지원 set — availability gate와 무관).
 
     REST bootstrap endpoint(`/api/v2/topics/snapshot`)의 unknown_topic 검증 + client 노출용
-    단일 소스. `_build_snapshot_sync`의 dispatch(fx:* + usdt:krw)와 일치. lazy import로
-    모듈 경량 유지(FX_TOPICS/TETHER_TOPIC).
+    단일 소스. `_build_snapshot_sync`의 dispatch와 일치. lazy import로 모듈 경량 유지.
     """
     from app.fx_topic_publisher import FX_TOPICS  # {asset: "fx:{asset}"}
+    from app.dxy_topic_publisher import DXY_TOPIC  # "dxy:spot"
     from app.krx_topic_publisher import KRX_TOPIC  # "krx:usd-krw-futures"
     from app.tether_topic_publisher import TETHER_TOPIC  # "usdt:krw"
 
-    topics = tuple(FX_TOPICS.values()) + (TETHER_TOPIC,)
+    topics = tuple(FX_TOPICS.values()) + (TETHER_TOPIC, DXY_TOPIC)
     # ADR-038 Decision 2 — KRX 독립 topic은 G2/G3 열려 있을 때만 지원 목록에 포함
     # (off면 REST 404 unknown_topic + WS snapshot skip — 발행/snapshot 자체 중단 계약).
     if config.KRX_CLIENT_DISTRIBUTION_EFFECTIVE:
@@ -341,7 +341,7 @@ def is_snapshot_topic_enabled(topic: str) -> bool:
     같은 flag 검사를 두면 갈리는 순간 subscribe 판정과 실제 발사가 어긋난다.
 
     - fx:* → `FX_TOPIC_ENABLED`
-    - usdt:krw → builder 에 flag 검사가 없다(항상 enabled)
+    - usdt:krw / dxy:spot → 별도 availability flag가 없다(항상 enabled)
     - krx → 배포 flag 가 이미 `supported_snapshot_topics()` 에 반영돼 있어 여기서 중복 판정하지 않는다
     """
     from app.fx_topic_publisher import FX_TOPICS
@@ -910,6 +910,7 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
     # 토픽 이름 single source: publisher 상수 재사용(하드코딩 "fx:"/"usdt:krw" 회피). lazy import로
     # dispatcher import 그래프 경량 유지(첫 subscribe 시에만 builder 체인 로드).
     from app.fx_topic_publisher import FX_TOPICS  # {asset: "fx:{asset}"}
+    from app.dxy_topic_publisher import DXY_TOPIC
     from app.tether_topic_publisher import TETHER_TOPIC  # "usdt:krw"
 
     fx_asset_by_topic = {channel: asset for asset, channel in FX_TOPICS.items()}
@@ -968,6 +969,28 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
         payload["topic"] = topic
         return payload
 
+    if topic == DXY_TOPIC:
+        from app.database import SessionLocal
+        from app.dxy_topic_publisher import build_dxy_topic_payload, load_dxy_topic_entry
+
+        _worker_checkpoint()
+        db = SessionLocal()
+        try:
+            checkpoint = _active_worker_checkpoint()
+            kwargs = {"checkpoint": checkpoint} if checkpoint is not None else {}
+            entry = load_dxy_topic_entry(db, **kwargs)
+        except BaseException:
+            try:
+                db.rollback()
+            except Exception:
+                logger.warning("DXY snapshot session rollback 실패", exc_info=True)
+            raise
+        finally:
+            db.close()
+        if entry is None:
+            return None
+        return build_dxy_topic_payload(entry)
+
     from app.krx_topic_publisher import KRX_TOPIC, build_krx_topic_payload, load_krx_topic_entry
     if topic == KRX_TOPIC:
         # ADR-038 — G2/G3 off면 미지원 취급 (supported 목록과 일관)
@@ -992,7 +1015,7 @@ def _build_snapshot_sync(topic: str) -> Optional[Dict[str, Any]]:
             return None   # 데이터 없음 — snapshot skip (구독 register는 유지)
         return build_krx_topic_payload(entry)
 
-    return None  # 미지원 topic(dxy/news/graph 등) — snapshot skip, register는 호출자가 유지
+    return None  # 미지원 topic(news/graph 등) — snapshot skip, register는 호출자가 유지
 
 
 async def send_initial_snapshots(

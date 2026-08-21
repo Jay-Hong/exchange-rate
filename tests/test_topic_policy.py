@@ -15,6 +15,7 @@ from app.config import TopicAuthStage
 FX = ("fx:usd-krw", "fx:jpy-krw", "fx:eur-krw")
 USDT = "usdt:krw"
 KRX = "krx:usd-krw-futures"
+DXY = "dxy:spot"
 
 
 def _policy_literal_source_errors(source: str):
@@ -247,13 +248,9 @@ class TestInvariants(unittest.TestCase):
     def test_entitlement_set_derives_from_the_table(self):
         self.assertEqual(tp.entitlement_gated_topics(), frozenset({KRX}))
 
-    def test_dxy_row_is_absent_until_its_publisher_lands(self):
-        """⚠️ ADR-040 — 소비자(publisher) 없이 정책행을 먼저 넣지 않는다.
-        DXY 수직 슬라이스가 implemented/runtime-supported 집합을 확장하면 coverage 검사가 정책행도
-        강제한다. 새 publisher 파일의 존재를 자동 탐색하는 검사는 아니다.
-        """
-        self.assertNotIn("dxy:spot", tp.TOPIC_POLICY)
-        self.assertNotIn("dxy:spot", tp.implemented_topic_universe())
+    def test_dxy_vertical_slice_is_policy_covered(self):
+        self.assertIs(tp.TOPIC_POLICY[DXY], tp.AuthorizationClass.PREMIUM_ONLY)
+        self.assertIn(DXY, tp.implemented_topic_universe())
 
 
 class TestStartupWiring(unittest.TestCase):
@@ -311,14 +308,14 @@ class TestStartupWiring(unittest.TestCase):
 
 
 class TestPlanAnonymous(unittest.TestCase):
-    def _plan(self, stage, topics=(FX[0], USDT)):
+    def _plan(self, stage, topics=(FX[0], USDT, DXY)):
         return tp.plan_anonymous(list(topics), stage=stage, fx_topics=frozenset(FX))
 
     def test_compatibility_passes_everything(self):
-        self.assertEqual(self._plan(TopicAuthStage.COMPATIBILITY), [FX[0], USDT])
+        self.assertEqual(self._plan(TopicAuthStage.COMPATIBILITY), [FX[0], USDT, DXY])
 
     def test_reject_anonymous_fx_removes_only_fx(self):
-        self.assertEqual(self._plan(TopicAuthStage.REJECT_ANONYMOUS_FX), [USDT])
+        self.assertEqual(self._plan(TopicAuthStage.REJECT_ANONYMOUS_FX), [USDT, DXY])
 
     def test_enforce_denies_everything(self):
         self.assertEqual(self._plan(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM), [])
@@ -351,12 +348,12 @@ class TestPlanAnonymous(unittest.TestCase):
 
 
 class TestPlanAuthenticated(unittest.TestCase):
-    def _plan(self, stage, topics=(FX[0], USDT, KRX)):
+    def _plan(self, stage, topics=(FX[0], USDT, DXY, KRX)):
         return tp.plan_authenticated(list(topics), stage=stage, uid="u1")
 
     def test_compatibility_keeps_non_gated_as_identity_only(self):
         p = self._plan(TopicAuthStage.COMPATIBILITY)
-        self.assertEqual(p.identity_only, (FX[0], USDT))
+        self.assertEqual(p.identity_only, (FX[0], USDT, DXY))
         self.assertEqual(p.premium_only, ())
         self.assertEqual(p.premium_and_entitlement, (KRX,))
 
@@ -364,12 +361,14 @@ class TestPlanAuthenticated(unittest.TestCase):
         """⛔ 두 축은 독립이다 — 익명 FX 는 거부되지만 식별 FX 는 여전히 identity-only.
         한쪽에서 다른 쪽을 파생할 수 없다는 근거."""
         self.assertEqual(
-            self._plan(TopicAuthStage.REJECT_ANONYMOUS_FX).identity_only, (FX[0], USDT))
+            self._plan(TopicAuthStage.REJECT_ANONYMOUS_FX).identity_only,
+            (FX[0], USDT, DXY),
+        )
 
     def test_enforce_moves_non_gated_to_premium_only(self):
         p = self._plan(TopicAuthStage.ENFORCE_AUTHENTICATED_PREMIUM)
         self.assertEqual(p.identity_only, ())
-        self.assertEqual(p.premium_only, (FX[0], USDT))
+        self.assertEqual(p.premium_only, (FX[0], USDT, DXY))
         self.assertEqual(p.premium_and_entitlement, (KRX,))
 
     def test_krx_is_full_gated_in_every_stage(self):
@@ -380,7 +379,7 @@ class TestPlanAuthenticated(unittest.TestCase):
 
     def test_unmapped_topic_raises(self):
         with self.assertRaises(ValueError):
-            tp.plan_authenticated(["dxy:spot"],
+            tp.plan_authenticated(["news:latest"],
                                   stage=TopicAuthStage.COMPATIBILITY, uid="u1")
 
     def test_unknown_stage_raises(self):
@@ -397,7 +396,7 @@ class TestPlanAuthenticated(unittest.TestCase):
             p = self._plan(stage)
             groups = (p.identity_only, p.premium_only, p.premium_and_entitlement)
             union = set().union(*(set(g) for g in groups))
-            self.assertEqual(union, {FX[0], USDT, KRX})
+            self.assertEqual(union, {FX[0], USDT, DXY, KRX})
             self.assertEqual(sum(len(g) for g in groups), len(union))
 
     def test_duplicate_topic_occurrences_stay_in_their_partition(self):
