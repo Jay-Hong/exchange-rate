@@ -150,7 +150,7 @@
   **전용 zone `ws_handshake_limit`(10r/s) 기반 `limit_req burst=20 nodelay` + `limit_req_status 429`
   가 있다**(89~90행). ⚠️ **`limit_conn` 은 여전히 없다** — R-DEC-4 (3) 이 캐리어 NAT 위험 때문에
   계측 후로 유보한 것이고, 부재가 곧 미이행은 아니다. `location /api/` 는 별개 zone `api_limit`
-  (3r/s) + `limit_conn 10` 이다(116~117행). zone 정의는 파일 상단 19·25·26행.
+  (3r/s, burst 20, 429) + `limit_conn 10` 이다(116~118행). zone 정의는 파일 상단 19·25·26행.
   (구 baseline 은 "둘 다 없음"이었다 — C1 `463c880` 으로 `limit_req` 축만 해소됐다.)
 
 ## F. 클라이언트 현재 동작

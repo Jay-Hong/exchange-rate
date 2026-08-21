@@ -3,11 +3,11 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `463c880616b7649e81f8082281eacf8c08c2c113`
+- server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
 - iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `a9e6eb9c43233218871977a0af2cdea1dc243ddcf401f6c379947ee8b181276d`
-- baseline SHA: `c838e871bb02abd4657d1fc99fd364f5bfbd3edfba083a5cf4d615a4cf60cc8f`
+- manifest SHA: `5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f`
+- baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > **이 문서의 몫**: 클라이언트가 **구조적으로 판별할 수 없는** publisher 침묵을 무엇으로 덮는가 —

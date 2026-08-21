@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "a9e6eb9c43233218871977a0af2cdea1dc243ddcf401f6c379947ee8b181276d",
-    "baseline_sha256": "c838e871bb02abd4657d1fc99fd364f5bfbd3edfba083a5cf4d615a4cf60cc8f",
-    "lock_sha256": "4385955937847e544692c3436e87eb12aea21c77ae169e54c07cb324631bb808",
-    "server_commit": "463c880616b7649e81f8082281eacf8c08c2c113",
+    "manifest_sha256": "5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f",
+    "baseline_sha256": "6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2",
+    "lock_sha256": "9c306b6ac57daeb7ef48b0d57f2f16ffca5530621b878ac6d2ea6382494c0daa",
+    "server_commit": "5429d0f78e44aa467d9acc4487585be5fd31cad9",
     "ios_commit": "1de20ea70a74fe3f6653725591a30596343597ac"
   },
   "documents": {
-    "ADR": "63eedefd9138fa2cfab1b8c16db49deb93bf2c02cc96df8235ab528485b08d80",
-    "CLIENT": "152bf3a4f5279d7e8d074fa0280803aebd09af69d936a22c54b4d51a64a532d4",
-    "CUT": "3511f2a4aa239e9f4b9139f11deb2fbcb32ad5a6fce397abbcef662b24e41d52",
-    "HAND": "13b5f4f7ab1e5b3ddf64955465ed93049beef7064f274c685a47003bb45e304c",
-    "HEALTH": "63680b5ab7a3e223ac6c5a720c2f1d1baeca24b9c4d0b4a82be3ad337ff4bbf7",
-    "LOAD": "16bbb054be23b17991d41dc951fc7b9e7eed512dfc6831aeb7d8e502d8cba0bc"
+    "ADR": "37c489a4a39a7d4fbbc97a9b83fdb2c7d51486630ec4341dda128c0404a72dba",
+    "CLIENT": "d9213668b4a20e5b1e0ba7b884f440a2229a376cf0d3259882e22328bef4ba90",
+    "CUT": "31c353c97978a87ed0ad1b5dc7b2008cd6db71f29a858d59ea7de47b584d192f",
+    "HAND": "40dd785f20352d7c0e174a48d01a11935228e423372b1c427d29f8dd4c19f0e0",
+    "HEALTH": "ec47cd1d000b917ae63cdea06f10dbc9cd400ab5ce0d050d7992cd27cb660b58",
+    "LOAD": "34762fcd2ee867ff1ad11443863fcf17228a9eac78d62704905ef66afb78a6d3"
   },
   "entries": [
     {
@@ -872,12 +872,12 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-2",
-      "unit_sha256": "dff84e2567b9eb3e0c432ae9a914e027845bdcbb0b975f4c2d0f12b2389c1f53",
-      "unit_text": "✅ **`limit_req` 축은 이행됐다**(C1 `463c880`). `location = /ws` 가 **전용 zone** `ws_handshake_limit`(10r/s, `nginx/conf.d/default.conf:25`)로 `limit_req burst=20 nodelay` + `limit_req_status 429` 를 건다(`nginx/conf.d/default.conf:89-90`). `/api/` 의 `api_limit`(3r/s) 을 공유하지 않는다(`nginx/conf.d/default.conf:19` · `nginx/conf.d/default.conf:116-117`). ⚠️ **`limit_conn` 은 여전히 `/ws` 에 없다** — 아래 NAT 사유로 계측 후 결정이 유지된다.",
+      "unit_sha256": "741aef2e817c1ec6d8da36d42e594c426e43db11c19e876f237350cdf1ad9e3e",
+      "unit_text": "✅ **`limit_req` 축은 이행됐다**(C1 `463c880`). `location = /ws` 가 **전용 zone** `ws_handshake_limit`(10r/s, `nginx/conf.d/default.conf:25`)로 `limit_req burst=20 nodelay` + `limit_req_status 429` 를 건다(`nginx/conf.d/default.conf:89-90`). `/api/` 의 `api_limit`(3r/s) 을 공유하지 않는다(`nginx/conf.d/default.conf:19` · `nginx/conf.d/default.conf:116-118`). ⚠️ **`limit_conn` 은 여전히 `/ws` 에 없다** — 아래 NAT 사유로 계측 후 결정이 유지된다.",
       "classification": "code_fact",
       "detail": "`/ws` 가 전용 zone `ws_handshake_limit`(10r/s) 로 `limit_req burst=20 nodelay` + 429 를 걸고 `/api/` 의 `api_limit` 을 공유하지 않으며, `limit_conn` 은 여전히 없다는 현재 nginx 설정 단정이다.",
       "provenance": [
-        "file:nginx/conf.d/default.conf:116-117",
+        "file:nginx/conf.d/default.conf:116-118",
         "file:nginx/conf.d/default.conf:19",
         "file:nginx/conf.d/default.conf:25",
         "file:nginx/conf.d/default.conf:89-90"
@@ -886,11 +886,12 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-2",
-      "unit_sha256": "6661a9a681b72b1d6d0e3edecef768ab9bcdb4219b2a0266c2037e5817895f59",
-      "unit_text": "근거(baseline): **E4 [코드]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **86~110행** 블록이고 그 안에 전용 zone 기반 `limit_req` 가 **있고**(89~90행) `limit_conn` 은 **없다**. `location /api/` 는 별개 zone 으로 둘 다 있다(116~117행). zone 정의는 파일 상단 19·25·26행.",
+      "unit_sha256": "f0c2911be9e4d200220f04c99af2ea57264d974381504639a28343fdbc65359c",
+      "unit_text": "근거(baseline): **E4 [코드]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **86~110행** 블록이고 그 안에 전용 zone 기반 `limit_req` 가 **있고**(89~90행) `limit_conn` 은 **없다**. `location /api/` 는 별개 zone 으로 둘 다 있다(116~118행, C1 `5429d0f` 로 burst 20 + 429). zone 정의는 파일 상단 19·25·26행.",
       "classification": "code_fact",
       "detail": "`location = /ws` 블록(86~110행)에 전용 zone 기반 `limit_req` 가 있고 `limit_conn` 은 없으며, `/api/` 는 별개 zone 으로 둘 다 있다는 baseline E4 재도출 단정이다.",
       "provenance": [
+        "baseline:C1",
         "baseline:E4"
       ]
     },

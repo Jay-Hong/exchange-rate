@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `463c880616b7649e81f8082281eacf8c08c2c113`
+- server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
 - iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `a9e6eb9c43233218871977a0af2cdea1dc243ddcf401f6c379947ee8b181276d`
-- baseline SHA: `c838e871bb02abd4657d1fc99fd364f5bfbd3edfba083a5cf4d615a4cf60cc8f`
+- manifest SHA: `5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f`
+- baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -169,7 +169,7 @@ ADR-041 의 파생 숫자 숨김 정책 제안은 **조건부**로만 수용된�
 ✅ **`limit_req` 축은 이행됐다**(C1 `463c880`). `location = /ws` 가 **전용 zone**
 `ws_handshake_limit`(10r/s, `nginx/conf.d/default.conf:25`)로 `limit_req burst=20 nodelay` +
 `limit_req_status 429` 를 건다(`nginx/conf.d/default.conf:89-90`). `/api/` 의 `api_limit`(3r/s)
-을 공유하지 않는다(`nginx/conf.d/default.conf:19` · `nginx/conf.d/default.conf:116-117`).
+을 공유하지 않는다(`nginx/conf.d/default.conf:19` · `nginx/conf.d/default.conf:116-118`).
 ⚠️ **`limit_conn` 은 여전히 `/ws` 에 없다** — 아래 NAT 사유로 계측 후 결정이 유지된다.
 
 → handshake 폭주는 `limit_req` 로 막는다. 다만 **IP별 `limit_conn` 은 모바일 캐리어 NAT 위험이 크다**
@@ -177,7 +177,7 @@ ADR-041 의 파생 숫자 숨김 정책 제안은 **조건부**로만 수용된�
 
 근거(baseline): **E4 [코드]** `nginx/conf.d/default.conf` 의 `location = /ws` 는 **86~110행** 블록이고
 그 안에 전용 zone 기반 `limit_req` 가 **있고**(89~90행) `limit_conn` 은 **없다**. `location /api/` 는
-별개 zone 으로 둘 다 있다(116~117행). zone 정의는 파일 상단 19·25·26행.
+별개 zone 으로 둘 다 있다(116~118행, C1 `5429d0f` 로 burst 20 + 429). zone 정의는 파일 상단 19·25·26행.
 
 ⚠️ 10r/s 는 **사용자 트래픽 실측이 아니다** — v2 구독자 실트래픽이 없다. W=4 identity canary
 처리량(~13/s) 아래의 capacity guard 이고, handshake 자체는 인증을 돌리지 않으므로 —

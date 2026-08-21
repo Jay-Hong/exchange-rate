@@ -732,8 +732,9 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
   "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. ✅ **`limit_req` 축은 C1 `463c880` 으로 닫혔다** — `/ws` 가 전용 zone
   `ws_handshake_limit`(10r/s, `default.conf:25`)로 `burst=20 nodelay` + `429` 를 건다
-  (`:89-90`). `/api/` 는 별개 zone 3r/s + conn 10 그대로다(`:116-117`, zone key 는
-  `$binary_remote_addr`). ⚠️ **`limit_conn` 은 유보 유지**(R-DEC-4 (3), 캐리어 NAT 오탐 위험) —
+  (`:89-90`). `/api/` 는 별개 zone 으로 지속 3r/s + conn 10 을 유지하되, C1 `5429d0f` 로 burst 6→20 +
+  429 로 바뀌었다(`:116-118`, zone key 는 `$binary_remote_addr`) — v2.0.0 cold-start 실측
+  12 req/s 가 구 burst 6 에서 topic bootstrap 4건을 잘랐기 때문이다. ⚠️ **`limit_conn` 은 유보 유지**(R-DEC-4 (3), 캐리어 NAT 오탐 위험) —
   이 항목은 **부분 해소**이지 완결이 아니다. **배포는 호스트 config 변경이라 별도 승인이 필요하다.**
   ⛔ **"토큰 flood 방어"로 일반화하지 말 것**(2026-08-03 정정). 실제 보호 범위는 좁다:
     · `limit_req` 는 **upgrade handshake** 만 제한한다 — WebSocket 연결은 HTTP 요청 **하나**다.
