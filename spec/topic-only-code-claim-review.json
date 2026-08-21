@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f",
+    "manifest_sha256": "43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851",
     "baseline_sha256": "6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2",
-    "lock_sha256": "9c306b6ac57daeb7ef48b0d57f2f16ffca5530621b878ac6d2ea6382494c0daa",
+    "lock_sha256": "db5baa6ee9bb5e5242d90bf6e937168dba3b3aa486fece136b02ea3343d7f7ef",
     "server_commit": "5429d0f78e44aa467d9acc4487585be5fd31cad9",
-    "ios_commit": "1de20ea70a74fe3f6653725591a30596343597ac"
+    "ios_commit": "9ddc6b00a9580647031e0a06ae18d2a16002c2eb"
   },
   "documents": {
-    "ADR": "37c489a4a39a7d4fbbc97a9b83fdb2c7d51486630ec4341dda128c0404a72dba",
-    "CLIENT": "d9213668b4a20e5b1e0ba7b884f440a2229a376cf0d3259882e22328bef4ba90",
-    "CUT": "31c353c97978a87ed0ad1b5dc7b2008cd6db71f29a858d59ea7de47b584d192f",
-    "HAND": "40dd785f20352d7c0e174a48d01a11935228e423372b1c427d29f8dd4c19f0e0",
-    "HEALTH": "ec47cd1d000b917ae63cdea06f10dbc9cd400ab5ce0d050d7992cd27cb660b58",
-    "LOAD": "34762fcd2ee867ff1ad11443863fcf17228a9eac78d62704905ef66afb78a6d3"
+    "ADR": "d5cb707512173820697dd7841258aa3c4195523ba7d493c54905195d89d38086",
+    "CLIENT": "01f9e7da28ec75967effc8fc4726d9f127b1e7e466b629ffc19fc3b64919c9e7",
+    "CUT": "222243fb15b5da2c17bcf69ee286a5e4cf6e796a93c38049aae3652b67695fab",
+    "HAND": "8278a663532b6549521375768ec85f3793f33de5ff4263277be2ba04bee0fa6c",
+    "HEALTH": "4e086f7c469f8a5caedcfd7b90c426d08a49be209ff3f9babf4a8a84596c3617",
+    "LOAD": "16761cdce347c9c57e83410c9323daa9762e0c5e335d61436eee0f3c7d02d7db"
   },
   "entries": [
     {
@@ -509,13 +509,14 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "5c6983bffb0db05ec886b3b0a4e6a4d37894b2ab325c9864e70f7f625e34d50a",
-      "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | 🔶 **절반만** — purge 는 잠겼다(`ios/FXiTests/TetherDataPathTests.swift:648` 이 fail-close 를, `ios/FXiTests/TetherDataPathTests.swift:619` 이 메모리+디스크+파생 상태 동시 제거를 확인). ⚠️ **재활성화 시 복구는 아직 테스트가 없다** — desired 보존은 구현돼 있으나 재활성화 후 실제 복구를 단언하는 테스트는 0건이다 |",
+      "unit_sha256": "cc4b8239735f32dfe94aa3a0004641da59840308812950a9fd9f3126aedfc010",
+      "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:648`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:619`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |",
       "classification": "code_fact",
       "detail": "topics_disabled purge 는 두 테스트로 잠겼고 재활성화 복구는 테스트가 0건이라는, cutover 테스트 매트릭스의 현재 커버리지 단정이다.",
       "provenance": [
         "file:ios/FXiTests/TetherDataPathTests.swift:619",
-        "file:ios/FXiTests/TetherDataPathTests.swift:648"
+        "file:ios/FXiTests/TetherDataPathTests.swift:648",
+        "file:ios/FXiTests/TopicMessageTests.swift:3748"
       ]
     },
     {

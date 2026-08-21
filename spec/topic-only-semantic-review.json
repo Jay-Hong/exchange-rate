@@ -66,7 +66,9 @@
           "위 C1 검토 + C2 재-baseline: 값 선택 근거를 정밀화했다 — handshake 자체는 인증을 돌리지 않으므로(인증은 `authorize_subscribe`) 10r/s 는 auth 부하를 직접 묶는 게 아니라 '연결 1개당 subscribe 최소 1회' **대리 지표**다. 클라 경로도 교차 확인했다: iOS 는 handshake HTTP status 를 읽지 않아 429 가 일반 연결 실패로 떨어지고 bounded backoff(5회) 뒤 가시적 `.failed` + 수동/foreground 복구가 된다 — 조용한 죽은 연결이 아니다. 그리고 **C1 이 세 곳의 산문을 거짓으로 만든 것**을 찾아 정정했다 — baseline E4('둘 다 없음', lock 에 해시로 묶여 연쇄를 일으킨다) · R-LOAD-2 본문('`location = /ws` 에는 둘 다 없다') · FREE_TIER 열린 항목('실측: limit_req·limit_conn 이 없다'). baseline→lock→manifest→문서 헤더→두 ledger 로 해시를 다시 밀고 claim ledger 75/64 · locator 199 로 전진했다.",
           "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=Claude Code:reviewer=OpenAI Codex",
           "위 C1 검토 + C2 재-baseline: 귀속 오류를 인정한다 — 나는 경로만 보고 '무료 스냅샷 클라'로 단정했고, 같은 로그 줄에 있던 `cp=`/`cv=` 를 읽지 않았다. 12건·8통과·4거절과 클라 식별자를 직접 재확인했다. 429 전환은 클라 축에서 안전함을 교차 확인했다 — iOS 는 429 와 5xx 를 동일 retryable 로 분류한다(`GraphV2ViewModel.swift:527` · `ExchangeRateViewModel.swift:854` · `AlertRetryPolicy.swift:112` · `EntitlementsManager.swift:487`). C1 이 뒤집은 좌표 4곳(baseline E4 · R-LOAD-2 ×2 · FREE_TIER)을 정정하고 baseline→lock→manifest→헤더→두 ledger 로 해시를 다시 밀었다. 그리고 **앞선 C2 에서 하겠다고 하고 하지 않은 원장 정정**을 이행했다 — R-GATE-3 계열 10 RID 를 commit·test 근거와 함께 `done` 으로 올렸다(각 commit-path 쌍을 실 diff 로 검증). `verified` 로 올리지 않는다 — 구현자가 자기 작업을 닫지 않고, R-CLI-16 은 세대당 1회 reconnect 변이 커버리지가 없다.",
-          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=Claude Code:reviewer=OpenAI Codex",
+          "위 검토 수용 + C2 재-baseline: 두 정정을 코드로 재확인했다(`enforceLeaseExpiry` 의 세대당 1회 강제 reconnect / `fetchTetherSnapshot` 1 + `fetchFxSnapshot`×3 + KRX 조건부 1). 원장에 R-CLI-3·R-CLI-7·R-CLI-9·R-CLI-10 과 R-CUT-9·R-CUT-18 을 근거와 함께 `done` 으로 추가했다 — ⚠️ R-CLI-10 과 R-CLI-16 은 중복이 아니다. 10 은 '(A) 채택'이라는 **결정**이고 16 은 잠글 **계약**이라 둘 다 필요하다. B8 행을 '절반만'에서 '양쪽 잠김'으로 갱신했다. ⚠️ 이번 pin cascade 에서 내가 perl 일괄 치환에 ledger 를 포함시켜 **evidence 의 역사 SHA 3건을 pin 으로 덮었다** — 앞선 C2 에서 'ledger 는 제외, 거기 SHA 는 pin 이 아니라 역사 기록'이라고 스스로 구분해 놓고 반복했다. E_EVRELATION 게이트가 잡았다(path 대조가 없었으면 통과했을 것이다).",
+          "semantic-input-binding/v1:0011:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -117,7 +119,9 @@
           "/ws handshake limit_req C1 구현(`463c880` 에 포함): `location = /ws` 에 상한이 하나도 없던 것을 전용 zone `ws_handshake_limit`(10r/s) + `burst=20 nodelay` + `limit_req_status 429` 로 닫았다. `/api/` 의 `api_limit`(3r/s)을 공유하지 않고, IP별 `limit_conn` 은 캐리어 NAT 오탐 위험 때문에 R-DEC-4 (3) 대로 유보했다. 회귀 테스트는 추가뿐 아니라 **유보 결정도** 부정 단언으로 잠근다(블록 안 `limit_conn` 부재 · `api_limit` 미사용). 격리 네트워크 행동 프로브로 80 동시 handshake → 23 통과 / 57 거절과 `lrs=PASSED/REJECTED` 일치를 확인했다.",
           "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=OpenAI Codex:reviewer=Claude Code",
           "/api rate-limit 사후 감사 + 수정 C1(`5429d0f`): `/ws` 배포 뒤 운영 로그를 재귀속해 2026-08-20 07:44:17 의 `/api/` 거절이 무료 사용자가 아니라 **`cp=ios cv=2.0.0`** 의 cold-start 였음을 밝혔다 — 한 IP·한 초에 12건이 왔고 8건 통과 뒤 `/api/v2/topics/snapshot` 4건이 전부 잘렸다(구 `burst=6`). 지속 속도 `3r/s` 와 `limit_conn 10` 은 그대로 두고 burst 만 20 으로 넓히고 rate-limit 을 429 로 표면화했다. 아울러 **운영 앱 이미지가 `4b58110` 을 아직 담고 있지 않다**는 것을 OpenAPI 로 확인했다(`fresh_premium` 질의·`premium_active` 필드 부재) — flag ON 전 서버 코드 배포가 선행이다.",
-          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=OpenAI Codex:reviewer=Claude Code",
+          "R-GATE-3 사후 감사 + B8 회귀 결속(iOS `9ddc6b0`): 내가 잔여 위험으로 적은 두 항목이 과장임을 지적했다 — 재인증 실패의 조용한 중단은 hard-expiry 강제 재연결로 이미 닫혔고, snapshot 부하는 'topic당 4회'가 아니라 cold-start 총 4회(KRX 자격 시 5회)다. 그리고 내가 '테스트 0건'으로 기록만 하고 닫지 않은 B8(safety-stop 뒤 재활성화 복구)을 실 transport 회귀로 잠갔다 — 서버 OFF 중 desired 보존 + 자동 재구독 반복 없음, 다음 연결 세대 재전송 → ACK + snapshot → healthy 수렴. 구현 분기를 제거한 변이에서 RED 를 확인했다. 아울러 iOS 런북이 이미 배포된 `/ws` limit_req 를 '미결'로 적고 있던 것을 현재 상태로 정정했다.",
+          "semantic-input-binding/v1:0011:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -175,7 +179,9 @@
           "/ws handshake limit_req C1 구현(`463c880` 에 포함): `location = /ws` 에 상한이 하나도 없던 것을 전용 zone `ws_handshake_limit`(10r/s) + `burst=20 nodelay` + `limit_req_status 429` 로 닫았다. `/api/` 의 `api_limit`(3r/s)을 공유하지 않고, IP별 `limit_conn` 은 캐리어 NAT 오탐 위험 때문에 R-DEC-4 (3) 대로 유보했다. 회귀 테스트는 추가뿐 아니라 **유보 결정도** 부정 단언으로 잠근다(블록 안 `limit_conn` 부재 · `api_limit` 미사용). 격리 네트워크 행동 프로브로 80 동시 handshake → 23 통과 / 57 거절과 `lrs=PASSED/REJECTED` 일치를 확인했다.",
           "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=OpenAI Codex:reviewer=Claude Code",
           "/api rate-limit 사후 감사 + 수정 C1(`5429d0f`): `/ws` 배포 뒤 운영 로그를 재귀속해 2026-08-20 07:44:17 의 `/api/` 거절이 무료 사용자가 아니라 **`cp=ios cv=2.0.0`** 의 cold-start 였음을 밝혔다 — 한 IP·한 초에 12건이 왔고 8건 통과 뒤 `/api/v2/topics/snapshot` 4건이 전부 잘렸다(구 `burst=6`). 지속 속도 `3r/s` 와 `limit_conn 10` 은 그대로 두고 burst 만 20 으로 넓히고 rate-limit 을 429 로 표면화했다. 아울러 **운영 앱 이미지가 `4b58110` 을 아직 담고 있지 않다**는 것을 OpenAPI 로 확인했다(`fresh_premium` 질의·`premium_active` 필드 부재) — flag ON 전 서버 코드 배포가 선행이다.",
-          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=OpenAI Codex:reviewer=Claude Code",
+          "R-GATE-3 사후 감사 + B8 회귀 결속(iOS `9ddc6b0`): 내가 잔여 위험으로 적은 두 항목이 과장임을 지적했다 — 재인증 실패의 조용한 중단은 hard-expiry 강제 재연결로 이미 닫혔고, snapshot 부하는 'topic당 4회'가 아니라 cold-start 총 4회(KRX 자격 시 5회)다. 그리고 내가 '테스트 0건'으로 기록만 하고 닫지 않은 B8(safety-stop 뒤 재활성화 복구)을 실 transport 회귀로 잠갔다 — 서버 OFF 중 desired 보존 + 자동 재구독 반복 없음, 다음 연결 세대 재전송 → ACK + snapshot → healthy 수렴. 구현 분기를 제거한 변이에서 RED 를 확인했다. 아울러 iOS 런북이 이미 배포된 `/ws` limit_req 를 '미결'로 적고 있던 것을 현재 상태로 정정했다.",
+          "semantic-input-binding/v1:0011:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -233,7 +239,9 @@
           "위 C1 검토 + C2 재-baseline: 값 선택 근거를 정밀화했다 — handshake 자체는 인증을 돌리지 않으므로(인증은 `authorize_subscribe`) 10r/s 는 auth 부하를 직접 묶는 게 아니라 '연결 1개당 subscribe 최소 1회' **대리 지표**다. 클라 경로도 교차 확인했다: iOS 는 handshake HTTP status 를 읽지 않아 429 가 일반 연결 실패로 떨어지고 bounded backoff(5회) 뒤 가시적 `.failed` + 수동/foreground 복구가 된다 — 조용한 죽은 연결이 아니다. 그리고 **C1 이 세 곳의 산문을 거짓으로 만든 것**을 찾아 정정했다 — baseline E4('둘 다 없음', lock 에 해시로 묶여 연쇄를 일으킨다) · R-LOAD-2 본문('`location = /ws` 에는 둘 다 없다') · FREE_TIER 열린 항목('실측: limit_req·limit_conn 이 없다'). baseline→lock→manifest→문서 헤더→두 ledger 로 해시를 다시 밀고 claim ledger 75/64 · locator 199 로 전진했다.",
           "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=Claude Code:reviewer=OpenAI Codex",
           "위 C1 검토 + C2 재-baseline: 귀속 오류를 인정한다 — 나는 경로만 보고 '무료 스냅샷 클라'로 단정했고, 같은 로그 줄에 있던 `cp=`/`cv=` 를 읽지 않았다. 12건·8통과·4거절과 클라 식별자를 직접 재확인했다. 429 전환은 클라 축에서 안전함을 교차 확인했다 — iOS 는 429 와 5xx 를 동일 retryable 로 분류한다(`GraphV2ViewModel.swift:527` · `ExchangeRateViewModel.swift:854` · `AlertRetryPolicy.swift:112` · `EntitlementsManager.swift:487`). C1 이 뒤집은 좌표 4곳(baseline E4 · R-LOAD-2 ×2 · FREE_TIER)을 정정하고 baseline→lock→manifest→헤더→두 ledger 로 해시를 다시 밀었다. 그리고 **앞선 C2 에서 하겠다고 하고 하지 않은 원장 정정**을 이행했다 — R-GATE-3 계열 10 RID 를 commit·test 근거와 함께 `done` 으로 올렸다(각 commit-path 쌍을 실 diff 로 검증). `verified` 로 올리지 않는다 — 구현자가 자기 작업을 닫지 않고, R-CLI-16 은 세대당 1회 reconnect 변이 커버리지가 없다.",
-          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=Claude Code:reviewer=OpenAI Codex",
+          "위 검토 수용 + C2 재-baseline: 두 정정을 코드로 재확인했다(`enforceLeaseExpiry` 의 세대당 1회 강제 reconnect / `fetchTetherSnapshot` 1 + `fetchFxSnapshot`×3 + KRX 조건부 1). 원장에 R-CLI-3·R-CLI-7·R-CLI-9·R-CLI-10 과 R-CUT-9·R-CUT-18 을 근거와 함께 `done` 으로 추가했다 — ⚠️ R-CLI-10 과 R-CLI-16 은 중복이 아니다. 10 은 '(A) 채택'이라는 **결정**이고 16 은 잠글 **계약**이라 둘 다 필요하다. B8 행을 '절반만'에서 '양쪽 잠김'으로 갱신했다. ⚠️ 이번 pin cascade 에서 내가 perl 일괄 치환에 ledger 를 포함시켜 **evidence 의 역사 SHA 3건을 pin 으로 덮었다** — 앞선 C2 에서 'ledger 는 제외, 거기 SHA 는 pin 이 아니라 역사 기록'이라고 스스로 구분해 놓고 반복했다. E_EVRELATION 게이트가 잡았다(path 대조가 없었으면 통과했을 것이다).",
+          "semantic-input-binding/v1:0011:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -297,7 +305,9 @@
           "위 C1 검토 + C2 재-baseline: 값 선택 근거를 정밀화했다 — handshake 자체는 인증을 돌리지 않으므로(인증은 `authorize_subscribe`) 10r/s 는 auth 부하를 직접 묶는 게 아니라 '연결 1개당 subscribe 최소 1회' **대리 지표**다. 클라 경로도 교차 확인했다: iOS 는 handshake HTTP status 를 읽지 않아 429 가 일반 연결 실패로 떨어지고 bounded backoff(5회) 뒤 가시적 `.failed` + 수동/foreground 복구가 된다 — 조용한 죽은 연결이 아니다. 그리고 **C1 이 세 곳의 산문을 거짓으로 만든 것**을 찾아 정정했다 — baseline E4('둘 다 없음', lock 에 해시로 묶여 연쇄를 일으킨다) · R-LOAD-2 본문('`location = /ws` 에는 둘 다 없다') · FREE_TIER 열린 항목('실측: limit_req·limit_conn 이 없다'). baseline→lock→manifest→문서 헤더→두 ledger 로 해시를 다시 밀고 claim ledger 75/64 · locator 199 로 전진했다.",
           "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=Claude Code:reviewer=OpenAI Codex",
           "위 C1 검토 + C2 재-baseline: 귀속 오류를 인정한다 — 나는 경로만 보고 '무료 스냅샷 클라'로 단정했고, 같은 로그 줄에 있던 `cp=`/`cv=` 를 읽지 않았다. 12건·8통과·4거절과 클라 식별자를 직접 재확인했다. 429 전환은 클라 축에서 안전함을 교차 확인했다 — iOS 는 429 와 5xx 를 동일 retryable 로 분류한다(`GraphV2ViewModel.swift:527` · `ExchangeRateViewModel.swift:854` · `AlertRetryPolicy.swift:112` · `EntitlementsManager.swift:487`). C1 이 뒤집은 좌표 4곳(baseline E4 · R-LOAD-2 ×2 · FREE_TIER)을 정정하고 baseline→lock→manifest→헤더→두 ledger 로 해시를 다시 밀었다. 그리고 **앞선 C2 에서 하겠다고 하고 하지 않은 원장 정정**을 이행했다 — R-GATE-3 계열 10 RID 를 commit·test 근거와 함께 `done` 으로 올렸다(각 commit-path 쌍을 실 diff 로 검증). `verified` 로 올리지 않는다 — 구현자가 자기 작업을 닫지 않고, R-CLI-16 은 세대당 1회 reconnect 변이 커버리지가 없다.",
-          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=Claude Code:reviewer=OpenAI Codex",
+          "위 검토 수용 + C2 재-baseline: 두 정정을 코드로 재확인했다(`enforceLeaseExpiry` 의 세대당 1회 강제 reconnect / `fetchTetherSnapshot` 1 + `fetchFxSnapshot`×3 + KRX 조건부 1). 원장에 R-CLI-3·R-CLI-7·R-CLI-9·R-CLI-10 과 R-CUT-9·R-CUT-18 을 근거와 함께 `done` 으로 추가했다 — ⚠️ R-CLI-10 과 R-CLI-16 은 중복이 아니다. 10 은 '(A) 채택'이라는 **결정**이고 16 은 잠글 **계약**이라 둘 다 필요하다. B8 행을 '절반만'에서 '양쪽 잠김'으로 갱신했다. ⚠️ 이번 pin cascade 에서 내가 perl 일괄 치환에 ledger 를 포함시켜 **evidence 의 역사 SHA 3건을 pin 으로 덮었다** — 앞선 C2 에서 'ledger 는 제외, 거기 SHA 는 pin 이 아니라 역사 기록'이라고 스스로 구분해 놓고 반복했다. E_EVRELATION 게이트가 잡았다(path 대조가 없었으면 통과했을 것이다).",
+          "semantic-input-binding/v1:0011:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -353,7 +363,9 @@
           "/ws handshake limit_req C1 구현(`463c880` 에 포함): `location = /ws` 에 상한이 하나도 없던 것을 전용 zone `ws_handshake_limit`(10r/s) + `burst=20 nodelay` + `limit_req_status 429` 로 닫았다. `/api/` 의 `api_limit`(3r/s)을 공유하지 않고, IP별 `limit_conn` 은 캐리어 NAT 오탐 위험 때문에 R-DEC-4 (3) 대로 유보했다. 회귀 테스트는 추가뿐 아니라 **유보 결정도** 부정 단언으로 잠근다(블록 안 `limit_conn` 부재 · `api_limit` 미사용). 격리 네트워크 행동 프로브로 80 동시 handshake → 23 통과 / 57 거절과 `lrs=PASSED/REJECTED` 일치를 확인했다.",
           "semantic-input-binding/v1:0009:727754ac90555b34d90270887333b21bb3f687500dada525652c2cc2a152afea:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:author=OpenAI Codex:reviewer=Claude Code",
           "/api rate-limit 사후 감사 + 수정 C1(`5429d0f`): `/ws` 배포 뒤 운영 로그를 재귀속해 2026-08-20 07:44:17 의 `/api/` 거절이 무료 사용자가 아니라 **`cp=ios cv=2.0.0`** 의 cold-start 였음을 밝혔다 — 한 IP·한 초에 12건이 왔고 8건 통과 뒤 `/api/v2/topics/snapshot` 4건이 전부 잘렸다(구 `burst=6`). 지속 속도 `3r/s` 와 `limit_conn 10` 은 그대로 두고 burst 만 20 으로 넓히고 rate-limit 을 429 로 표면화했다. 아울러 **운영 앱 이미지가 `4b58110` 을 아직 담고 있지 않다**는 것을 OpenAPI 로 확인했다(`fresh_premium` 질의·`premium_active` 필드 부재) — flag ON 전 서버 코드 배포가 선행이다.",
-          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0010:774c556262647752c7114db07d5e8c8bb8c9b55077108927ccb93645725362c9:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:author=OpenAI Codex:reviewer=Claude Code",
+          "R-GATE-3 사후 감사 + B8 회귀 결속(iOS `9ddc6b0`): 내가 잔여 위험으로 적은 두 항목이 과장임을 지적했다 — 재인증 실패의 조용한 중단은 hard-expiry 강제 재연결로 이미 닫혔고, snapshot 부하는 'topic당 4회'가 아니라 cold-start 총 4회(KRX 자격 시 5회)다. 그리고 내가 '테스트 0건'으로 기록만 하고 닫지 않은 B8(safety-stop 뒤 재활성화 복구)을 실 transport 회귀로 잠갔다 — 서버 OFF 중 desired 보존 + 자동 재구독 반복 없음, 다음 연결 세대 재전송 → ACK + snapshot → healthy 수렴. 구현 분기를 제거한 변이에서 RED 를 확인했다. 아울러 iOS 런북이 이미 배포된 `/ws` limit_req 를 '미결'로 적고 있던 것을 현재 상태로 정정했다.",
+          "semantic-input-binding/v1:0011:7f699e324beeff15fee62cbb9c813700ac0af20a5c19b0fba2ac8210cb22baeb:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -367,21 +379,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f",
+    "manifest_sha256": "43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851",
     "baseline_sha256": "6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2",
-    "lock_sha256": "9c306b6ac57daeb7ef48b0d57f2f16ffca5530621b878ac6d2ea6382494c0daa",
+    "lock_sha256": "db5baa6ee9bb5e5242d90bf6e937168dba3b3aa486fece136b02ea3343d7f7ef",
     "server_commit": "5429d0f78e44aa467d9acc4487585be5fd31cad9",
-    "ios_commit": "1de20ea70a74fe3f6653725591a30596343597ac"
+    "ios_commit": "9ddc6b00a9580647031e0a06ae18d2a16002c2eb"
   },
   "documents": {
-    "ADR": "37c489a4a39a7d4fbbc97a9b83fdb2c7d51486630ec4341dda128c0404a72dba",
-    "CLIENT": "d9213668b4a20e5b1e0ba7b884f440a2229a376cf0d3259882e22328bef4ba90",
-    "CUT": "31c353c97978a87ed0ad1b5dc7b2008cd6db71f29a858d59ea7de47b584d192f",
-    "HAND": "40dd785f20352d7c0e174a48d01a11935228e423372b1c427d29f8dd4c19f0e0",
-    "HEALTH": "ec47cd1d000b917ae63cdea06f10dbc9cd400ab5ce0d050d7992cd27cb660b58",
-    "LOAD": "34762fcd2ee867ff1ad11443863fcf17228a9eac78d62704905ef66afb78a6d3"
+    "ADR": "d5cb707512173820697dd7841258aa3c4195523ba7d493c54905195d89d38086",
+    "CLIENT": "01f9e7da28ec75967effc8fc4726d9f127b1e7e466b629ffc19fc3b64919c9e7",
+    "CUT": "222243fb15b5da2c17bcf69ee286a5e4cf6e796a93c38049aae3652b67695fab",
+    "HAND": "8278a663532b6549521375768ec85f3793f33de5ff4263277be2ba04bee0fa6c",
+    "HEALTH": "4e086f7c469f8a5caedcfd7b90c426d08a49be209ff3f9babf4a8a84596c3617",
+    "LOAD": "16761cdce347c9c57e83410c9323daa9762e0c5e335d61436eee0f3c7d02d7db"
   },
-  "claim_ledger_sha256": "5bb6ca2f9da958806ad7690ff16c9f5aeb8b20250ea88de9d364d5f81470968d",
+  "claim_ledger_sha256": "43d50d3326dc8471e0207f4b645502e8bf43820ef4f540eb1cdb3e5eb638bf63",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 75,
@@ -933,7 +945,8 @@
     "Server C1 4849992 narrows the WebSocket proxy to exact `location = /ws`, so suffix and trailing-slash paths do not inherit Upgrade headers or 600-second timeouts. It adds no `limit_req` or `limit_conn`: R-DEC-4 and R-LOAD-2 still require a handshake `limit_req`, while the per-IP connection cap remains measurement-dependent. This epoch does not choose an uncalibrated rate or claim that the confirmed ingress requirement is complete.",
     "This C2 pass was authored by Claude Code and cross-reviewed by OpenAI Codex, which returned NO-GO. Three of its findings landed as iOS 1de20ea (degrade predicate parity, retry-scheduling fail-open, ordinary-refresh releasing the server premium latch) and two stale-prose findings were corrected here: R-HAND-6 still asserted the server does not close on publish send failure, and R-CLI-11 still asserted no banner renders in MODE 2 — both were the opposite of the pinned code. Claude Code's own adversarial subagent rounds (49 findings with 12 surviving; then 20 with 4 surviving) preceded that review and are not a substitute for it: they missed both stale-prose items, and the locator round had flagged R-HAND-6 without it reaching the repair list.",
     "The /ws handshake limit was implemented by OpenAI Codex and re-baselined by Claude Code. Codex's own C2 plan named pin, ledger and hash re-binding but did not enumerate the three prose assertions its C1 falsified — baseline E4, R-LOAD-2's body, and the FREE_TIER open item — which is the same failure mode Codex had caught in the preceding R-GATE-3 pass, now in the opposite direction. The rate itself (10r/s, burst 20) is a provisional capacity guard, not a measurement: there is no v2 subscriber traffic to derive it from, and handshake rate only proxies auth load because authorization happens on subscribe, not on the upgrade. Re-evaluate from phased lrs= observation. IP-level limit_conn stays deferred under R-DEC-4 (3).",
-    "The R-GATE-3 family is now recorded as done, not verified: the evidence is the implementer's own commits and tests, and R-CLI-16's once-per-generation forced reconnect still has no mutation coverage. Separately, this pass records a deployment gap that provenance alone does not expose — server commit 4b58110 (fresh_premium / premium_active / R-HAND-6 close-on-send-failure) is committed, pushed and pinned but the production app image predates it, so the runtime OpenAPI exposes neither the query parameter nor the response field. Only the nginx layer was deployed. Flag ON must not precede deploying that server code with topics off."
+    "The R-GATE-3 family is now recorded as done, not verified: the evidence is the implementer's own commits and tests, and R-CLI-16's once-per-generation forced reconnect still has no mutation coverage. Separately, this pass records a deployment gap that provenance alone does not expose — server commit 4b58110 (fresh_premium / premium_active / R-HAND-6 close-on-send-failure) is committed, pushed and pinned but the production app image predates it, so the runtime OpenAPI exposes neither the query parameter nor the response field. Only the nginx layer was deployed. Flag ON must not precede deploying that server code with topics off.",
+    "Two items this pass corrected were overstatements in the prior GO-risk list, not new defects: reauth exhaustion no longer stops silently (hard-expiry forces one reconnect per generation), and the cold-start snapshot fan-out is four calls total, five with KRX entitlement, not four per topic. The remaining B8 caveat is narrower than before: the reactivation path is now locked by transport-level regression, but automated coverage still speaks only to code recovery — operational flag flips and the auth/UI integration remain the device smoke's responsibility. R-CLI-16's once-per-generation reconnect invariant still has no mutation coverage."
   ],
   "verdict": "pass"
 }

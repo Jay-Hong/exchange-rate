@@ -6529,9 +6529,9 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
-- iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
+- iOS 기준 commit: `9ddc6b00a9580647031e0a06ae18d2a16002c2eb`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f`
+- manifest SHA: `43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851`
 - baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 

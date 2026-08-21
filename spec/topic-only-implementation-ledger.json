@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f",
+  "manifest_sha256": "43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
@@ -91,14 +91,28 @@
     },
     {
       "rid": "R-CLI-3",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CLIENT",
       "block_title": "3.3 셋으로도 덮이지 않는 구멍 (출시 차단)",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "99316a9ee45b4f7fec11e12f85f9dda997900ffd",
+          "paths": [
+            "FXi/Services/WebSocketService.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testTopicFrameBeforeAckIsAcceptedButAFrameAfterRejectionIsDropped"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "deadline 기준선이 ack 이 아니라 요청 송신 시점 — ack 보다 먼저 온 frame 도 수신으로 센다."
     },
     {
       "rid": "R-CLI-4",
@@ -150,14 +164,33 @@
     },
     {
       "rid": "R-CLI-7",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CLIENT",
       "block_title": "4.2 구독 상태 — canonical 저장 + 파생",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "99316a9ee45b4f7fec11e12f85f9dda997900ffd",
+          "paths": [
+            "FXi/Models/TopicSubscriptionState.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicSubscriptionStateTests.swift::TopicSubscriptionStateTests/testDesiredSurvivesEveryServerRejection"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicSubscriptionStateTests.swift::TopicSubscriptionStateTests/testAccessAndRetryPolicyAreDerivedFromCanonicalReasons"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "두 축으로 표현 불가한 전이표를 canonical state 로 대체. desired 는 어떤 거절에도 보존."
     },
     {
       "rid": "R-CLI-8",
@@ -172,25 +205,58 @@
     },
     {
       "rid": "R-CLI-9",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CLIENT",
       "block_title": "4.2 구독 상태 — canonical 저장 + 파생",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "99316a9ee45b4f7fec11e12f85f9dda997900ffd",
+          "paths": [
+            "FXi/Models/TopicSubscriptionState.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicSubscriptionStateTests.swift::TopicSubscriptionStateTests/testScopedRejectionsDoNotAcquireTheWrongRetryTrigger"
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicSubscriptionStateTests.swift::TopicSubscriptionStateTests/testEntitlementSignalOpensOnlyItsMatchingRejection"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "사유를 tagged enum 두 개로 저장 — serverDelay(seconds) 재구성 가능, 자격 축이 서로를 열지 않음."
     },
     {
       "rid": "R-CLI-10",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CLIENT",
       "block_title": "5.2 lease 만료 — (A) 클라 hard-expiry 채택",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "client_impl",
+      "evidence": [
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "99316a9ee45b4f7fec11e12f85f9dda997900ffd",
+          "paths": [
+            "FXi/Services/WebSocketService.swift"
+          ]
+        },
+        {
+          "kind": "test",
+          "repo": "ios",
+          "node_id": "FXiTests/TopicMessageTests.swift::WebSocketStaleFrameTests/testHardExpiryPreservesDesiredDropsConfirmedAndReconnectsOnce"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "(A) 클라 hard-expiry 채택분 구현. 만료 시 confirmed 제거·desired 보존·세대당 1회 강제 reconnect. ⚠️ (B) 서버 sweeper 는 후속으로 남는다."
     },
     {
       "rid": "R-CLI-11",
@@ -529,14 +595,20 @@
     },
     {
       "rid": "R-CUT-9",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "9. 반증된 서술 정정 목록",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "doc",
+      "evidence": [
+        {
+          "kind": "doc",
+          "path": "spec/legacy-cutover.md",
+          "anchor": "R-CUT-9"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "문서-코드 드리프트 정정표. 런북 3행은 C2 `7c2b005` 에서 해소로 갱신했다."
     },
     {
       "rid": "R-CUT-12",
@@ -584,14 +656,20 @@
     },
     {
       "rid": "R-CUT-18",
-      "status": "unreviewed",
+      "status": "done",
       "owner": "CUT",
       "block_title": "9. 반증된 서술 정정 목록",
-      "work_kind": null,
-      "evidence": [],
+      "work_kind": "doc",
+      "evidence": [
+        {
+          "kind": "doc",
+          "path": "spec/legacy-cutover.md",
+          "anchor": "R-CUT-18"
+        }
+      ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": ""
+      "note": "ADR-038 D2 제약 유지 + 목적 갱신. R-CLI-11 재작성과 함께 반영."
     },
     {
       "rid": "R-CUT-21",
@@ -680,11 +758,19 @@
           "kind": "test",
           "repo": "ios",
           "node_id": "FXiTests/TopicSubscriptionStateTests.swift::TopicSubscriptionStateTests/testRevalidationIsSingleShotUntilAFrameRecoversIt"
+        },
+        {
+          "kind": "commit",
+          "repo": "ios",
+          "sha": "9ddc6b00a9580647031e0a06ae18d2a16002c2eb",
+          "paths": [
+            "FXiTests/TopicMessageTests.swift"
+          ]
         }
       ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": "⑥⑦⑧⑨ 구현 완료. verified 아님 — 구현자 자신이 닫지 않는다."
+      "note": "⑥⑦⑧⑨ 구현 완료 + safety-stop 재활성화 복구까지 회귀로 잠금. verified 아님 — 구현자 자신이 닫지 않는다."
     },
     {
       "rid": "R-GATE-4",

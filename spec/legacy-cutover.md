@@ -4,9 +4,9 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
-- iOS 기준 commit: `1de20ea70a74fe3f6653725591a30596343597ac`
+- iOS 기준 commit: `9ddc6b00a9580647031e0a06ae18d2a16002c2eb`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5194302812584606e1fe8c9c8d46948bb2f254bed43182f651dc29ac48ce297f`
+- manifest SHA: `43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851`
 - baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -241,7 +241,7 @@ DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.
 | B5 | 45초 무수신 → **조용한 재구독** → 실패 확정 시에만 배너 | ✅ **구현·잠금 완료** — 실패 확정이 degraded 로 수렴하는 것을 재검증 경로(`ios/FXiTests/TopicMessageTests.swift:3748` · `ios/FXiTests/TopicMessageTests.swift:6005`)와 최초 인도 경로(`ios/FXiTests/TopicMessageTests.swift:6045`)에서 각각 잠근다 |
 | B6 | **DXY topic 이 live tip 을 공급**한다 | 🔶 `dxy:spot`([R-INV-4](../DECISIONS.md#r-inv-4)) 구현과 함께 |
 | B7 | **은행 알림 현재가가 FX topic 을 쓴다** | 🔶 A2([R-CUT-3](#r-cut-3)) 신설과 함께 (지금은 legacy 만 본다 = 현행 버그; `ios/FXi/Views/Components/AlertAddSheet.swift:96-103` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:548-553`) |
-| B8 | `topics_disabled` → purge → **재활성화 시 복구** | 🔶 **절반만** — purge 는 잠겼다(`ios/FXiTests/TetherDataPathTests.swift:648` 이 fail-close 를, `ios/FXiTests/TetherDataPathTests.swift:619` 이 메모리+디스크+파생 상태 동시 제거를 확인). ⚠️ **재활성화 시 복구는 아직 테스트가 없다** — desired 보존은 구현돼 있으나 재활성화 후 실제 복구를 단언하는 테스트는 0건이다 |
+| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:648`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:619`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |
 | B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5855`). ⚠️ 세대당 1회 강제 reconnect 불변식 자체는 변이 커버리지가 없다(R-CLI-16 잔여) |
 
 <!-- relation: references target=R-CLI-10 -->
