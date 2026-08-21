@@ -4,9 +4,9 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `5429d0f78e44aa467d9acc4487585be5fd31cad9`
-- iOS 기준 commit: `415c20f3483d0a83d347aee4801052ccda1d5258`
+- iOS 기준 commit: `cfe06f6028ec030f6d5913a54eb87262488d6f83`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `2c709cf36eb90b5ee01c0d9d54b89f370d7146535e003fd6e9a8a3fc26f825fc`
+- manifest SHA: `4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c`
 - baseline SHA: `6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -161,8 +161,8 @@ DXY 적용·callback·legacy cache 동작은 제거해도 신호가 없다.
 | 위치 | 현 서술 | 실제 |
 |---|---|---|
 | `WebSocketService.swift` ~1582 | "`performTopicCommand` 의 `catch` 는 `forgetPending` 만 하고 재시도하지 않는다 … 재연결 전까지 조용히 미구독" | catch 가 **bounded retry 한다**(`shouldRetryCommandFailure` denylist + 최대 3회 — baseline F5). 그 주석이 열어 둔 항목이 **이미 구현됐는데 주석만 안 고쳐졌다**. 실제 공백은 **재시도 소진 이후** |
-| `TOPIC_V2_RELEASE_RUNBOOK.md` MODE 2 | ✅ **해소** — 신 pin 런북에 "45s 초과 시 자동으로 legacy 표시" 문구 0건 | 이 표의 '실제'대로 이미 재작성돼 있다 — "MODE 2 (tether 45초 무수신) → 조용한 재검증: 화면과 last-known은 그대로이고 배너도 없다"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:240`) · "45초 legacy fallback을 기다리는 절차가 아니다"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:277`) · "FX/KRX에는 이 시간 threshold를 적용하지 않는다"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:296`). 불변식 [R-INV-1](../DECISIONS.md#r-inv-1) 과 일치 |
-| 같은 문서 rollback 절 | ✅ **해소** — 신 pin 런북에 "graceful degrade"·"서비스 중단 아님" 문구 0건 | Rollback 절(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:268-289`)은 degrade 를 주장하지 않고 두 실패를 분리해 적는다 — topic 데이터 장애는 last-known 유지 + 조용한 재검증(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:283`), safety-stop 은 클라가 topic 값을 purge 하고 **명시적 unavailable 화면**을 표시(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:273-275`) |
+| `TOPIC_V2_RELEASE_RUNBOOK.md` MODE 2 | ✅ **해소** — 신 pin 런북에 "45s 초과 시 자동으로 legacy 표시" 문구 0건 | 이 표의 '실제'대로 이미 재작성돼 있다 — "MODE 2 (tether 45초 무수신) → 조용한 재검증: 화면과 last-known은 그대로이고 배너도 없다"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:264`) · "45초 legacy fallback을 기다리는 절차가 아니다"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:301`) · "FX/KRX에는 이 시간 threshold를 적용하지 않는다"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:320`). 불변식 [R-INV-1](../DECISIONS.md#r-inv-1) 과 일치 |
+| 같은 문서 rollback 절 | ✅ **해소** — 신 pin 런북에 "graceful degrade"·"서비스 중단 아님" 문구 0건 | Rollback 절(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:292-313`)은 degrade 를 주장하지 않고 두 실패를 분리해 적는다 — topic 데이터 장애는 last-known 유지 + 조용한 재검증(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:307`), safety-stop 은 클라가 topic 값을 purge 하고 **명시적 unavailable 화면**을 표시(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-299`) |
 | 같은 문서 (그래프) | ✅ **해소** — 해당 문구가 신 pin 런북에서 삭제됨(0건) | 남은 서술은 graph live-tail 을 topic surface 로 다룬다(purge 범위에 포함 — `ios/TOPIC_V2_RELEASE_RUNBOOK.md:146`). 코드도 같다 — `GraphV2LiveBridge`(`ios/FXi/Views/Components/GraphV2Section.swift:1422`) 의 `tabTopicRates`(`ios/FXi/Views/Components/GraphV2Section.swift:1431-1443`) 가 `fxTopicRates` 를 읽는다 |
 | `DECISIONS.md` ADR-039 요약 | "신규 앱 legacy fallback 금지" | 원문은 "legacy **anon** fallback 금지" — 금지 **근거**가 인가라는 사실이 지워졌다 |
 | `REALTIME_V2_CLIENT_GUIDE.md` | "화면을 건드리지 않으면 **영원히** stale 표시가 안 됐다" | 리허설 관측은 **90초**다. 기전상 그럴듯해도 관측보다 강한 단정 |

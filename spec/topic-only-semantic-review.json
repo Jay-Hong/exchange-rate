@@ -72,7 +72,9 @@
           "위 감사 수용 + C2 재-baseline: 좌표 21건을 pinned 트리에 직접 대조해 전부 의도한 선언·문장을 가리키는 것을 확인했다(B5→`:3816`/`:6073`/`:6113`, B8→`:3748`, B9→`:5923`). 변이 실증도 직접 재현했다 — `beginAutomaticReconnect()` 를 세대 가드 밖 topic 루프로 옮기면 `(\"2\") is not equal to (\"1\")` RED, 복원 후 프로덕션 SHA-256 일치. ⚠️ 지난 C2 에서 원장을 perl 치환에 넣어 evidence 역사 SHA 를 덮었기에 이번엔 제외했는데, 그게 **너무 거칠었다** — 원장의 `manifest_sha256` 은 pin 성격이라 갱신 대상이고 `evidence[].sha` 만 역사다. `E_MANIFEST_DRIFT` 가 잡아 구분을 정확히 했다. R-CLI-16 note 와 B9 행의 '변이 커버리지 없음' 서술을 현재 상태로 정정했다.",
           "semantic-input-binding/v1:0012:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:author=Claude Code:reviewer=OpenAI Codex",
           "위 관측을 독립 재현했다 — 다섯 항목(기동 시각 `...01:21:02.084Z` · checkout `ed7b2eb` · 두 파일 SHA MATCH · `params: ['fresh_premium']` / `props` 에 `premium_active` · `DISPATCHER=False, KRX=False`)을 운영에 직접 조회해 전부 일치를 확인했다. ⚠️ 운영 checkout 이 리포 HEAD(`c65c6e0`)보다 뒤인 `ed7b2eb` 인 것은 정상이다 — 그 뒤 두 commit 은 문서·테스트뿐이라 서버 코드 delta 가 0 이고 재배포 대상이 아니다. **런타임이 담고 있어야 할 것은 `4b58110` 이고 그것은 들어 있다.** 리포 HEAD 와 운영 checkout 이 다르다는 사실만으로 미배포라고 읽으면 안 된다.",
-          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex",
+          "Release GO 기록 C1(iOS `cfe06f6`) + C2: 런북 §2-d 가 요구한 **사용자 결정**을 기록했다 — IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용 3건을 초기 phased 동안 명시적으로 수용한다. 각 항목이 **무엇을 포기하는지**를 함께 적었다(특히 `limit_conn` 유보 = carrier NAT 오탐 회피 대가로 **연결 수 남용 방어 포기**). ⛔ GO 는 결정이고 활성화는 실행이라, 이 사이클은 flag 도 arming 도 바꾸지 않았다 — 운영은 여전히 양쪽 OFF 다. `/ws` 10r/s 재평가는 수용 항목이 아니라 phased 관측 의무로 분리했다. ⚠️ §2-d 삽입이 런북 24행을 밀어 서버 문서의 인용 7건이 어긋났고, **pin 전진과 같은 사이클에서** 재도출했다(`240→264` · `268-289→292-313` · `273-277→297-301` 등, `:146` 은 삽입 전이라 불변). 직전 사이클에서 이 단계를 빠뜨려 12건이 어긋났던 것을 반복하지 않았다.",
+          "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -129,7 +131,9 @@
           "C2 `943581e` 사후 감사 + R-CLI-16 변이 커버리지(iOS `415c20f`): pin 전진 뒤 **좌표 재도출이 누락**된 것을 찾았다 — `9ddc6b0` 이 `TopicMessageTests.swift` **3748행에 68줄을 삽입**해 그 아래 인용이 전부 밀렸는데 C2 는 pin 만 올렸다. 실측 12건: B5 의 재검증 좌표는 새 B8 테스트와 닫는 중괄호를, B9 는 무관한 lease 주석을, rollback 좌표들은 다른 단계나 빈 줄을 가리켰다. CI 는 '행이 존재하는가'만 봐서 전부 통과했다. 현재 pin 기준으로 재도출했다. 그리고 원장이 잔여로 적어만 둔 R-CLI-16 '세대당 1회 reconnect' 변이 공백을 닫았다 — 기존 테스트는 topic 하나를 두 번 검사해 세대 가드를 제거해도 통과했다. 두 topic 동시 만료 회귀를 **클래스 맨 끝에** 붙여(중간 삽입이 좌표를 다시 밀지 않게) 추가했다.",
           "semantic-input-binding/v1:0012:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:author=OpenAI Codex:reviewer=Claude Code",
           "배포 격차 종결 관측(2026-08-21): epoch 0010 이 잔여로 기록한 '서버 `4b58110` 은 커밋·push·pin 됐으나 운영 이미지가 그보다 앞선다'가 해소됐음을 런타임에 직접 물어 확인했다 — 컨테이너 기동 `2026-08-21T01:21:02Z`, 운영 checkout `ed7b2eb`(=`4b58110` 포함), `app/main.py` 와 `app/topic_initial_snapshot.py` 의 runtime SHA-256 이 checkout 과 일치, OpenAPI 가 `fresh_premium` 질의와 `premium_active` 필드를 노출, `topic_flag` 는 여전히 OFF. ⛔ 이 관측 자체가 flag ON 승인은 아니다.",
-          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=OpenAI Codex:reviewer=Claude Code",
+          "Release GO 권고 + 승인 문구 정밀화: 기술적 권고는 GO 이며, 현재 사용자 규모·phased·검증된 서버 safety-stop 을 고려하면 세 위험이 초기 출시에서 수용 가능하다고 판단했다. 다만 `limit_conn` 미구현은 carrier NAT 오탐을 피하는 대신 **연결 수 남용 방어를 포기**한다는 의미까지 포함함을 명시했다. 그리고 내가 4항목으로 적었던 위험 목록을 정본 §2-d 대로 **3항목**으로 정정했다 — `/ws` 10r/s 재평가는 위험 수용 항목이 아니라 phased 중 수행할 관측 의무이고, 값 조정은 그때 다시 별도 승인 단위다.",
+          "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -193,7 +197,9 @@
           "C2 `943581e` 사후 감사 + R-CLI-16 변이 커버리지(iOS `415c20f`): pin 전진 뒤 **좌표 재도출이 누락**된 것을 찾았다 — `9ddc6b0` 이 `TopicMessageTests.swift` **3748행에 68줄을 삽입**해 그 아래 인용이 전부 밀렸는데 C2 는 pin 만 올렸다. 실측 12건: B5 의 재검증 좌표는 새 B8 테스트와 닫는 중괄호를, B9 는 무관한 lease 주석을, rollback 좌표들은 다른 단계나 빈 줄을 가리켰다. CI 는 '행이 존재하는가'만 봐서 전부 통과했다. 현재 pin 기준으로 재도출했다. 그리고 원장이 잔여로 적어만 둔 R-CLI-16 '세대당 1회 reconnect' 변이 공백을 닫았다 — 기존 테스트는 topic 하나를 두 번 검사해 세대 가드를 제거해도 통과했다. 두 topic 동시 만료 회귀를 **클래스 맨 끝에** 붙여(중간 삽입이 좌표를 다시 밀지 않게) 추가했다.",
           "semantic-input-binding/v1:0012:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:author=OpenAI Codex:reviewer=Claude Code",
           "배포 격차 종결 관측(2026-08-21): epoch 0010 이 잔여로 기록한 '서버 `4b58110` 은 커밋·push·pin 됐으나 운영 이미지가 그보다 앞선다'가 해소됐음을 런타임에 직접 물어 확인했다 — 컨테이너 기동 `2026-08-21T01:21:02Z`, 운영 checkout `ed7b2eb`(=`4b58110` 포함), `app/main.py` 와 `app/topic_initial_snapshot.py` 의 runtime SHA-256 이 checkout 과 일치, OpenAPI 가 `fresh_premium` 질의와 `premium_active` 필드를 노출, `topic_flag` 는 여전히 OFF. ⛔ 이 관측 자체가 flag ON 승인은 아니다.",
-          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=OpenAI Codex:reviewer=Claude Code",
+          "Release GO 권고 + 승인 문구 정밀화: 기술적 권고는 GO 이며, 현재 사용자 규모·phased·검증된 서버 safety-stop 을 고려하면 세 위험이 초기 출시에서 수용 가능하다고 판단했다. 다만 `limit_conn` 미구현은 carrier NAT 오탐을 피하는 대신 **연결 수 남용 방어를 포기**한다는 의미까지 포함함을 명시했다. 그리고 내가 4항목으로 적었던 위험 목록을 정본 §2-d 대로 **3항목**으로 정정했다 — `/ws` 10r/s 재평가는 위험 수용 항목이 아니라 phased 중 수행할 관측 의무이고, 값 조정은 그때 다시 별도 승인 단위다.",
+          "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -257,7 +263,9 @@
           "위 감사 수용 + C2 재-baseline: 좌표 21건을 pinned 트리에 직접 대조해 전부 의도한 선언·문장을 가리키는 것을 확인했다(B5→`:3816`/`:6073`/`:6113`, B8→`:3748`, B9→`:5923`). 변이 실증도 직접 재현했다 — `beginAutomaticReconnect()` 를 세대 가드 밖 topic 루프로 옮기면 `(\"2\") is not equal to (\"1\")` RED, 복원 후 프로덕션 SHA-256 일치. ⚠️ 지난 C2 에서 원장을 perl 치환에 넣어 evidence 역사 SHA 를 덮었기에 이번엔 제외했는데, 그게 **너무 거칠었다** — 원장의 `manifest_sha256` 은 pin 성격이라 갱신 대상이고 `evidence[].sha` 만 역사다. `E_MANIFEST_DRIFT` 가 잡아 구분을 정확히 했다. R-CLI-16 note 와 B9 행의 '변이 커버리지 없음' 서술을 현재 상태로 정정했다.",
           "semantic-input-binding/v1:0012:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:author=Claude Code:reviewer=OpenAI Codex",
           "위 관측을 독립 재현했다 — 다섯 항목(기동 시각 `...01:21:02.084Z` · checkout `ed7b2eb` · 두 파일 SHA MATCH · `params: ['fresh_premium']` / `props` 에 `premium_active` · `DISPATCHER=False, KRX=False`)을 운영에 직접 조회해 전부 일치를 확인했다. ⚠️ 운영 checkout 이 리포 HEAD(`c65c6e0`)보다 뒤인 `ed7b2eb` 인 것은 정상이다 — 그 뒤 두 commit 은 문서·테스트뿐이라 서버 코드 delta 가 0 이고 재배포 대상이 아니다. **런타임이 담고 있어야 할 것은 `4b58110` 이고 그것은 들어 있다.** 리포 HEAD 와 운영 checkout 이 다르다는 사실만으로 미배포라고 읽으면 안 된다.",
-          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex",
+          "Release GO 기록 C1(iOS `cfe06f6`) + C2: 런북 §2-d 가 요구한 **사용자 결정**을 기록했다 — IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용 3건을 초기 phased 동안 명시적으로 수용한다. 각 항목이 **무엇을 포기하는지**를 함께 적었다(특히 `limit_conn` 유보 = carrier NAT 오탐 회피 대가로 **연결 수 남용 방어 포기**). ⛔ GO 는 결정이고 활성화는 실행이라, 이 사이클은 flag 도 arming 도 바꾸지 않았다 — 운영은 여전히 양쪽 OFF 다. `/ws` 10r/s 재평가는 수용 항목이 아니라 phased 관측 의무로 분리했다. ⚠️ §2-d 삽입이 런북 24행을 밀어 서버 문서의 인용 7건이 어긋났고, **pin 전진과 같은 사이클에서** 재도출했다(`240→264` · `268-289→292-313` · `273-277→297-301` 등, `:146` 은 삽입 전이라 불변). 직전 사이클에서 이 단계를 빠뜨려 12건이 어긋났던 것을 반복하지 않았다.",
+          "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -327,7 +335,9 @@
           "위 감사 수용 + C2 재-baseline: 좌표 21건을 pinned 트리에 직접 대조해 전부 의도한 선언·문장을 가리키는 것을 확인했다(B5→`:3816`/`:6073`/`:6113`, B8→`:3748`, B9→`:5923`). 변이 실증도 직접 재현했다 — `beginAutomaticReconnect()` 를 세대 가드 밖 topic 루프로 옮기면 `(\"2\") is not equal to (\"1\")` RED, 복원 후 프로덕션 SHA-256 일치. ⚠️ 지난 C2 에서 원장을 perl 치환에 넣어 evidence 역사 SHA 를 덮었기에 이번엔 제외했는데, 그게 **너무 거칠었다** — 원장의 `manifest_sha256` 은 pin 성격이라 갱신 대상이고 `evidence[].sha` 만 역사다. `E_MANIFEST_DRIFT` 가 잡아 구분을 정확히 했다. R-CLI-16 note 와 B9 행의 '변이 커버리지 없음' 서술을 현재 상태로 정정했다.",
           "semantic-input-binding/v1:0012:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:author=Claude Code:reviewer=OpenAI Codex",
           "위 관측을 독립 재현했다 — 다섯 항목(기동 시각 `...01:21:02.084Z` · checkout `ed7b2eb` · 두 파일 SHA MATCH · `params: ['fresh_premium']` / `props` 에 `premium_active` · `DISPATCHER=False, KRX=False`)을 운영에 직접 조회해 전부 일치를 확인했다. ⚠️ 운영 checkout 이 리포 HEAD(`c65c6e0`)보다 뒤인 `ed7b2eb` 인 것은 정상이다 — 그 뒤 두 commit 은 문서·테스트뿐이라 서버 코드 delta 가 0 이고 재배포 대상이 아니다. **런타임이 담고 있어야 할 것은 `4b58110` 이고 그것은 들어 있다.** 리포 HEAD 와 운영 checkout 이 다르다는 사실만으로 미배포라고 읽으면 안 된다.",
-          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex",
+          "Release GO 기록 C1(iOS `cfe06f6`) + C2: 런북 §2-d 가 요구한 **사용자 결정**을 기록했다 — IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용 3건을 초기 phased 동안 명시적으로 수용한다. 각 항목이 **무엇을 포기하는지**를 함께 적었다(특히 `limit_conn` 유보 = carrier NAT 오탐 회피 대가로 **연결 수 남용 방어 포기**). ⛔ GO 는 결정이고 활성화는 실행이라, 이 사이클은 flag 도 arming 도 바꾸지 않았다 — 운영은 여전히 양쪽 OFF 다. `/ws` 10r/s 재평가는 수용 항목이 아니라 phased 관측 의무로 분리했다. ⚠️ §2-d 삽입이 런북 24행을 밀어 서버 문서의 인용 7건이 어긋났고, **pin 전진과 같은 사이클에서** 재도출했다(`240→264` · `268-289→292-313` · `273-277→297-301` 등, `:146` 은 삽입 전이라 불변). 직전 사이클에서 이 단계를 빠뜨려 12건이 어긋났던 것을 반복하지 않았다.",
+          "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -389,7 +399,9 @@
           "C2 `943581e` 사후 감사 + R-CLI-16 변이 커버리지(iOS `415c20f`): pin 전진 뒤 **좌표 재도출이 누락**된 것을 찾았다 — `9ddc6b0` 이 `TopicMessageTests.swift` **3748행에 68줄을 삽입**해 그 아래 인용이 전부 밀렸는데 C2 는 pin 만 올렸다. 실측 12건: B5 의 재검증 좌표는 새 B8 테스트와 닫는 중괄호를, B9 는 무관한 lease 주석을, rollback 좌표들은 다른 단계나 빈 줄을 가리켰다. CI 는 '행이 존재하는가'만 봐서 전부 통과했다. 현재 pin 기준으로 재도출했다. 그리고 원장이 잔여로 적어만 둔 R-CLI-16 '세대당 1회 reconnect' 변이 공백을 닫았다 — 기존 테스트는 topic 하나를 두 번 검사해 세대 가드를 제거해도 통과했다. 두 topic 동시 만료 회귀를 **클래스 맨 끝에** 붙여(중간 삽입이 좌표를 다시 밀지 않게) 추가했다.",
           "semantic-input-binding/v1:0012:d2c30fd8036eb3383f72f52f1f291f644808f054fb7ddced37f6784c1987848f:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:author=OpenAI Codex:reviewer=Claude Code",
           "배포 격차 종결 관측(2026-08-21): epoch 0010 이 잔여로 기록한 '서버 `4b58110` 은 커밋·push·pin 됐으나 운영 이미지가 그보다 앞선다'가 해소됐음을 런타임에 직접 물어 확인했다 — 컨테이너 기동 `2026-08-21T01:21:02Z`, 운영 checkout `ed7b2eb`(=`4b58110` 포함), `app/main.py` 와 `app/topic_initial_snapshot.py` 의 runtime SHA-256 이 checkout 과 일치, OpenAPI 가 `fresh_premium` 질의와 `premium_active` 필드를 노출, `topic_flag` 는 여전히 OFF. ⛔ 이 관측 자체가 flag ON 승인은 아니다.",
-          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=OpenAI Codex:reviewer=Claude Code",
+          "Release GO 권고 + 승인 문구 정밀화: 기술적 권고는 GO 이며, 현재 사용자 규모·phased·검증된 서버 safety-stop 을 고려하면 세 위험이 초기 출시에서 수용 가능하다고 판단했다. 다만 `limit_conn` 미구현은 carrier NAT 오탐을 피하는 대신 **연결 수 남용 방어를 포기**한다는 의미까지 포함함을 명시했다. 그리고 내가 4항목으로 적었던 위험 목록을 정본 §2-d 대로 **3항목**으로 정정했다 — `/ws` 10r/s 재평가는 위험 수용 항목이 아니라 phased 중 수행할 관측 의무이고, 값 조정은 그때 다시 별도 승인 단위다.",
+          "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -403,21 +415,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "2c709cf36eb90b5ee01c0d9d54b89f370d7146535e003fd6e9a8a3fc26f825fc",
+    "manifest_sha256": "4561315d4181a755435d99722209b51321b5dc789ab1bc26534c8b176c74d08c",
     "baseline_sha256": "6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2",
-    "lock_sha256": "c87f1b0decb1018751cd394da0c1a0a1de2d90cf551e9d83c8aaffb27c43909f",
+    "lock_sha256": "e4b3b15ad781ae341854a28c259b9e6ad0e4f5abab1c4087d24c29886efef863",
     "server_commit": "5429d0f78e44aa467d9acc4487585be5fd31cad9",
-    "ios_commit": "415c20f3483d0a83d347aee4801052ccda1d5258"
+    "ios_commit": "cfe06f6028ec030f6d5913a54eb87262488d6f83"
   },
   "documents": {
-    "ADR": "504f0c9aaafbd266ddf40e8af7884e9d7b938f22430606f022543addca61b07e",
-    "CLIENT": "4aa609740142fb37da03c033051ecfb82e1c56f70d3543eb623c37dce5dbc585",
-    "CUT": "0d5532a5cca07aac5e83aaa8073b9695515bb5ac480014ec938ab628bafebe22",
-    "HAND": "55b8bed38c65c6f9bf05153ab3ad136ce10f7ec7d779ab2728de02947de8312b",
-    "HEALTH": "f6dca9611bf1a5f492e4aae04806ee8bcbe2091295da7ce3c6e16bd98888cf5c",
-    "LOAD": "9a7c3aa7d76b4ed223bd73221535424fd0561f8c8708653efc104800f37b6f17"
+    "ADR": "dbcede2e25f4a7cbe8d7d574ad69c81391b64b159122c9bc5c4712a61745f68e",
+    "CLIENT": "f581a373b4a5baf2f090fe84fbe124fa1a234851188ed97872b42c507b653ec7",
+    "CUT": "4037da821cd507094b7c28e0ae86eb748d953660c9d9d51b8cf7d6af03e95635",
+    "HAND": "e5e59ca890478f1bedc80f2e917cce68faabccdf8f3a770e7ead9e36c4a3e306",
+    "HEALTH": "9d03ab6569071ae8ab2d832654f3fbcdf418d5ecebf205756360b87ddc4bafba",
+    "LOAD": "805123e93e7c50208cf9f5b43c0b2bdc5aca01ca78f20e37a5cdfe303024a9e4"
   },
-  "claim_ledger_sha256": "7dcce5abe6563c14383e3dbd18dbca52939b7b9c410dd3c09eed6ae0f6b52600",
+  "claim_ledger_sha256": "aa8785eead70d0dd7ce87f235053a1915296862ce3fc6ffa15ba62d9092483c0",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 75,
@@ -972,7 +984,8 @@
     "The R-GATE-3 family is now recorded as done, not verified: the evidence is the implementer's own commits and tests, and R-CLI-16's once-per-generation forced reconnect still has no mutation coverage. Separately, this pass records a deployment gap that provenance alone does not expose — server commit 4b58110 (fresh_premium / premium_active / R-HAND-6 close-on-send-failure) is committed, pushed and pinned but the production app image predates it, so the runtime OpenAPI exposes neither the query parameter nor the response field. Only the nginx layer was deployed. Flag ON must not precede deploying that server code with topics off.",
     "Two items this pass corrected were overstatements in the prior GO-risk list, not new defects: reauth exhaustion no longer stops silently (hard-expiry forces one reconnect per generation), and the cold-start snapshot fan-out is four calls total, five with KRX entitlement, not four per topic. The remaining B8 caveat is narrower than before: the reactivation path is now locked by transport-level regression, but automated coverage still speaks only to code recovery — operational flag flips and the auth/UI integration remain the device smoke's responsibility. R-CLI-16's once-per-generation reconnect invariant still has no mutation coverage.",
     "R-CLI-16's once-per-generation reconnect invariant now has mutation coverage (two topics expiring in one lease generation; moving reconnect into the per-topic loop fails 2 != 1), superseding the prior pass's residual. Two process limits remain visible from this pass. First, the citation gate checks only that a cited line exists inside the file, so inserting lines mid-file silently redirects every citation below it — C2 943581e advanced the iOS pin without re-deriving locators and twelve citations pointed at unrelated code until this pass. Second, an audit of all 118 iOS citations at the new pin found twelve whose range begins one to three lines before the cited declaration; these predate this cycle and still contain the cited content, so they are recorded rather than churned.",
-    "The production deployment gap recorded two passes earlier is closed as of the 2026-08-21 12:57 KST direct runtime check. The running app container started at 2026-08-21T01:21:02Z; its app/main.py and app/topic_initial_snapshot.py SHA-256 values exactly match production checkout ed7b2eb, which contains server C1 4b58110. Runtime OpenAPI exposes the fresh_premium query parameter and the EntitlementsResponse premium_active field, while topic_flag.py still reports OFF with no pending operation or lock. Deploying 4b58110 is therefore no longer an activation prerequisite; this observation does not itself approve flag ON."
+    "The production deployment gap recorded two passes earlier is closed as of the 2026-08-21 12:57 KST direct runtime check. The running app container started at 2026-08-21T01:21:02Z; its app/main.py and app/topic_initial_snapshot.py SHA-256 values exactly match production checkout ed7b2eb, which contains server C1 4b58110. Runtime OpenAPI exposes the fresh_premium query parameter and the EntitlementsResponse premium_active field, while topic_flag.py still reports OFF with no pending operation or lock. Deploying 4b58110 is therefore no longer an activation prerequisite; this observation does not itself approve flag ON.",
+    "Release GO was recorded on 2026-08-21 accepting three risks for the initial phased release: no per-IP limit_conn, the server-side stale registry cost of expired leases, and in-connection subscribe abuse that nginx cannot see. The GO is a decision only — this cycle changed neither the server flags nor the iOS Release arming, both of which remain off, and server flag ON requires a separate approval under R-GATE-4. The /ws 10r/s + burst 20 re-evaluation is deliberately not one of the accepted risks: it is a phased-release observation duty, and any value change is a host config change requiring its own approval."
   ],
   "verdict": "pass"
 }
