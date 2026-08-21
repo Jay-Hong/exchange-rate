@@ -574,6 +574,24 @@ def test_reviewed_adr_030_and_031_targets_do_not_regress_to_stale_worktree_lines
     assert "app/usdt_topic_payload.py#L330" not in targets
 
 
+def test_reviewed_dxy_cutover_claims_cite_payload_and_publish_implementations():
+    """행 이동 뒤 상수나 함수 주변부만 남아도 DXY 구현 근거로 통과시키지 않는다."""
+    blocks = _blocks("ADR")
+    inv1 = blocks["R-INV-1"]
+    inv3 = blocks["R-INV-3"]
+
+    assert "`app/dxy_topic_publisher.py:73-83`" in inv1
+    assert "`app/dxy_topic_publisher.py:115-134`" in inv1
+    assert "`app/dxy_topic_publisher.py:115-134`" in inv3
+
+    stale_or_indirect = (
+        "`app/dxy_topic_publisher.py:20-27`",
+        "`app/dxy_topic_publisher.py:20-132`",
+        "`app/dxy_topic_publisher.py:115-148`",
+    )
+    assert not any(locator in inv1 or locator in inv3 for locator in stale_or_indirect)
+
+
 @pytest.mark.parametrize("dest", DESTS)
 def test_cited_baseline_ids_exist(dest):
     """baseline ID 는 baseline 파일에 실재해야 한다."""

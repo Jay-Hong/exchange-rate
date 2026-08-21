@@ -9,7 +9,7 @@
     "ios_commit": "1c806535f77dd45f1611b28ef78f1ffe72dd0352"
   },
   "documents": {
-    "ADR": "4436f8085d843c3ee47c8c3e3fb5fa992b12b32d59c291b9470570d3e6b551a7",
+    "ADR": "2af9ae6f2e421df9297ee6c626030df69cbe7321e7dd5dfa86e5ce975e97b350",
     "CLIENT": "a2ab86cbdb9e29a70c86eba117fa24e5a55a4d7e45f1ecc17ad346b7566e9541",
     "CUT": "93e1a0ef465f782b1f54c5fd7b66022a9e4b43e112422d4dd91c5882e0cc2467",
     "HAND": "4e83d540695450f6f23d8f5fd67a4b723b37699ccf4a37afd23034051bd04cb7",
@@ -76,12 +76,12 @@
       "classification": "code_fact",
       "detail": "구현 commit 이름만으로 닫지 않는다. iOS architecture test가 legacy API/callback/파일의 복원을 거부하고, 서버 DXY publisher가 dxy:spot payload와 live 발행을 소유한다는 직접 근거로 코드 cutover 완료와 운영 게이트 미완료를 구분했다.",
       "provenance": [
-        "file:app/dxy_topic_publisher.py:115-148",
-        "file:app/dxy_topic_publisher.py:20-27",
+        "file:app/dxy_topic_publisher.py:115-134",
+        "file:app/dxy_topic_publisher.py:73-83",
         "file:ios/FXiTests/TopicMessageTests.swift:386-428"
       ],
-      "unit_sha256": "bb866f6fd410d0b936ef4301c38a13d23031482c9e9da842ddd3195daeb0ff5e",
-      "unit_text": "> ✅ **코드 불변식은 충족됐다.** 서버 `8755510`과 iOS `0f2a3f8`이 신규 앱의 legacy > REST/WS/cache/graph 소비를 제거하고 `dxy:spot`까지 topic 경로로 옮겼다. 다만 운영 > `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다. > iOS architecture test가 legacy API/callback/파일의 복원을 거부하고 > (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을 > 소유한다 (`app/dxy_topic_publisher.py:20-27` · `app/dxy_topic_publisher.py:115-148`). > 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다."
+      "unit_sha256": "37fef8f830aff97e399824154b30436c51c1b3d75875a2f0b465ceac4f345fff",
+      "unit_text": "> ✅ **코드 불변식은 충족됐다.** 서버 `8755510`과 iOS `0f2a3f8`이 신규 앱의 legacy > REST/WS/cache/graph 소비를 제거하고 `dxy:spot`까지 topic 경로로 옮겼다. 다만 운영 > `WS_TOPIC_AUTH_STAGE` 수렴·dispatcher canary·Release arming은 별도 게이트이며 아직 완료가 아니다. > iOS architecture test가 legacy API/callback/파일의 복원을 거부하고 > (`ios/FXiTests/TopicMessageTests.swift:386-428`), 서버 publisher는 `dxy:spot` payload와 live 발행을 > 소유한다 (`app/dxy_topic_publisher.py:73-83` · `app/dxy_topic_publisher.py:115-134`). > 아래 [R-INV-2](#r-inv-2) · [R-INV-3](#r-inv-3)은 운영 상태를 구분한다."
     },
     {
       "destination": "ADR",
