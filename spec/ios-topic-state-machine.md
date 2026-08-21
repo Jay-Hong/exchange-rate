@@ -3,10 +3,10 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `875551082ccd3ac51c9de4285430660948b32773`
-- iOS 기준 commit: `c90470e0f8887387cd49c528e67edfbe635de217`
+- server 기준 commit: `bbf29cb0b74a9fd17641fbbd05cbd44eca7a2ae5`
+- iOS 기준 commit: `db545354be83e707d4cf2f403ed94108d83c73a9`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee`
+- manifest SHA: `0ab0dfebf7c69b16b7665c64e3fed68aebc3bc130672d8905887d2ea3f609f21`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -583,7 +583,7 @@ cap이나 영구 activation 완료로 쓰지 않는다.
 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`, 특히 671 행 주석).
 런북도 재작성돼 2차 롤백 bullet 이 "45초 legacy fallback 을 기다리는 절차가 아니다"라고 못박고,
 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다
-(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-301`).
+(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:346-350`).
 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled`
 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초
 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1051-1074`)

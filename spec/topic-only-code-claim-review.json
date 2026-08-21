@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee",
+    "manifest_sha256": "0ab0dfebf7c69b16b7665c64e3fed68aebc3bc130672d8905887d2ea3f609f21",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "6aa62f0b2d21967e96559ba71a8263a0c4fd4acf51422af45296148d7a163dd0",
-    "server_commit": "875551082ccd3ac51c9de4285430660948b32773",
-    "ios_commit": "c90470e0f8887387cd49c528e67edfbe635de217"
+    "lock_sha256": "7c898723ea31d216310e2c09eb4ff357f6847bf687a3470f5a244fbd33454386",
+    "server_commit": "bbf29cb0b74a9fd17641fbbd05cbd44eca7a2ae5",
+    "ios_commit": "db545354be83e707d4cf2f403ed94108d83c73a9"
   },
   "documents": {
-    "ADR": "9d187d85f0a2b2677a9762f5823fcc780560c17dc287a8acc4c1748281cafe23",
-    "CLIENT": "584d1bfd09e6f7dae1ef75814fe724f7303a71188df09fd87450762f90af754f",
-    "CUT": "e5057065f085dacb73719c333ffdda3fd60be8754c54fe94d3bd990bc9608678",
-    "HAND": "103f3e914229daec8304de26eaf4513627819a9a80097677a8038d6d375a9732",
-    "HEALTH": "cea410df482974d4e3ab1d583688643d00f68ac8491b50013eb7f7a2846e33a0",
-    "LOAD": "22b54750b484c5b5951f83ded26eeab0443c613a70b9620bdf3b7ecbd26f03fe"
+    "ADR": "a0daa1bf7b46a74f29c3bb3cc164d36f2ddacfaad61d8783a59e6668afb2a994",
+    "CLIENT": "05a8365b4ee377b23be3587e05a51c21a4e22d32947e30c1cebb6e52cf3a090f",
+    "CUT": "ddb70a4b77de14018755b6fc107bf52cda918be8dd999b5cd85f1683ffee9486",
+    "HAND": "80e5b10e40583e1bbcfa2dab4b2a9c51be2a82076859f333b454f44f6ae80b7b",
+    "HEALTH": "688d9a35d4d21b3f750449902d409da6426773cdbc9bd1eed246aa7e12e83725",
+    "LOAD": "e47369cdfcfea688d76356962a46c77c08f8a6b0f9a9b57495a4bf7db26886f6"
   },
   "entries": [
     {
@@ -161,8 +161,8 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-12",
-      "unit_sha256": "570db6c0e94649191eb28ace304a75e64586c3673fab57c57d5f77bc446bfc86",
-      "unit_text": "`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다. ⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과 상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:218-221`), stale 전이는 `revalidateSilencedTopic(\"usdt:krw\")` 만 부르며 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-324`), 표시 경로 `usdtDisplayState` 에는 `tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`, 특히 671 행 주석). 런북도 재작성돼 2차 롤백 bullet 이 \"45초 legacy fallback 을 기다리는 절차가 아니다\"라고 못박고, 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다 (`ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-301`). 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled` 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1051-1074`) 탭 상태 문구가 \"실시간 시세를 일시적으로 제공할 수 없습니다\"를 띄운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:503-526`). legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.",
+      "unit_sha256": "c79a9fa4f260574a0736a2e244d530b1d61abb9cb8776c010ae7055b92f27a8a",
+      "unit_text": "`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다. ⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과 상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:218-221`), stale 전이는 `revalidateSilencedTopic(\"usdt:krw\")` 만 부르며 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-324`), 표시 경로 `usdtDisplayState` 에는 `tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`, 특히 671 행 주석). 런북도 재작성돼 2차 롤백 bullet 이 \"45초 legacy fallback 을 기다리는 절차가 아니다\"라고 못박고, 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다 (`ios/TOPIC_V2_RELEASE_RUNBOOK.md:346-350`). 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled` 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1051-1074`) 탭 상태 문구가 \"실시간 시세를 일시적으로 제공할 수 없습니다\"를 띄운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:503-526`). legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.",
       "classification": "code_fact",
       "detail": "45초 legacy revert 기전이 코드에서 제거됐고, 45초 무수신은 조용한 재구독 1회 + 상태 안내뿐이며 화면 값은 유지된다는 현재 iOS 동작 단정이다.",
       "provenance": [
@@ -171,7 +171,7 @@
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-324",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:503-526",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714",
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:297-301"
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:346-350"
       ]
     },
     {
@@ -576,14 +576,14 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-9",
-      "unit_sha256": "c111c6bae8c9f60de97f564a42566b2c5cae4b37aecf75205df347322d4eea7b",
-      "unit_text": "| `TOPIC_V2_RELEASE_RUNBOOK.md` MODE 2 | ✅ **해소** — 신 pin 런북에 \"45s 초과 시 자동으로 legacy 표시\" 문구 0건 | 이 표의 '실제'대로 이미 재작성돼 있다 — \"MODE 2 (tether 45초 무수신) → 조용한 재검증: 화면과 last-known은 그대로이고 배너도 없다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:264`) · \"45초 legacy fallback을 기다리는 절차가 아니다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:301`) · \"FX/KRX에는 이 시간 threshold를 적용하지 않는다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:320`). 불변식 [R-INV-1](../DECISIONS.md#r-inv-1) 과 일치 |",
+      "unit_sha256": "93cd03499f2325c18b964ccb859089dccc641826218827715589eb7591fd20a1",
+      "unit_text": "| `TOPIC_V2_RELEASE_RUNBOOK.md` MODE 2 | ✅ **해소** — 신 pin 런북에 \"45s 초과 시 자동으로 legacy 표시\" 문구 0건 | 이 표의 '실제'대로 이미 재작성돼 있다 — \"MODE 2 (tether 45초 무수신) → 조용한 재검증: 화면과 last-known은 그대로이고 배너도 없다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:313`) · \"45초 legacy fallback을 기다리는 절차가 아니다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:350`) · \"FX/KRX에는 이 시간 threshold를 적용하지 않는다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:369`). 불변식 [R-INV-1](../DECISIONS.md#r-inv-1) 과 일치 |",
       "classification": "code_fact",
       "detail": "런북 MODE 2 의 '45s 초과 시 자동으로 legacy 표시' 문구가 신 pin 런북에 존재하지 않는다는(=이미 해소) 대조 사실 단정이다.",
       "provenance": [
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:264",
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:301",
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:320"
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:313",
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:350",
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:369"
       ]
     },
     {

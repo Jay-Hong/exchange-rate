@@ -3,10 +3,10 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `875551082ccd3ac51c9de4285430660948b32773`
-- iOS 기준 commit: `c90470e0f8887387cd49c528e67edfbe635de217`
+- server 기준 commit: `bbf29cb0b74a9fd17641fbbd05cbd44eca7a2ae5`
+- iOS 기준 commit: `db545354be83e707d4cf2f403ed94108d83c73a9`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee`
+- manifest SHA: `0ab0dfebf7c69b16b7665c64e3fed68aebc3bc130672d8905887d2ea3f609f21`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 

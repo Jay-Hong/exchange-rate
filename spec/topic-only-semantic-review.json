@@ -75,7 +75,9 @@
           "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex",
           "Release GO 기록 C1(iOS `cfe06f6`) + C2: 런북 §2-d 가 요구한 **사용자 결정**을 기록했다 — IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용 3건을 초기 phased 동안 명시적으로 수용한다. 각 항목이 **무엇을 포기하는지**를 함께 적었다(특히 `limit_conn` 유보 = carrier NAT 오탐 회피 대가로 **연결 수 남용 방어 포기**). ⛔ GO 는 결정이고 활성화는 실행이라, 이 사이클은 flag 도 arming 도 바꾸지 않았다 — 운영은 여전히 양쪽 OFF 다. `/ws` 10r/s 재평가는 수용 항목이 아니라 phased 관측 의무로 분리했다. ⚠️ §2-d 삽입이 런북 24행을 밀어 서버 문서의 인용 7건이 어긋났고, **pin 전진과 같은 사이클에서** 재도출했다(`240→264` · `268-289→292-313` · `273-277→297-301` 등, `:146` 은 삽입 전이라 불변). 직전 사이클에서 이 단계를 빠뜨려 12건이 어긋났던 것을 반복하지 않았다.",
           "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=Claude Code:reviewer=OpenAI Codex",
+          "topic-only C2 통합·재결속 (서버 pin `bbf29cb` · iOS pin `db54535`). Claude Code 가 작성했다 — 런북 §2-e 삽입으로 밀린 인용 좌표 재도출, `FREE_TIER_ACCESS_MODEL_PLAN` rollout 표를 4→6단계로 재작성, USDT snapshot `timestamp` 검증 추가, pin 전진과 해시 체인 재봉인. C1/C2 를 분리한 이유는 C2 가 자기 commit hash 를 미리 pin 할 수 없기 때문이다. OpenAI Codex 독립 검토가 3라운드에 걸쳐 5건을 반려했고 전부 반영했다: (1) USDT `timestamp` 미검증 false-green, (2) 좌표 **off-by-one** — `+44` 는 산술적으로 맞았으나 **원래 인용이 이미 한 행 앞**을 가리켰고 그 오류를 그대로 옮겼다(예: MODE 1 을 가리키던 좌표가 주장은 MODE 2), (3) `:146` 은 lease hard-expiry 이고 graph purge 는 `:148`, (4) FREE_TIER ⑤ 의 arming 열이 dispatcher 축과 혼동됨 — arming 은 전 구간 OFF, (5) ⑥ 이 런북 4단계 **smoke** 를 생략. 추가로 timestamp 를 timezone-aware 가 아니라 계약대로 **KST(+09:00)** 로 잠그고(상류 `latest_rates_cache._parse_kst` 가 `astimezone(_KST)` 로 정규화하므로 false-fail 이 아니며, `dxy_topic_publisher` 문자열 분기가 원문을 통과시키는 실제 위반 지점이다) 런북 합격 기준을 probe 실제 범위와 일치시켰다 — 전체 snapshot schema 검증이 아니다. DXY shape 계약 모순(§2.2 공통 entry 의 `asset` 요구 vs 실제 legacy `{rate,timestamp,source}`)은 **선행 결함**이라 별도 슬라이스로 남긴다.",
+          "semantic-input-binding/v1:0016:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:90b5455fce36e699159d2b020aa18c5466edba0a61ad755bf9811d3fdab7cc19:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -136,7 +138,9 @@
           "Release GO 권고 + 승인 문구 정밀화: 기술적 권고는 GO 이며, 현재 사용자 규모·phased·검증된 서버 safety-stop 을 고려하면 세 위험이 초기 출시에서 수용 가능하다고 판단했다. 다만 `limit_conn` 미구현은 carrier NAT 오탐을 피하는 대신 **연결 수 남용 방어를 포기**한다는 의미까지 포함함을 명시했다. 그리고 내가 4항목으로 적었던 위험 목록을 정본 §2-d 대로 **3항목**으로 정정했다 — `/ws` 10r/s 재평가는 위험 수용 항목이 아니라 phased 중 수행할 관측 의무이고, 값 조정은 그때 다시 별도 승인 단위다.",
           "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=OpenAI Codex:reviewer=Claude Code",
           "topic-only cutover C1+C2 (서버 `8755510` · iOS `0f2a3f8`/`c90470e`). OpenAI Codex 가 의미 전이를 작성했다 — 충족된 R-CUT-1~8/13/21 과 R-HAND-19/20 을 done 으로, 해소된 R-INV-3 을 non_actionable 로 전이하고 구현이 거짓으로 만든 '미충족' 산문을 현재 동작으로 다시 썼다. R-CUT-1 의 done 은 삭제 inventory 완료만 뜻하며 arming 은 R-GATE-2/4 에 남는다. **핵심 보강은 provenance 게이트 확대다** — E_CODECHANGED 가 baseline 추출 경로만 보던 탓에 canonical 문서가 새로 인용한 파일은 변경돼도 통과했다(ios 7 경로만 감시). baseline ∪ canonical 합집합으로 바꿔 server 22 · ios 22 를 감시하고, 합집합 한 줄을 제거하면 독립 반례 스위트가 빨강이 되는 변이 앵커로 그 배선을 잠갔다. iOS `CLAUDE.md` 의 삭제된 legacy 구조 서술도 topic-only 로 교체했다(Android 이식 참조 문서). Claude Code 독립 재검토(수정 0): 합집합 배선을 직접 측정해 ios 7→22 확대를 확인했고, 변이를 직접 실행해 대조군 초록 · 변이 적중(rc=1 빨강 1건)을 실측했다 — 첫 실행의 빨강은 재검토자가 준 `TOPIC_MIGRATION_IOS_ROOT` 오버라이드가 루트 선택 시험을 깬 것이라 철회했다. R-GATE-2/4 가 `unreviewed` 로 남아 R-CUT-1=done 이 arming 을 닫지 않음을 확인했고, `ios/CLAUDE.md` 재작성을 live 코드와 대조해 `GraphConfig` 의 legacy 필드가 실제로 제거됐음을 확인했다. 전체 5681 passed · 1000 subtests · preflight 통과 · 양 리포 `git diff --check` clean.",
-          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=OpenAI Codex:reviewer=Claude Code",
+          "인증 경계 bounded E2E canary C1 (`bbf29cb`). OpenAI Codex 가 구현했다 — 호스트 실행기는 OFF 확인 → 컨테이너 probe SHA 일치 → **독립 watchdog `READY` 확인** 뒤에만 bounded ON 하고 `finally` 로 OFF 를 복원한다. watchdog 은 `start_new_session=True` 로 분리돼 실행기가 SIGKILL 돼도 살아남는다(host reboot 은 `topic_flag_watchdog.sh` 가 이미 명시 수용한 gap). probe 는 익명=유계 침묵 + registry 시작 0·유지 0, 비구독=`premium_required` + 이후 rates 외 0, 구독자=DXY REST 200 + USDT·DXY snapshot 핵심 entry 로 나눈다. 익명 합격 기준이 오류 프레임이 아니라 **침묵**인 것은 `topic_policy` ENFORCE 분기가 `return []` 이기 때문이다. Claude Code 재검토(수정 0 구간): watchdog 세션 분리와 READY 선행, 토큰 0600 정규·단일행 fail-closed, registry '시작 0 + 유지 0'(전후 delta 가 아님)을 직접 읽어 확인했다. OpenAI Codex 가 legacy rates 는 **값 변경 시에만** 발행되므로 '15초 내 두 번째 rates' 요구가 조용한 시세 구간에서 정상 서버를 떨어뜨린다는 false-fail 을 스스로 찾아 고쳤다.",
+          "semantic-input-binding/v1:0016:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:90b5455fce36e699159d2b020aa18c5466edba0a61ad755bf9811d3fdab7cc19:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -204,7 +208,9 @@
           "Release GO 권고 + 승인 문구 정밀화: 기술적 권고는 GO 이며, 현재 사용자 규모·phased·검증된 서버 safety-stop 을 고려하면 세 위험이 초기 출시에서 수용 가능하다고 판단했다. 다만 `limit_conn` 미구현은 carrier NAT 오탐을 피하는 대신 **연결 수 남용 방어를 포기**한다는 의미까지 포함함을 명시했다. 그리고 내가 4항목으로 적었던 위험 목록을 정본 §2-d 대로 **3항목**으로 정정했다 — `/ws` 10r/s 재평가는 위험 수용 항목이 아니라 phased 중 수행할 관측 의무이고, 값 조정은 그때 다시 별도 승인 단위다.",
           "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=OpenAI Codex:reviewer=Claude Code",
           "topic-only cutover C1+C2 (서버 `8755510` · iOS `0f2a3f8`/`c90470e`). OpenAI Codex 가 의미 전이를 작성했다 — 충족된 R-CUT-1~8/13/21 과 R-HAND-19/20 을 done 으로, 해소된 R-INV-3 을 non_actionable 로 전이하고 구현이 거짓으로 만든 '미충족' 산문을 현재 동작으로 다시 썼다. R-CUT-1 의 done 은 삭제 inventory 완료만 뜻하며 arming 은 R-GATE-2/4 에 남는다. **핵심 보강은 provenance 게이트 확대다** — E_CODECHANGED 가 baseline 추출 경로만 보던 탓에 canonical 문서가 새로 인용한 파일은 변경돼도 통과했다(ios 7 경로만 감시). baseline ∪ canonical 합집합으로 바꿔 server 22 · ios 22 를 감시하고, 합집합 한 줄을 제거하면 독립 반례 스위트가 빨강이 되는 변이 앵커로 그 배선을 잠갔다. iOS `CLAUDE.md` 의 삭제된 legacy 구조 서술도 topic-only 로 교체했다(Android 이식 참조 문서). Claude Code 독립 재검토(수정 0): 합집합 배선을 직접 측정해 ios 7→22 확대를 확인했고, 변이를 직접 실행해 대조군 초록 · 변이 적중(rc=1 빨강 1건)을 실측했다 — 첫 실행의 빨강은 재검토자가 준 `TOPIC_MIGRATION_IOS_ROOT` 오버라이드가 루트 선택 시험을 깬 것이라 철회했다. R-GATE-2/4 가 `unreviewed` 로 남아 R-CUT-1=done 이 arming 을 닫지 않음을 확인했고, `ios/CLAUDE.md` 재작성을 live 코드와 대조해 `GraphConfig` 의 legacy 필드가 실제로 제거됐음을 확인했다. 전체 5681 passed · 1000 subtests · preflight 통과 · 양 리포 `git diff --check` clean.",
-          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=OpenAI Codex:reviewer=Claude Code",
+          "인증 경계 bounded E2E canary C1 (`bbf29cb`). OpenAI Codex 가 구현했다 — 호스트 실행기는 OFF 확인 → 컨테이너 probe SHA 일치 → **독립 watchdog `READY` 확인** 뒤에만 bounded ON 하고 `finally` 로 OFF 를 복원한다. watchdog 은 `start_new_session=True` 로 분리돼 실행기가 SIGKILL 돼도 살아남는다(host reboot 은 `topic_flag_watchdog.sh` 가 이미 명시 수용한 gap). probe 는 익명=유계 침묵 + registry 시작 0·유지 0, 비구독=`premium_required` + 이후 rates 외 0, 구독자=DXY REST 200 + USDT·DXY snapshot 핵심 entry 로 나눈다. 익명 합격 기준이 오류 프레임이 아니라 **침묵**인 것은 `topic_policy` ENFORCE 분기가 `return []` 이기 때문이다. Claude Code 재검토(수정 0 구간): watchdog 세션 분리와 READY 선행, 토큰 0600 정규·단일행 fail-closed, registry '시작 0 + 유지 0'(전후 delta 가 아님)을 직접 읽어 확인했다. OpenAI Codex 가 legacy rates 는 **값 변경 시에만** 발행되므로 '15초 내 두 번째 rates' 요구가 조용한 시세 구간에서 정상 서버를 떨어뜨린다는 false-fail 을 스스로 찾아 고쳤다.",
+          "semantic-input-binding/v1:0016:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:90b5455fce36e699159d2b020aa18c5466edba0a61ad755bf9811d3fdab7cc19:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -271,7 +277,9 @@
           "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex",
           "Release GO 기록 C1(iOS `cfe06f6`) + C2: 런북 §2-d 가 요구한 **사용자 결정**을 기록했다 — IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용 3건을 초기 phased 동안 명시적으로 수용한다. 각 항목이 **무엇을 포기하는지**를 함께 적었다(특히 `limit_conn` 유보 = carrier NAT 오탐 회피 대가로 **연결 수 남용 방어 포기**). ⛔ GO 는 결정이고 활성화는 실행이라, 이 사이클은 flag 도 arming 도 바꾸지 않았다 — 운영은 여전히 양쪽 OFF 다. `/ws` 10r/s 재평가는 수용 항목이 아니라 phased 관측 의무로 분리했다. ⚠️ §2-d 삽입이 런북 24행을 밀어 서버 문서의 인용 7건이 어긋났고, **pin 전진과 같은 사이클에서** 재도출했다(`240→264` · `268-289→292-313` · `273-277→297-301` 등, `:146` 은 삽입 전이라 불변). 직전 사이클에서 이 단계를 빠뜨려 12건이 어긋났던 것을 반복하지 않았다.",
           "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=Claude Code:reviewer=OpenAI Codex",
+          "topic-only C2 통합·재결속 (서버 pin `bbf29cb` · iOS pin `db54535`). Claude Code 가 작성했다 — 런북 §2-e 삽입으로 밀린 인용 좌표 재도출, `FREE_TIER_ACCESS_MODEL_PLAN` rollout 표를 4→6단계로 재작성, USDT snapshot `timestamp` 검증 추가, pin 전진과 해시 체인 재봉인. C1/C2 를 분리한 이유는 C2 가 자기 commit hash 를 미리 pin 할 수 없기 때문이다. OpenAI Codex 독립 검토가 3라운드에 걸쳐 5건을 반려했고 전부 반영했다: (1) USDT `timestamp` 미검증 false-green, (2) 좌표 **off-by-one** — `+44` 는 산술적으로 맞았으나 **원래 인용이 이미 한 행 앞**을 가리켰고 그 오류를 그대로 옮겼다(예: MODE 1 을 가리키던 좌표가 주장은 MODE 2), (3) `:146` 은 lease hard-expiry 이고 graph purge 는 `:148`, (4) FREE_TIER ⑤ 의 arming 열이 dispatcher 축과 혼동됨 — arming 은 전 구간 OFF, (5) ⑥ 이 런북 4단계 **smoke** 를 생략. 추가로 timestamp 를 timezone-aware 가 아니라 계약대로 **KST(+09:00)** 로 잠그고(상류 `latest_rates_cache._parse_kst` 가 `astimezone(_KST)` 로 정규화하므로 false-fail 이 아니며, `dxy_topic_publisher` 문자열 분기가 원문을 통과시키는 실제 위반 지점이다) 런북 합격 기준을 probe 실제 범위와 일치시켰다 — 전체 snapshot schema 검증이 아니다. DXY shape 계약 모순(§2.2 공통 entry 의 `asset` 요구 vs 실제 legacy `{rate,timestamp,source}`)은 **선행 결함**이라 별도 슬라이스로 남긴다.",
+          "semantic-input-binding/v1:0016:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:90b5455fce36e699159d2b020aa18c5466edba0a61ad755bf9811d3fdab7cc19:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -344,7 +352,9 @@
           "semantic-input-binding/v1:0013:7e969c913d2905b7fd2cb89fd51cdad0dcfc2acd30e6b04263d8679d81396cf4:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:author=Claude Code:reviewer=OpenAI Codex",
           "Release GO 기록 C1(iOS `cfe06f6`) + C2: 런북 §2-d 가 요구한 **사용자 결정**을 기록했다 — IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용 3건을 초기 phased 동안 명시적으로 수용한다. 각 항목이 **무엇을 포기하는지**를 함께 적었다(특히 `limit_conn` 유보 = carrier NAT 오탐 회피 대가로 **연결 수 남용 방어 포기**). ⛔ GO 는 결정이고 활성화는 실행이라, 이 사이클은 flag 도 arming 도 바꾸지 않았다 — 운영은 여전히 양쪽 OFF 다. `/ws` 10r/s 재평가는 수용 항목이 아니라 phased 관측 의무로 분리했다. ⚠️ §2-d 삽입이 런북 24행을 밀어 서버 문서의 인용 7건이 어긋났고, **pin 전진과 같은 사이클에서** 재도출했다(`240→264` · `268-289→292-313` · `273-277→297-301` 등, `:146` 은 삽입 전이라 불변). 직전 사이클에서 이 단계를 빠뜨려 12건이 어긋났던 것을 반복하지 않았다.",
           "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=Claude Code:reviewer=OpenAI Codex",
+          "topic-only C2 통합·재결속 (서버 pin `bbf29cb` · iOS pin `db54535`). Claude Code 가 작성했다 — 런북 §2-e 삽입으로 밀린 인용 좌표 재도출, `FREE_TIER_ACCESS_MODEL_PLAN` rollout 표를 4→6단계로 재작성, USDT snapshot `timestamp` 검증 추가, pin 전진과 해시 체인 재봉인. C1/C2 를 분리한 이유는 C2 가 자기 commit hash 를 미리 pin 할 수 없기 때문이다. OpenAI Codex 독립 검토가 3라운드에 걸쳐 5건을 반려했고 전부 반영했다: (1) USDT `timestamp` 미검증 false-green, (2) 좌표 **off-by-one** — `+44` 는 산술적으로 맞았으나 **원래 인용이 이미 한 행 앞**을 가리켰고 그 오류를 그대로 옮겼다(예: MODE 1 을 가리키던 좌표가 주장은 MODE 2), (3) `:146` 은 lease hard-expiry 이고 graph purge 는 `:148`, (4) FREE_TIER ⑤ 의 arming 열이 dispatcher 축과 혼동됨 — arming 은 전 구간 OFF, (5) ⑥ 이 런북 4단계 **smoke** 를 생략. 추가로 timestamp 를 timezone-aware 가 아니라 계약대로 **KST(+09:00)** 로 잠그고(상류 `latest_rates_cache._parse_kst` 가 `astimezone(_KST)` 로 정규화하므로 false-fail 이 아니며, `dxy_topic_publisher` 문자열 분기가 원문을 통과시키는 실제 위반 지점이다) 런북 합격 기준을 probe 실제 범위와 일치시켰다 — 전체 snapshot schema 검증이 아니다. DXY shape 계약 모순(§2.2 공통 entry 의 `asset` 요구 vs 실제 legacy `{rate,timestamp,source}`)은 **선행 결함**이라 별도 슬라이스로 남긴다.",
+          "semantic-input-binding/v1:0016:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:90b5455fce36e699159d2b020aa18c5466edba0a61ad755bf9811d3fdab7cc19:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -410,7 +420,9 @@
           "Release GO 권고 + 승인 문구 정밀화: 기술적 권고는 GO 이며, 현재 사용자 규모·phased·검증된 서버 safety-stop 을 고려하면 세 위험이 초기 출시에서 수용 가능하다고 판단했다. 다만 `limit_conn` 미구현은 carrier NAT 오탐을 피하는 대신 **연결 수 남용 방어를 포기**한다는 의미까지 포함함을 명시했다. 그리고 내가 4항목으로 적었던 위험 목록을 정본 §2-d 대로 **3항목**으로 정정했다 — `/ws` 10r/s 재평가는 위험 수용 항목이 아니라 phased 중 수행할 관측 의무이고, 값 조정은 그때 다시 별도 승인 단위다.",
           "semantic-input-binding/v1:0014:3404bab6a6416309e49c2e5f2e8c26ab884affe0797519790ad6b67d62e2a5a2:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:author=OpenAI Codex:reviewer=Claude Code",
           "topic-only cutover C1+C2 (서버 `8755510` · iOS `0f2a3f8`/`c90470e`). OpenAI Codex 가 의미 전이를 작성했다 — 충족된 R-CUT-1~8/13/21 과 R-HAND-19/20 을 done 으로, 해소된 R-INV-3 을 non_actionable 로 전이하고 구현이 거짓으로 만든 '미충족' 산문을 현재 동작으로 다시 썼다. R-CUT-1 의 done 은 삭제 inventory 완료만 뜻하며 arming 은 R-GATE-2/4 에 남는다. **핵심 보강은 provenance 게이트 확대다** — E_CODECHANGED 가 baseline 추출 경로만 보던 탓에 canonical 문서가 새로 인용한 파일은 변경돼도 통과했다(ios 7 경로만 감시). baseline ∪ canonical 합집합으로 바꿔 server 22 · ios 22 를 감시하고, 합집합 한 줄을 제거하면 독립 반례 스위트가 빨강이 되는 변이 앵커로 그 배선을 잠갔다. iOS `CLAUDE.md` 의 삭제된 legacy 구조 서술도 topic-only 로 교체했다(Android 이식 참조 문서). Claude Code 독립 재검토(수정 0): 합집합 배선을 직접 측정해 ios 7→22 확대를 확인했고, 변이를 직접 실행해 대조군 초록 · 변이 적중(rc=1 빨강 1건)을 실측했다 — 첫 실행의 빨강은 재검토자가 준 `TOPIC_MIGRATION_IOS_ROOT` 오버라이드가 루트 선택 시험을 깬 것이라 철회했다. R-GATE-2/4 가 `unreviewed` 로 남아 R-CUT-1=done 이 arming 을 닫지 않음을 확인했고, `ios/CLAUDE.md` 재작성을 live 코드와 대조해 `GraphConfig` 의 legacy 필드가 실제로 제거됐음을 확인했다. 전체 5681 passed · 1000 subtests · preflight 통과 · 양 리포 `git diff --check` clean.",
-          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0015:ff12e0abaf30023638e5fb50466cedd51e6244612f79c12a6e958e73d7c2d46c:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:author=OpenAI Codex:reviewer=Claude Code",
+          "인증 경계 bounded E2E canary C1 (`bbf29cb`). OpenAI Codex 가 구현했다 — 호스트 실행기는 OFF 확인 → 컨테이너 probe SHA 일치 → **독립 watchdog `READY` 확인** 뒤에만 bounded ON 하고 `finally` 로 OFF 를 복원한다. watchdog 은 `start_new_session=True` 로 분리돼 실행기가 SIGKILL 돼도 살아남는다(host reboot 은 `topic_flag_watchdog.sh` 가 이미 명시 수용한 gap). probe 는 익명=유계 침묵 + registry 시작 0·유지 0, 비구독=`premium_required` + 이후 rates 외 0, 구독자=DXY REST 200 + USDT·DXY snapshot 핵심 entry 로 나눈다. 익명 합격 기준이 오류 프레임이 아니라 **침묵**인 것은 `topic_policy` ENFORCE 분기가 `return []` 이기 때문이다. Claude Code 재검토(수정 0 구간): watchdog 세션 분리와 READY 선행, 토큰 0600 정규·단일행 fail-closed, registry '시작 0 + 유지 0'(전후 delta 가 아님)을 직접 읽어 확인했다. OpenAI Codex 가 legacy rates 는 **값 변경 시에만** 발행되므로 '15초 내 두 번째 rates' 요구가 조용한 시세 구간에서 정상 서버를 떨어뜨린다는 false-fail 을 스스로 찾아 고쳤다.",
+          "semantic-input-binding/v1:0016:d6d17627b6c13153a1307b461a094dc3c0116dc1b4e909ba905217c705614a8c:90b5455fce36e699159d2b020aa18c5466edba0a61ad755bf9811d3fdab7cc19:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -424,21 +436,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "9bed34f09e0c770e359a4107e7657574fd418b40420eca986e673d7e8c716dee",
+    "manifest_sha256": "0ab0dfebf7c69b16b7665c64e3fed68aebc3bc130672d8905887d2ea3f609f21",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "6aa62f0b2d21967e96559ba71a8263a0c4fd4acf51422af45296148d7a163dd0",
-    "server_commit": "875551082ccd3ac51c9de4285430660948b32773",
-    "ios_commit": "c90470e0f8887387cd49c528e67edfbe635de217"
+    "lock_sha256": "7c898723ea31d216310e2c09eb4ff357f6847bf687a3470f5a244fbd33454386",
+    "server_commit": "bbf29cb0b74a9fd17641fbbd05cbd44eca7a2ae5",
+    "ios_commit": "db545354be83e707d4cf2f403ed94108d83c73a9"
   },
   "documents": {
-    "ADR": "9d187d85f0a2b2677a9762f5823fcc780560c17dc287a8acc4c1748281cafe23",
-    "CLIENT": "584d1bfd09e6f7dae1ef75814fe724f7303a71188df09fd87450762f90af754f",
-    "CUT": "e5057065f085dacb73719c333ffdda3fd60be8754c54fe94d3bd990bc9608678",
-    "HAND": "103f3e914229daec8304de26eaf4513627819a9a80097677a8038d6d375a9732",
-    "HEALTH": "cea410df482974d4e3ab1d583688643d00f68ac8491b50013eb7f7a2846e33a0",
-    "LOAD": "22b54750b484c5b5951f83ded26eeab0443c613a70b9620bdf3b7ecbd26f03fe"
+    "ADR": "a0daa1bf7b46a74f29c3bb3cc164d36f2ddacfaad61d8783a59e6668afb2a994",
+    "CLIENT": "05a8365b4ee377b23be3587e05a51c21a4e22d32947e30c1cebb6e52cf3a090f",
+    "CUT": "ddb70a4b77de14018755b6fc107bf52cda918be8dd999b5cd85f1683ffee9486",
+    "HAND": "80e5b10e40583e1bbcfa2dab4b2a9c51be2a82076859f333b454f44f6ae80b7b",
+    "HEALTH": "688d9a35d4d21b3f750449902d409da6426773cdbc9bd1eed246aa7e12e83725",
+    "LOAD": "e47369cdfcfea688d76356962a46c77c08f8a6b0f9a9b57495a4bf7db26886f6"
   },
-  "claim_ledger_sha256": "4a379adb1d99f91c52e145e6682c3b973c4bf44db84feac71e45d02c70de2470",
+  "claim_ledger_sha256": "a8623156eecdac33febcd586a75e2dedeedc7d6a59bdaa45bf4ce569e58032f5",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
