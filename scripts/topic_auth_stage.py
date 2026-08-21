@@ -126,12 +126,24 @@ def _strict_runtime_bool(live: dict, key: str) -> bool:
 
 
 def file_stage(data: bytes) -> str:
-    value = _text_value(data, AUTH_STAGE_KEY)
+    value = _text_value(data, AUTH_STAGE_KEY, required=False)
+    if value is None:
+        # app/config.py uses the same implicit default when the env key is absent.
+        return COMPATIBILITY_STAGE
     if value not in VALID_STAGES:
         raise Abort(
             f"`{AUTH_STAGE_KEY.decode()}` 값이 허용된 stage가 아니다"
             "(공백 포함 정확 일치 필요)"
         )
+    return value
+
+
+def effective_runtime_stage(value: Optional[str]) -> str:
+    """Resolve an observed runtime value using the app's exact default."""
+    if value is None:
+        return COMPATIBILITY_STAGE
+    if value not in VALID_STAGES:
+        raise Abort("런타임 WS_TOPIC_AUTH_STAGE가 허용된 exact stage가 아니다")
     return value
 
 
@@ -145,18 +157,40 @@ def _rewrite_stage(data: bytes, stage: str) -> bytes:
     return b"".join(lines)
 
 
+def _append_stage(data: bytes, stage: str) -> bytes:
+    """Append the previously absent key without normalizing unrelated bytes."""
+    row = AUTH_STAGE_KEY + b"=" + stage.encode("ascii")
+    if not data:
+        return row + b"\n"
+
+    last_lf = data.rfind(b"\n")
+    if last_lf >= 0:
+        newline = b"\r\n" if last_lf > 0 and data[last_lf - 1:last_lf] == b"\r" else b"\n"
+    elif b"\r" in data:
+        newline = b"\r"
+    else:
+        newline = b"\n"
+
+    if data.endswith((b"\r\n", b"\n", b"\r")):
+        return data + row + newline
+    return data + newline + row
+
+
 def plan_stage(data: bytes, stage: str) -> bytes:
-    """Return a byte-preserving one-key rewrite for a known auth stage."""
+    """Return a byte-preserving one-key transition for a known auth stage."""
     if stage not in VALID_STAGES:
         raise Abort(f"알 수 없는 목표 auth stage: {stage!r}")
     current = file_stage(data)
     if current == stage:
         return data
+    if not topic_flag.key_line_indexes(data, AUTH_STAGE_KEY):
+        return _append_stage(data, stage)
     return _rewrite_stage(data, stage)
 
 
 def classify_status(*, file_value: Optional[str], file_line_count: Optional[int],
-                    runtime_value: Optional[str], dispatcher_state: str,
+                    runtime_value: Optional[str], runtime_observed: bool,
+                    dispatcher_state: str,
                     dispatcher_active: Optional[bool],
                     operation_locked: Optional[bool], activation_pending: Optional[bool]) -> str:
     if operation_locked is True:
@@ -165,23 +199,33 @@ def classify_status(*, file_value: Optional[str], file_line_count: Optional[int]
         return STATE_UNKNOWN
     if activation_pending:
         return STATE_AMBIGUOUS
-    if file_line_count is None or runtime_value is None:
+    if file_line_count is None or not runtime_observed:
         return STATE_UNKNOWN
-    if file_line_count != 1:
+    if file_line_count not in (0, 1):
         return STATE_AMBIGUOUS
-    if file_value not in VALID_STAGES or runtime_value not in VALID_STAGES:
+    if file_line_count == 0:
+        if file_value is not None:
+            return STATE_DRIFTED
+        effective_file = COMPATIBILITY_STAGE
+    else:
+        if file_value not in VALID_STAGES:
+            return STATE_DRIFTED
+        effective_file = file_value
+    try:
+        effective_runtime = effective_runtime_stage(runtime_value)
+    except Abort:
         return STATE_DRIFTED
-    if file_value != runtime_value:
+    if effective_file != effective_runtime:
         return STATE_PENDING_RECREATE
     if dispatcher_active is True:
-        return STATE_FINAL_ACTIVE if file_value == FINAL_STAGE else STATE_UNSAFE_ACTIVE
+        return STATE_FINAL_ACTIVE if effective_file == FINAL_STAGE else STATE_UNSAFE_ACTIVE
     if dispatcher_active is None:
         return STATE_UNKNOWN
     if dispatcher_state != topic_flag.STATE_OFF:
         return STATE_DRIFTED
-    if file_value == FINAL_STAGE:
+    if effective_file == FINAL_STAGE:
         return STATE_FINAL
-    if file_value == COMPATIBILITY_STAGE:
+    if effective_file == COMPATIBILITY_STAGE:
         return STATE_COMPATIBILITY
     return STATE_INTERMEDIATE
 
@@ -217,10 +261,7 @@ def _require_runtime_environment(live: dict) -> str:
         raise Abort("런타임 KRX_CLIENT_DISTRIBUTION_ENABLED가 true — 이 전환에서는 OFF여야 한다")
     if not _strict_runtime_bool(live, "FX_TOPIC_ENABLED"):
         raise Abort("런타임 FX_TOPIC_ENABLED가 true가 아니다")
-    stage = live.get("WS_TOPIC_AUTH_STAGE")
-    if stage not in VALID_STAGES:
-        raise Abort("런타임 WS_TOPIC_AUTH_STAGE가 허용된 exact stage가 아니다")
-    return stage
+    return effective_runtime_stage(live.get("WS_TOPIC_AUTH_STAGE"))
 
 
 async def preflight(target: Target, env_path: Path) -> tuple[bytes, str]:
@@ -252,7 +293,7 @@ async def preflight(target: Target, env_path: Path) -> tuple[bytes, str]:
     state = topic_flag.classify(observation)
     if state != topic_flag.STATE_OFF:
         raise Abort(f"dispatcher 교차 검증이 OFF가 아니다: {state}")
-    if observation.get("auth_stage") != runtime_stage:
+    if effective_runtime_stage(observation.get("auth_stage")) != runtime_stage:
         raise Abort("런타임 auth stage가 두 관측 사이에 바뀌었다")
     return data, runtime_stage
 
@@ -263,18 +304,29 @@ async def _verify(target: Target, env_path: Path, planned: bytes, expected_stage
     live = await _runtime_values(target)
     after = env_path.read_bytes()
     dispatcher_state = topic_flag.classify(observation)
+    file_raw = _text_value(before, AUTH_STAGE_KEY, required=False)
+    runtime_raw = live.get("WS_TOPIC_AUTH_STAGE")
+    observed_stage = (
+        effective_runtime_stage(observation.get("auth_stage"))
+        if dispatcher_state == topic_flag.STATE_OFF
+        else None
+    )
+    effective_file = file_stage(before)
+    effective_runtime = _require_runtime_environment(live)
     ok = (
         before == planned
         and after == planned
-        and file_stage(before) == expected_stage
+        and effective_file == expected_stage
         and dispatcher_state == topic_flag.STATE_OFF
-        and observation.get("auth_stage") == expected_stage
-        and _require_runtime_environment(live) == expected_stage
+        and observed_stage == expected_stage
+        and effective_runtime == expected_stage
     )
     result = {
         "env_matches_plan": before == planned and after == planned,
-        "file_stage": file_stage(before),
-        "runtime_stage": live.get("WS_TOPIC_AUTH_STAGE"),
+        "file_stage": effective_file,
+        "runtime_stage": effective_runtime,
+        "file_stage_explicit": file_raw is not None,
+        "runtime_stage_explicit": runtime_raw is not None,
         "dispatcher_state": dispatcher_state,
     }
     if not ok:
@@ -375,8 +427,10 @@ async def report_status(target: Target = PRODUCTION_TARGET, *,
     try:
         live = await _runtime_values(target)
         runtime_value = live.get("WS_TOPIC_AUTH_STAGE")
+        runtime_observed = True
     except Abort:
         runtime_value = None
+        runtime_observed = False
     observation = await topic_flag.measure(target, env_path, data)
     dispatcher_state = topic_flag.classify(observation)
     runtime_signals = (
@@ -402,6 +456,7 @@ async def report_status(target: Target = PRODUCTION_TARGET, *,
         file_value=file_value,
         file_line_count=len(indexes),
         runtime_value=runtime_value,
+        runtime_observed=runtime_observed,
         dispatcher_state=dispatcher_state,
         dispatcher_active=dispatcher_active,
         operation_locked=operation_locked,
@@ -412,6 +467,17 @@ async def report_status(target: Target = PRODUCTION_TARGET, *,
         "state": state,
         "file_stage": file_value,
         "runtime_stage": runtime_value,
+        "effective_file_stage": (
+            COMPATIBILITY_STAGE if not indexes else
+            file_value if len(indexes) == 1 and file_value in VALID_STAGES else None
+        ),
+        "effective_runtime_stage": (
+            effective_runtime_stage(runtime_value)
+            if runtime_observed and runtime_value in (None, *VALID_STAGES)
+            else None
+        ),
+        "file_stage_explicit": len(indexes) == 1,
+        "runtime_stage_explicit": runtime_value is not None if runtime_observed else None,
         "dispatcher_state": dispatcher_state,
         "operation_locked": operation_locked,
         "activation_pending": activation_pending,

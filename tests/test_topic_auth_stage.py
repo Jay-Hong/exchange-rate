@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import subprocess
+import sys
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -16,15 +18,16 @@ from scripts.env_operation_lock import env_operation_lock
 
 def env_bytes(*, stage=topic_auth_stage.COMPATIBILITY_STAGE, dispatcher="false",
               krx="false", fx="true", env="production", admin="test-secret"):
-    return (
-        f"ENV={env}\n"
-        f"ADMIN_PASSWORD={admin}\n"
-        f"KRX_CLIENT_DISTRIBUTION_ENABLED={krx}\n"
-        f"FX_TOPIC_ENABLED={fx}\n"
-        f"WS_TOPIC_AUTH_STAGE={stage}\n"
-        f"TOPIC_DISPATCHER_ENABLED={dispatcher}\n"
-        "OTHER=preserve-me\n"
-    ).encode()
+    rows = [
+        f"ENV={env}",
+        f"ADMIN_PASSWORD={admin}",
+        f"KRX_CLIENT_DISTRIBUTION_ENABLED={krx}",
+        f"FX_TOPIC_ENABLED={fx}",
+    ]
+    if stage is not None:
+        rows.append(f"WS_TOPIC_AUTH_STAGE={stage}")
+    rows.extend((f"TOPIC_DISPATCHER_ENABLED={dispatcher}", "OTHER=preserve-me"))
+    return ("\n".join(rows) + "\n").encode()
 
 
 def live_values(*, stage=topic_auth_stage.COMPATIBILITY_STAGE, dispatcher="false",
@@ -40,13 +43,18 @@ def live_values(*, stage=topic_auth_stage.COMPATIBILITY_STAGE, dispatcher="false
 
 def topic_observation(data, *, stage=topic_auth_stage.COMPATIBILITY_STAGE,
                       runtime=False):
+    raw_file_stage = topic_flag.read_key_value(data, topic_auth_stage.AUTH_STAGE_KEY)
     return {
         "other_tool_backup": False,
         "file_readable": True,
         "file_value": topic_flag.read_key_value(data),
         "file_line_count": len(topic_flag.key_line_indexes(data)),
-        "file_auth_stage": topic_auth_stage.file_stage(data),
-        "file_auth_stage_line_count": 1,
+        "file_auth_stage": (
+            raw_file_stage.decode("utf-8") if raw_file_stage is not None else None
+        ),
+        "file_auth_stage_line_count": len(topic_flag.key_line_indexes(
+            data, topic_auth_stage.AUTH_STAGE_KEY
+        )),
         "container": runtime,
         "inspect": runtime,
         "dispatcher_endpoint": runtime,
@@ -74,7 +82,6 @@ class TestPlanning(unittest.TestCase):
 
     def test_stage_must_be_one_exact_valid_line(self):
         invalid = (
-            b"A=1\n",
             b"WS_TOPIC_AUTH_STAGE=compatibility\nWS_TOPIC_AUTH_STAGE=compatibility\n",
             b"WS_TOPIC_AUTH_STAGE=compatibility \n",
             b"WS_TOPIC_AUTH_STAGE=unknown\n",
@@ -83,6 +90,50 @@ class TestPlanning(unittest.TestCase):
         for data in invalid:
             with self.subTest(data=data), self.assertRaises(topic_auth_stage.Abort):
                 topic_auth_stage.plan_stage(data, topic_auth_stage.FINAL_STAGE)
+
+    def test_absent_stage_is_the_app_compatibility_default(self):
+        original = b"A=1\n"
+        self.assertEqual(
+            topic_auth_stage.file_stage(original),
+            topic_auth_stage.COMPATIBILITY_STAGE,
+        )
+        self.assertIs(topic_auth_stage.plan_stage(
+            original, topic_auth_stage.COMPATIBILITY_STAGE
+        ), original)
+
+    def test_absent_stage_append_preserves_newline_style_and_final_newline(self):
+        key = b"WS_TOPIC_AUTH_STAGE=enforce_authenticated_premium"
+        cases = (
+            (b"A=1\nB=2\n", b"A=1\nB=2\n" + key + b"\n"),
+            (b"A=1\r\nB=2\r\n", b"A=1\r\nB=2\r\n" + key + b"\r\n"),
+            (b"A=1\nB=2", b"A=1\nB=2\n" + key),
+            (b"A=1\r\nB=2", b"A=1\r\nB=2\r\n" + key),
+            (b"", key + b"\n"),
+        )
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(
+                    topic_auth_stage.plan_stage(original, topic_auth_stage.FINAL_STAGE),
+                    expected,
+                )
+
+    def test_app_config_defaults_an_absent_stage_to_compatibility(self):
+        environment = os.environ.copy()
+        environment.pop("WS_TOPIC_AUTH_STAGE", None)
+        code = """
+from unittest.mock import patch
+with patch('dotenv.load_dotenv', return_value=False):
+    from app.config import WS_TOPIC_AUTH_STAGE
+print(WS_TOPIC_AUTH_STAGE.value)
+"""
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(completed.stdout.strip(), topic_auth_stage.COMPATIBILITY_STAGE)
 
     def test_all_app_stages_are_valid_sources_and_targets(self):
         for source in topic_auth_stage.VALID_STAGES:
@@ -105,11 +156,12 @@ class TestStatusClassification(unittest.TestCase):
                  runtime_value=topic_auth_stage.FINAL_STAGE,
                  dispatcher_state=topic_flag.STATE_OFF,
                  dispatcher_active=False,
-                 locked=False, pending=False, count=1):
+                 locked=False, pending=False, count=1, runtime_observed=True):
         return topic_auth_stage.classify_status(
             file_value=file_value,
             file_line_count=count,
             runtime_value=runtime_value,
+            runtime_observed=runtime_observed,
             dispatcher_state=dispatcher_state,
             dispatcher_active=dispatcher_active,
             operation_locked=locked,
@@ -162,6 +214,23 @@ class TestStatusClassification(unittest.TestCase):
         self.assertEqual(self.classify(pending=True), topic_auth_stage.STATE_AMBIGUOUS)
         self.assertEqual(self.classify(count=2), topic_auth_stage.STATE_AMBIGUOUS)
 
+    def test_absent_file_and_observed_absent_runtime_are_compatibility(self):
+        self.assertEqual(
+            self.classify(file_value=None, runtime_value=None, count=0),
+            topic_auth_stage.STATE_COMPATIBILITY,
+        )
+
+    def test_runtime_observation_failure_is_unknown_not_compatibility(self):
+        self.assertEqual(
+            self.classify(
+                file_value=None,
+                runtime_value=None,
+                count=0,
+                runtime_observed=False,
+            ),
+            topic_auth_stage.STATE_UNKNOWN,
+        )
+
 
 class TestPreflight(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -189,6 +258,17 @@ class TestPreflight(unittest.IsolatedAsyncioTestCase):
 
     async def test_returns_exact_snapshot_and_running_stage(self):
         data, stage = await self.run_preflight()
+        self.assertEqual(data, self.path.read_bytes())
+        self.assertEqual(stage, topic_auth_stage.COMPATIBILITY_STAGE)
+
+    async def test_absent_file_and_runtime_stage_use_the_app_default(self):
+        self.path.write_bytes(env_bytes(stage=None))
+        data, stage = await self.run_preflight(
+            live=live_values(stage=None),
+            observation=topic_observation(
+                self.path.read_bytes(), stage=None
+            ),
+        )
         self.assertEqual(data, self.path.read_bytes())
         self.assertEqual(stage, topic_auth_stage.COMPATIBILITY_STAGE)
 
@@ -291,6 +371,28 @@ class TestPostRecreateVerification(unittest.IsolatedAsyncioTestCase):
                 self.target, self.path, self.final, topic_auth_stage.FINAL_STAGE
             )
 
+    async def test_absent_file_and_runtime_stage_verify_as_compatibility(self):
+        implicit = env_bytes(stage=None)
+        self.path.write_bytes(implicit)
+        with patch.object(
+                 topic_flag, "measure",
+                 AsyncMock(return_value=topic_observation(implicit, stage=None)),
+             ), patch.object(
+                 topic_auth_stage, "_runtime_values",
+                 AsyncMock(return_value=live_values(stage=None)),
+             ):
+            result = await topic_auth_stage._verify(
+                self.target,
+                self.path,
+                implicit,
+                topic_auth_stage.COMPATIBILITY_STAGE,
+            )
+
+        self.assertEqual(result["file_stage"], topic_auth_stage.COMPATIBILITY_STAGE)
+        self.assertEqual(result["runtime_stage"], topic_auth_stage.COMPATIBILITY_STAGE)
+        self.assertFalse(result["file_stage_explicit"])
+        self.assertFalse(result["runtime_stage_explicit"])
+
 
 class TestTransactions(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -326,6 +428,41 @@ class TestTransactions(unittest.IsolatedAsyncioTestCase):
         recreate.assert_awaited_once()
         verify.assert_awaited_once()
 
+    async def test_final_transition_appends_an_absent_stage(self):
+        original = env_bytes(stage=None)
+        self.path.write_bytes(original)
+        verified = {
+            "env_matches_plan": True,
+            "file_stage": topic_auth_stage.FINAL_STAGE,
+            "runtime_stage": topic_auth_stage.FINAL_STAGE,
+            "dispatcher_state": topic_flag.STATE_OFF,
+        }
+        with patch.object(
+                 topic_auth_stage, "preflight",
+                 AsyncMock(return_value=(original, topic_auth_stage.COMPATIBILITY_STAGE)),
+             ), patch.object(
+                 topic_auth_stage, "recreate_and_verify_health", AsyncMock()
+             ) as recreate, patch.object(
+                 topic_auth_stage, "_verify", AsyncMock(return_value=verified)
+             ):
+            result = await topic_auth_stage.transition(
+                topic_auth_stage.FINAL_STAGE, self.target, env_path=self.path
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["wrote"])
+        self.assertEqual(
+            topic_flag.key_line_indexes(
+                self.path.read_bytes(), topic_auth_stage.AUTH_STAGE_KEY
+            ),
+            [6],
+        )
+        self.assertEqual(
+            topic_auth_stage.file_stage(self.path.read_bytes()),
+            topic_auth_stage.FINAL_STAGE,
+        )
+        recreate.assert_awaited_once()
+
     async def test_stable_target_is_noop_without_recreate(self):
         final = env_bytes(stage=topic_auth_stage.FINAL_STAGE)
         self.path.write_bytes(final)
@@ -350,6 +487,33 @@ class TestTransactions(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["wrote"])
         recreate.assert_not_awaited()
         verify.assert_awaited_once()
+
+    async def test_implicit_compatibility_target_is_noop_without_recreate(self):
+        implicit = env_bytes(stage=None)
+        self.path.write_bytes(implicit)
+        verified = {
+            "env_matches_plan": True,
+            "file_stage": topic_auth_stage.COMPATIBILITY_STAGE,
+            "runtime_stage": topic_auth_stage.COMPATIBILITY_STAGE,
+            "dispatcher_state": topic_flag.STATE_OFF,
+        }
+        recreate = AsyncMock()
+        with patch.object(
+                 topic_auth_stage, "preflight",
+                 AsyncMock(return_value=(implicit, topic_auth_stage.COMPATIBILITY_STAGE)),
+             ), patch.object(
+                 topic_auth_stage, "recreate_and_verify_health", recreate
+             ), patch.object(
+                 topic_auth_stage, "_verify", AsyncMock(return_value=verified)
+             ):
+            result = await topic_auth_stage.transition(
+                topic_auth_stage.COMPATIBILITY_STAGE, self.target, env_path=self.path
+            )
+
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["wrote"])
+        self.assertEqual(self.path.read_bytes(), implicit)
+        recreate.assert_not_awaited()
 
     async def test_failure_restores_the_stage_that_was_running(self):
         original = self.path.read_bytes()
@@ -377,6 +541,39 @@ class TestTransactions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             topic_auth_stage.file_stage(self.path.read_bytes()),
             topic_auth_stage.COMPATIBILITY_STAGE,
+        )
+        self.assertEqual(recreate.await_count, 2)
+
+    async def test_failed_final_transition_removes_the_inserted_stage_key(self):
+        original = env_bytes(stage=None)
+        self.path.write_bytes(original)
+        rollback_verified = {
+            "env_matches_plan": True,
+            "file_stage": topic_auth_stage.COMPATIBILITY_STAGE,
+            "runtime_stage": topic_auth_stage.COMPATIBILITY_STAGE,
+            "dispatcher_state": topic_flag.STATE_OFF,
+        }
+        with patch.object(
+                 topic_auth_stage, "preflight",
+                 AsyncMock(return_value=(original, topic_auth_stage.COMPATIBILITY_STAGE)),
+             ), patch.object(
+                 topic_auth_stage, "recreate_and_verify_health", AsyncMock()
+             ) as recreate, patch.object(
+                 topic_auth_stage, "_verify",
+                 AsyncMock(side_effect=[topic_auth_stage.Abort("injected"), rollback_verified]),
+             ):
+            result = await topic_auth_stage.transition(
+                topic_auth_stage.FINAL_STAGE, self.target, env_path=self.path
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rollback"]["ok"], result)
+        self.assertEqual(self.path.read_bytes(), original)
+        self.assertEqual(
+            topic_flag.key_line_indexes(
+                self.path.read_bytes(), topic_auth_stage.AUTH_STAGE_KEY
+            ),
+            [],
         )
         self.assertEqual(recreate.await_count, 2)
 
@@ -497,6 +694,53 @@ class TestTransactions(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["rollback"]["ok"], result)
         self.assertEqual(self.path.read_bytes(), original)
         recreate.assert_awaited_once()
+
+
+class TestStatusReport(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.path = Path(self.temp.name) / ".env"
+        self.implicit = env_bytes(stage=None)
+        self.path.write_bytes(self.implicit)
+        self.target = Target(container="test-app", project="test", env_file=self.path)
+
+    async def report(self, runtime_values):
+        observation = topic_observation(self.implicit, stage=None)
+        with patch.object(topic_flag, "preflight_common", AsyncMock()), \
+             patch.object(topic_flag, "measure", AsyncMock(return_value=observation)), \
+             patch.object(topic_auth_stage, "_runtime_values", runtime_values), \
+             patch.object(topic_auth_stage, "env_operation_is_locked", return_value=False), \
+             patch.object(
+                 topic_auth_stage, "topic_flag_pending_entry_exists", return_value=False
+             ):
+            return await topic_auth_stage.report_status(
+                self.target, env_path=self.path
+            )
+
+    async def test_absent_file_and_observed_runtime_key_report_compatibility(self):
+        result = await self.report(AsyncMock(return_value=live_values(stage=None)))
+
+        self.assertEqual(result["state"], topic_auth_stage.STATE_COMPATIBILITY)
+        self.assertIsNone(result["file_stage"])
+        self.assertIsNone(result["runtime_stage"])
+        self.assertEqual(
+            result["effective_file_stage"], topic_auth_stage.COMPATIBILITY_STAGE
+        )
+        self.assertEqual(
+            result["effective_runtime_stage"], topic_auth_stage.COMPATIBILITY_STAGE
+        )
+        self.assertFalse(result["file_stage_explicit"])
+        self.assertFalse(result["runtime_stage_explicit"])
+
+    async def test_runtime_collection_failure_reports_unknown(self):
+        result = await self.report(
+            AsyncMock(side_effect=topic_auth_stage.Abort("injected observation failure"))
+        )
+
+        self.assertEqual(result["state"], topic_auth_stage.STATE_UNKNOWN)
+        self.assertIsNone(result["effective_runtime_stage"])
+        self.assertIsNone(result["runtime_stage_explicit"])
 
 
 class TestCliLock(unittest.TestCase):
