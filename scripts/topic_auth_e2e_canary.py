@@ -5,8 +5,10 @@ generator, no shared env backup, and no permanent activation.  It arms the
 independent topic flag watchdog, enables the dispatcher, executes a functional
 probe inside the running app container, then converges to OFF in ``finally``.
 
-The watchdog remains the SIGKILL/OOM recovery owner.  A host reboot is the
-same explicitly accepted gap documented by ``topic_flag_watchdog.sh``.
+The watchdog remains the recovery owner after ordinary parent exit or direct
+SIGKILL.  Parent-only OOM selection also survives, but system/cgroup OOM may
+kill the watchdog lineage too.  Host reboot is the same explicitly accepted
+gap documented by ``topic_flag_watchdog.sh``.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import getpass
 import hashlib
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -196,6 +199,21 @@ def _new_artifact_paths() -> tuple[Path, Path]:
     return watchdog_log, artifact
 
 
+def _kill_unready_watchdog(process: subprocess.Popen) -> Optional[str]:
+    """Remove the detached session when arming fails before any flag write."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as exc:
+        return f"watchdog session 종료 실패({type(exc).__name__})"
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return "watchdog session이 SIGKILL 뒤에도 종료되지 않았다"
+    return None
+
+
 def arm_watchdog(
     fire_at: int,
     contract_at: int,
@@ -214,19 +232,27 @@ def arm_watchdog(
         start_new_session=True,
         close_fds=True,
     )
-    deadline = clock() + WATCHDOG_READY_TIMEOUT_SECONDS
-    text = ""
-    while clock() < deadline:
-        if log_path.exists():
-            text = log_path.read_text(encoding="utf-8", errors="replace")
-            if f"READY pid={process.pid} " in text:
-                return process
-        if process.poll() is not None:
+    try:
+        deadline = clock() + WATCHDOG_READY_TIMEOUT_SECONDS
+        text = ""
+        while clock() < deadline:
+            if log_path.exists():
+                text = log_path.read_text(encoding="utf-8", errors="replace")
+                if f"READY pid={process.pid} " in text:
+                    return process
+            if process.poll() is not None:
+                raise CanaryFailure(
+                    f"watchdog가 READY 전에 종료했다(exit={process.returncode})"
+                )
+            sleeper(0.1)
+        raise CanaryFailure("watchdog READY를 확인하지 못했다")
+    except BaseException as exc:
+        cleanup_error = _kill_unready_watchdog(process)
+        if cleanup_error is not None:
             raise CanaryFailure(
-                f"watchdog가 READY 전에 종료했다(exit={process.returncode})"
-            )
-        sleeper(0.1)
-    raise CanaryFailure("watchdog READY를 확인하지 못했다")
+                f"watchdog READY 실패 후 정리도 실패했다: {cleanup_error}"
+            ) from exc
+        raise
 
 
 def run_container_probe(

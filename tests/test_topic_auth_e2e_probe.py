@@ -202,8 +202,8 @@ class TestWireValidators(unittest.TestCase):
             lambda row: row.__setitem__("timestamp", "2026-08-21T14:30:00"),   # naive
             lambda row: row.__setitem__("timestamp", "not-a-timestamp"),
             lambda row: row.__setitem__("timestamp", 1755780600),              # 숫자
-            # ⛔ 계약은 `ISO8601 KST` 다 — `+00:00` 은 같은 순간이지만 계약 위반이고,
-            #    aware 검사만으로는 통과한다(dxy 문자열 분기가 원문을 통과시키는 경로).
+            # ⛔ 계약은 `ISO8601 KST` 다. publisher가 KST로 정규화하므로 다른 offset은
+            #    배포 drift, 우회 producer, 또는 정규화 회귀다.
             lambda row: row.__setitem__("timestamp", "2026-08-21T05:30:00+00:00"),
         ):
             bad = json.loads(json.dumps(USDT_SNAPSHOT))

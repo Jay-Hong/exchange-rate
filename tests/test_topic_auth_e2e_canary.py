@@ -137,6 +137,36 @@ class TestWatchdogArming(unittest.TestCase):
         self.assertTrue(kwargs_seen["close_fds"])
         self.assertIs(kwargs_seen["stdin"], canary.subprocess.DEVNULL)
 
+    def test_ready_timeout_kills_the_detached_session(self):
+        process = SimpleNamespace(pid=4321, returncode=None, poll=lambda: None)
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(canary, "WATCHDOG_READY_TIMEOUT_SECONDS", 0), \
+             patch.object(canary, "_kill_unready_watchdog", return_value=None) as kill, \
+             self.assertRaisesRegex(canary.CanaryFailure, "READY"):
+            canary.arm_watchdog(
+                1000,
+                1500,
+                Path(temp) / "watchdog.log",
+                popen=lambda *args, **kwargs: process,
+                clock=lambda: 0.0,
+                sleeper=lambda _: None,
+            )
+        kill.assert_called_once_with(process)
+
+    @unittest.skipUnless(hasattr(os, "killpg"), "requires POSIX process groups")
+    def test_unready_watchdog_cleanup_terminates_its_session(self):
+        process = canary.subprocess.Popen(
+            [canary.sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+        )
+        try:
+            self.assertIsNone(canary._kill_unready_watchdog(process))
+            self.assertIsNotNone(process.poll())
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
+
 
 class TestCanaryTransaction(unittest.TestCase):
     def setUp(self):

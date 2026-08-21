@@ -182,11 +182,9 @@ KST = timedelta(hours=9)
 def _require_kst_iso8601(raw, label: str) -> None:
     """계약은 `ISO8601 KST` 다 — timezone-aware 만으로는 계약을 잠그지 못한다.
 
-    ⛔ `+00:00` 은 같은 순간을 나타내지만 계약 위반이다. 실제로 통과할 수 있는 이유는
-       `dxy_topic_publisher` 의 **문자열 분기**가 원문을 그대로 통과시키기 때문이다
-       (datetime 분기와 달리 변환하지 않는다). 상류 `latest_rates_cache` 는
-       `astimezone(_KST)` 로 정규화하므로 정상 경로는 항상 `+09:00` 이다 —
-       아니면 그게 잡아야 할 결함이다.
+    ⛔ `+00:00` 은 같은 순간을 나타내지만 wire 표현 계약 위반이다. publisher는 datetime과
+       문자열 입력을 모두 KST로 정규화한다. 따라서 다른 offset이 관측되면 배포 이미지 drift,
+       우회 producer, 또는 정규화 회귀를 잡아야 한다.
     """
     if not isinstance(raw, str):
         raise ProbeFailure(f"{label}가 문자열이 아니다")

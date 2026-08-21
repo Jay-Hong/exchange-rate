@@ -257,7 +257,7 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
 }
 ```
 
-### 2.2 entry shape (모든 그룹 공통)
+### 2.2 source-rate entry shape (§2.3~§2.5 공통)
 
 ```jsonc
 {
@@ -271,6 +271,9 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
 - Entry 식별자 = **`(source, asset)` tuple**. 같은 source가 다른 asset 가능.
 - 서버는 표시명/아이콘/색상/정렬 **미전송**. 단말이 `(source, asset)`로 자체 registry lookup. 새 source 추가 시 단말 registry 갱신.
 - **`rate_changed_at`(optional, ISO8601 KST)**: `usdt_krw` 거래소 + `krx:usd-krw-futures` topic entry의 정밀 변경 시각(Redis-served 시). 이들 `timestamp`는 `seen_at`(5초 bucket)일 수 있어 merge ordering은 이 필드를 우선(§5). bank/investing/FX entry엔 없음(`timestamp`가 이미 정밀). client는 항상 `rate_changed_at ?? timestamp` 사용.
+
+`dxy:spot`은 `(source, asset)` source-rate가 아니라 단일 market index이므로 이 공통 shape의
+예외다. §2.6의 legacy-compatible `DxyLiveTick` shape를 사용한다.
 
 ### 2.3 `fx:<asset>` data
 
@@ -320,7 +323,24 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
     ⚠️ 클라의 lease·request timeout 소비는 2026-08-02~03 에 land 했다(그건 제거 조건이 아니라
     활성화 조건이었다).
 
-**snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` = 1 entry. 작음.
+### 2.6 `dxy:spot` data
+
+```jsonc
+"data": {
+  "dxy": {
+    "rate": 104.52,
+    "timestamp": "2026-08-21T14:30:00+09:00",
+    "source": "investing"
+  }
+}
+```
+
+- DXY는 통화쌍이 아닌 단일 market index라 `asset`이 없다. 식별자는 topic 자체(`dxy:spot`)이고,
+  source는 `investing` / `cnbc` / `yahoo` 중 실제 공급자다.
+- 이 shape는 legacy `rates.data.indices.dxy`와 동일하며 iOS `DxyLiveTick`이 REST/WS에서 함께
+  소비한다. `timestamp`는 서버가 ISO-8601 KST(`+09:00`)로 정규화한다.
+
+**snapshot 크기(레이아웃 참고)**: `fx:*` = 은행 ≤8(Citi 제외) + reference 1. `usdt:krw` = 거래소 5 + 은행 2 + reference 1 = ≤8 entry. `krx:*` / `dxy:spot` = 각각 1 entry. 작음.
 
 ## 3. Bootstrap (초기 상태 획득)
 
@@ -335,7 +355,7 @@ flag-off 의 전부-rejected ack / **무토큰(§E1) 구독**.
 **REST bootstrap (WS 미연결/실패 시 권장 fallback)** — v2 endpoint:
 
 ```text
-GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw} (+ krx:usd-krw-futures — G2∧G3 on **이고 그 사용자에게 entitlement가 있을 때만**, 아니면 404 unknown_topic)
+GET /api/v2/topics/snapshot?topic=<topic>     // topic ∈ {fx:usd-krw, fx:jpy-krw, fx:eur-krw, usdt:krw, dxy:spot} (+ krx:usd-krw-futures — G2∧G3 on **이고 그 사용자에게 entitlement가 있을 때만**, 아니면 404 unknown_topic)
 Authorization: Bearer <Firebase ID token>     // 필수 (2026-07-25~)
 ```
 

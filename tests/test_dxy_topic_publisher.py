@@ -39,12 +39,17 @@ class TestDxyPayload(unittest.TestCase):
             },
         )
 
-    def test_timezone_aware_datetime_is_normalized(self):
-        raw = dict(ENTRY, timestamp=datetime(2026, 8, 21, tzinfo=timezone.utc))
-        self.assertEqual(
-            normalize_dxy_topic_entry(raw)["timestamp"],
+    def test_timezone_aware_input_is_normalized_to_kst(self):
+        for timestamp in (
+            datetime(2026, 8, 21, tzinfo=timezone.utc),
             "2026-08-21T00:00:00+00:00",
-        )
+        ):
+            with self.subTest(timestamp=timestamp):
+                raw = dict(ENTRY, timestamp=timestamp)
+                self.assertEqual(
+                    normalize_dxy_topic_entry(raw)["timestamp"],
+                    "2026-08-21T09:00:00+09:00",
+                )
 
     def test_malformed_entries_are_rejected(self):
         cases = (

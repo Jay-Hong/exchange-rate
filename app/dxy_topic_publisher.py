@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from typing import Any, Callable, Dict, Optional
 
@@ -20,6 +20,7 @@ logger = logging.getLogger("exchange_rate.dxy_topic")
 DXY_TOPIC = "dxy:spot"
 DXY_INSTRUMENT = "dxy"
 DXY_SOURCES = frozenset({"investing", "cnbc", "yahoo"})
+_KST = timezone(timedelta(hours=9))
 
 # asyncio loop은 Task를 약한 참조로만 보유할 수 있다. live publish가 socket send를
 # 기다리는 동안 수집되지 않도록 완료 시점까지 강한 참조를 유지한다.
@@ -52,7 +53,7 @@ def normalize_dxy_topic_entry(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(raw_timestamp, datetime):
         if raw_timestamp.tzinfo is None or raw_timestamp.utcoffset() is None:
             return None
-        timestamp = raw_timestamp.isoformat()
+        parsed = raw_timestamp
     elif isinstance(raw_timestamp, str):
         try:
             parsed = datetime.fromisoformat(raw_timestamp)
@@ -60,9 +61,11 @@ def normalize_dxy_topic_entry(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return None
         if parsed.tzinfo is None or parsed.utcoffset() is None:
             return None
-        timestamp = raw_timestamp
     else:
         return None
+    # Topic wire 계약은 ISO-8601 KST다. 같은 instant의 UTC 문자열도 원문 그대로
+    # 통과시키지 않고 여기서 단일 표현으로 수렴시킨다.
+    timestamp = parsed.astimezone(_KST).isoformat()
 
     return {"rate": rate, "timestamp": timestamp, "source": source}
 
