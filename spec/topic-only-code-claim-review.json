@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851",
+    "manifest_sha256": "2c709cf36eb90b5ee01c0d9d54b89f370d7146535e003fd6e9a8a3fc26f825fc",
     "baseline_sha256": "6b13ab5a5a2a0317860438b3483e0ab053c6b5a42b4ac34efc5e7c2ab7a3ecf2",
-    "lock_sha256": "db5baa6ee9bb5e5242d90bf6e937168dba3b3aa486fece136b02ea3343d7f7ef",
+    "lock_sha256": "c87f1b0decb1018751cd394da0c1a0a1de2d90cf551e9d83c8aaffb27c43909f",
     "server_commit": "5429d0f78e44aa467d9acc4487585be5fd31cad9",
-    "ios_commit": "9ddc6b00a9580647031e0a06ae18d2a16002c2eb"
+    "ios_commit": "415c20f3483d0a83d347aee4801052ccda1d5258"
   },
   "documents": {
-    "ADR": "d5cb707512173820697dd7841258aa3c4195523ba7d493c54905195d89d38086",
-    "CLIENT": "01f9e7da28ec75967effc8fc4726d9f127b1e7e466b629ffc19fc3b64919c9e7",
-    "CUT": "222243fb15b5da2c17bcf69ee286a5e4cf6e796a93c38049aae3652b67695fab",
-    "HAND": "8278a663532b6549521375768ec85f3793f33de5ff4263277be2ba04bee0fa6c",
-    "HEALTH": "4e086f7c469f8a5caedcfd7b90c426d08a49be209ff3f9babf4a8a84596c3617",
-    "LOAD": "16761cdce347c9c57e83410c9323daa9762e0c5e335d61436eee0f3c7d02d7db"
+    "ADR": "504f0c9aaafbd266ddf40e8af7884e9d7b938f22430606f022543addca61b07e",
+    "CLIENT": "4aa609740142fb37da03c033051ecfb82e1c56f70d3543eb623c37dce5dbc585",
+    "CUT": "0d5532a5cca07aac5e83aaa8073b9695515bb5ac480014ec938ab628bafebe22",
+    "HAND": "55b8bed38c65c6f9bf05153ab3ad136ce10f7ec7d779ab2728de02947de8312b",
+    "HEALTH": "f6dca9611bf1a5f492e4aae04806ee8bcbe2091295da7ce3c6e16bd98888cf5c",
+    "LOAD": "9a7c3aa7d76b4ed223bd73221535424fd0561f8c8708653efc104800f37b6f17"
   },
   "entries": [
     {
@@ -158,8 +158,8 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-12",
-      "unit_sha256": "763bde67a69e495f3a34af2f85429e9efb1a19c64438aeeb72e52d0ad69a3c3e",
-      "unit_text": "`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다. ⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과 상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:205-208`), stale 전이는 `revalidateSilencedTopic(\"usdt:krw\")` 만 부르며 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:270-279`), 표시 경로 `usdtDisplayState` 에는 `tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724`, 특히 671 행 주석). 런북도 재작성돼 2차 롤백 bullet 이 \"45초 legacy fallback 을 기다리는 절차가 아니다\"라고 못박고, 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다 (`ios/TOPIC_V2_RELEASE_RUNBOOK.md:269-273`). 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled` 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1030-1050`) 탭 상태 문구가 \"실시간 시세를 일시적으로 제공할 수 없습니다\"를 띄운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:479-502`). legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.",
+      "unit_sha256": "d825c24c7ae8f05beefe102241990feee3ddafed6b7d0bf88f34848036d421a3",
+      "unit_text": "`TOPIC_V2_RELEASE_RUNBOOK.md` 의 2차 롤백은 `TOPIC_DISPATCHER_ENABLED=false` + 재기동이다. ⚠️ **45초 legacy revert 는 코드에서 제거됐다.** 45초 무수신이 하는 일은 조용한 재구독 한 번과 상태 안내뿐이고 **화면 값은 유지된다** — 상수 주석이 그 계약을 명시하고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:205-208`), stale 전이는 `revalidateSilencedTopic(\"usdt:krw\")` 만 부르며 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:270-279`), 표시 경로 `usdtDisplayState` 에는 `tetherIsFresh` 를 보고 legacy 로 되돌리는 분기가 더 이상 없다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724`, 특히 671 행 주석). 런북도 재작성돼 2차 롤백 bullet 이 \"45초 legacy fallback 을 기다리는 절차가 아니다\"라고 못박고, 클라가 topic 값을 purge 하고 명시적 unavailable 화면을 띄운다고 적는다 (`ios/TOPIC_V2_RELEASE_RUNBOOK.md:273-277`). 그래서 kill 이 화면에 도달하는 경로는 legacy 되돌림이 아니라 아래 **결정**대로의 `topics_disabled` 명시 비활성 상태 하나이고, 그 경로는 배선돼 있다 — canonical state 적용이 `topics_disabled` 최초 진입에서 전 topic 을 purge 하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1030-1050`) 탭 상태 문구가 \"실시간 시세를 일시적으로 제공할 수 없습니다\"를 띄운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:479-502`). legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이제 이 레버를 무력화하지 않는다.",
       "classification": "code_fact",
       "detail": "45초 legacy revert 기전이 코드에서 제거됐고, 45초 무수신은 조용한 재구독 1회 + 상태 안내뿐이며 화면 값은 유지된다는 현재 iOS 동작 단정이다.",
       "provenance": [
@@ -168,7 +168,7 @@
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:270-279",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:479-502",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:667-724",
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:269-273"
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:273-277"
       ]
     },
     {
@@ -304,18 +304,6 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "38e204a6e41cd4e4a05085a6cdd8932d00436db5c68ea420c5f2516d4caf069d",
-      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:874-915`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
-      "classification": "code_fact",
-      "detail": "고정 planner와 dispatcher는 FX/USDT의 premium_required가 최종 stage에서만 발생하고 앞선 두 stage에서는 identity-only임을 보여준다. 이는 클라이언트 처리 계약이며 production stage를 주장하지 않는다.",
-      "provenance": [
-        "file:app/topic_dispatcher.py:874-915",
-        "file:app/topic_policy.py:285-330"
-      ]
-    },
-    {
-      "destination": "CLIENT",
-      "rid": "R-CLI-6",
       "unit_sha256": "02540f0a05ca9004812f563e847ec4e9fe936d6603ae8ff45b585c3b63be9a30",
       "unit_text": "**클라에 이미 있는 것**: `SubscriptionError.isTerminal`(invalid_token/invalid_request/request_too_large), `isRetryable`(temporarily_unavailable), `premium_required` 복구 집합. ✅ **다섯 거부 코드가 모두 배선됐다.** `handleSubscriptionAck` 가 `topicRejection(from:)` 으로 `topics_disabled`·`topic_unavailable`·`unknown_topic`·`premium_required`·`krx_entitlement_required` 를 각각 `TopicRejectionReason` 으로 옮기고 (`ios/FXi/Services/WebSocketService.swift:1086-1095`), **이번 배치로 보낸 topic 에 한해** `topicStateStore.applyAck(rejections:)` 로 per-topic 기록한다 (`ios/FXi/Services/WebSocketService.swift:1043-1056` · `ios/FXi/Models/TopicSubscriptionState.swift:165-186`). 기록된 사유는 접근 상태 (`accessState(authResolution:)` — `ios/FXi/Models/TopicSubscriptionState.swift:72-86`)와 재시도 trigger(`rejectionRetryTriggers(for:)` — 같은 파일 `117-137`)에서 위 표대로 서로 다르게 갈라지므로, `topic_unavailable`·`unknown_topic`·`topics_disabled` 도 더는 로그만 남기지 않는다. 그 위에 **추가로** 전용 콜백을 갖는 것은 `premium_required`(`onPremiumAccessRejected`)와 `krx_entitlement_required`(`onKrxAccessRejected`) 둘뿐이다 (`ios/FXi/Services/WebSocketService.swift:1073-1078`). `SubscriptionError.isTerminal`/`isRetryable` 은 그대로다 (`ios/FXi/Models/TopicMessage.swift:224-246`).",
       "classification": "code_fact",
@@ -327,6 +315,18 @@
         "file:ios/FXi/Services/WebSocketService.swift:1043-1056",
         "file:ios/FXi/Services/WebSocketService.swift:1073-1078",
         "file:ios/FXi/Services/WebSocketService.swift:1086-1095"
+      ]
+    },
+    {
+      "destination": "CLIENT",
+      "rid": "R-CLI-6",
+      "unit_sha256": "38e204a6e41cd4e4a05085a6cdd8932d00436db5c68ea420c5f2516d4caf069d",
+      "unit_text": "⚠️ **`premium_required` 가 FX/USDT 에서 발화하는 것은 `WS_TOPIC_AUTH_STAGE` 가 `enforce_authenticated_premium` 일 때뿐이다.** 코드 기본값 `compatibility` 와 `reject_anonymous_fx` 에서는 식별된 FX/USDT 가 identity-only 라 그 행이 나오지 않는다. 클라는 **두 경우를 모두** 다뤄야 한다 (stage 는 서버 env 이고 클라는 그것을 모른다). 근거: `app/topic_policy.py:285-330` (stage 별 partition) · `app/topic_dispatcher.py:874-915`(per-topic 거부 코드). 상태 서술은 `DECISIONS.md` ADR-041 [R-INV-2](../DECISIONS.md#r-inv-2), 선행조건은 [R-HAND-11](topic-snapshot-handoff.md#r-hand-11). 전이표는 Stage A 완료를 전제로 한다.",
+      "classification": "code_fact",
+      "detail": "고정 planner와 dispatcher는 FX/USDT의 premium_required가 최종 stage에서만 발생하고 앞선 두 stage에서는 identity-only임을 보여준다. 이는 클라이언트 처리 계약이며 production stage를 주장하지 않는다.",
+      "provenance": [
+        "file:app/topic_dispatcher.py:874-915",
+        "file:app/topic_policy.py:285-330"
       ]
     },
     {
@@ -522,12 +522,13 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "6fa5f32308b7e4a5435534077876b463742638cc79a599cc7912d250d1c4a7b3",
-      "unit_text": "| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5855`). ⚠️ 세대당 1회 강제 reconnect 불변식 자체는 변이 커버리지가 없다(R-CLI-16 잔여) |",
+      "unit_sha256": "f5f73c8c225e7cf9b4453128d22dfc09b13f06bcd06abe1dde9e230899253a25",
+      "unit_text": "| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5923`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6139`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |",
       "classification": "code_fact",
-      "detail": "lease hard-expiry 의 '같은 id 는 절대 만료를 연장 못 하고 새 id 만 연장한다'가 테스트로 잠겼다는 커버리지 단정이다. 세대당 1회 강제 reconnect 는 변이 커버리지가 없다는 잔여도 함께 기술한다.",
+      "detail": "lease hard-expiry 의 '같은 id 는 연장 못 함' 과 '세대당 1회 강제 reconnect' 가 둘 다 테스트로 잠겼다는 커버리지 단정이다. 후자는 두 topic 동시 만료 형태여야 판별된다.",
       "provenance": [
-        "file:ios/FXiTests/TopicMessageTests.swift:5855"
+        "file:ios/FXiTests/TopicMessageTests.swift:5923",
+        "file:ios/FXiTests/TopicMessageTests.swift:6139"
       ]
     },
     {
@@ -655,14 +656,14 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-9",
-      "unit_sha256": "278cc0ab5182004d022ce7a6f2d98c980d46ce6da67010901aac4d48365926c2",
-      "unit_text": "| `TOPIC_V2_RELEASE_RUNBOOK.md` MODE 2 | ✅ **해소** — 신 pin 런북에 \"45s 초과 시 자동으로 legacy 표시\" 문구 0건 | 이 표의 '실제'대로 이미 재작성돼 있다 — \"MODE 2 (tether 45초 무수신) → 조용한 재검증: 화면과 last-known은 그대로이고 배너도 없다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:239`) · \"45초 legacy fallback을 기다리는 절차가 아니다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:273`) · \"FX/KRX에는 이 시간 threshold를 적용하지 않는다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:292`). 불변식 [R-INV-1](../DECISIONS.md#r-inv-1) 과 일치 |",
+      "unit_sha256": "1dde52fb004ff65d9b8ce820a27d0640074c75cb47862401c70d97a3925e5c66",
+      "unit_text": "| `TOPIC_V2_RELEASE_RUNBOOK.md` MODE 2 | ✅ **해소** — 신 pin 런북에 \"45s 초과 시 자동으로 legacy 표시\" 문구 0건 | 이 표의 '실제'대로 이미 재작성돼 있다 — \"MODE 2 (tether 45초 무수신) → 조용한 재검증: 화면과 last-known은 그대로이고 배너도 없다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:240`) · \"45초 legacy fallback을 기다리는 절차가 아니다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:277`) · \"FX/KRX에는 이 시간 threshold를 적용하지 않는다\"(`ios/TOPIC_V2_RELEASE_RUNBOOK.md:296`). 불변식 [R-INV-1](../DECISIONS.md#r-inv-1) 과 일치 |",
       "classification": "code_fact",
       "detail": "런북 MODE 2 의 '45s 초과 시 자동으로 legacy 표시' 문구가 신 pin 런북에 존재하지 않는다는(=이미 해소) 대조 사실 단정이다.",
       "provenance": [
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:239",
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:273",
-        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:292"
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:240",
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:277",
+        "file:ios/TOPIC_V2_RELEASE_RUNBOOK.md:296"
       ]
     },
     {

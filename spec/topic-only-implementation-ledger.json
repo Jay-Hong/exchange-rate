@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "43516904ebaa4cfbff43ea58afadd58929ea84eb9326e6c9130014fe9a483851",
+  "manifest_sha256": "2c709cf36eb90b5ee01c0d9d54b89f370d7146535e003fd6e9a8a3fc26f825fc",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
@@ -379,7 +379,7 @@
       ],
       "non_actionable_reason": null,
       "reviewer": null,
-      "note": "⚠️ 세대당 1회 강제 reconnect 불변식은 변이 커버리지가 없다 — 이 잔여 때문에 verified 로 올리지 않는다."
+      "note": "절대 expiry 추적 + 새 lease_id 만 갱신 + 세대당 1회 강제 reconnect. 세대 가드는 두 topic 동시 만료 회귀로 변이 판별까지 확보했다. verified 아님 — 구현자 자신이 닫지 않는다."
     },
     {
       "rid": "R-CLI-17",

@@ -111,7 +111,8 @@ RID_BACKTICK_LOCATOR_INVENTORY = {
     #                183 → 195 / ios 103 → 111 / server 80 → 84.
     "CLIENT": 44,
     # 2026-08-21 B8 회귀 결속: safety-stop 재활성화 복구 테스트 좌표 +1 (199 → 200 / ios 111 → 112).
-    "CUT": 55,
+    # 2026-08-21 R-CLI-16 변이 커버리지: 두 topic 동시 만료 회귀 좌표 +1 (200 → 201 / ios 112 → 113).
+    "CUT": 56,
     # 2026-08-19 LOAD-S3 C2: 실패 close/None 잔여, worker checkpoint, live publish close 잔여를
     #                현재 코드에 결속하면서 server locator 5건 증가 (19 → 24).
     # 2026-08-20 LOAD-S5 후속: R-HAND-4 의 "각 phase 앞 checkpoint" 를 실제 worker 결속
@@ -417,9 +418,9 @@ def test_rid_backtick_locator_inventory_keeps_every_surface_visible():
     # 2026-08-20 LOAD-S7 C2: HAND +1, LOAD +3 (139 → 143 / server 75 → 79).
     # 2026-08-20 R-CLI-24 C2: CLIENT +7, LOAD +3
     #                (143 → 153 / ios 64 → 74, server 79 불변).
-    assert len(references) == 200
+    assert len(references) == 201
     assert by_destination == RID_BACKTICK_LOCATOR_INVENTORY
-    assert by_repo == {"server": 88, "ios": 112}
+    assert by_repo == {"server": 88, "ios": 113}
 
 
 def test_markdown_line_link_gate_covers_every_canonical_document():
