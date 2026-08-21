@@ -77,6 +77,10 @@ class RunnerHarness(unittest.TestCase):
         (bin_dir / "timeout").write_text(
             "#!/bin/sh\n"
             f'echo "timeout $*" >> "{log}"\n'
+            'if [ -n "${FAKE_TIMEOUT_READY:-}" ]; then\n'
+            '  : > "$FAKE_TIMEOUT_READY"\n'
+            '  while [ ! -e "${FAKE_TIMEOUT_RELEASE:-}" ]; do sleep 0.02; done\n'
+            'fi\n'
             'while [ $# -gt 0 ]; do\n'
             '  case "$1" in --kill-after=*|[0-9]*) shift ;; *) break ;; esac\n'
             'done\n'
@@ -405,22 +409,41 @@ class TestLaunchContract(RunnerHarness):
 
     def test_host_lock_rejects_a_second_concurrent_runner(self):
         root, bin_dir, log, out = self._fixture()
+        ready = root.parent / "timeout.ready"
+        release = root.parent / "timeout.release"
         command = ["bash", str(root / "ops/run_rc_canary.sh"), *self._uid_args(root)]
         first = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            env=self._env(root, bin_dir, out, FAKE_TIMEOUT_SLEEP="1"),
+            env=self._env(
+                root,
+                bin_dir,
+                out,
+                FAKE_TIMEOUT_READY=str(ready),
+                FAKE_TIMEOUT_RELEASE=str(release),
+            ),
         )
-        deadline = time.monotonic() + 5
-        while (not log.exists() or "timeout " not in log.read_text()) and time.monotonic() < deadline:
-            time.sleep(0.02)
-        self.assertTrue(log.exists(), "첫 runner가 timeout 진입 전 멈췄다")
-        second = self._run(root, bin_dir, out, *self._uid_args(root, "canary-y"))
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn("이미 실행 중", second.stderr)
-        stdout, stderr = first.communicate(timeout=5)
+        try:
+            deadline = time.monotonic() + 15
+            while not ready.exists() and time.monotonic() < deadline:
+                if first.poll() is not None:
+                    stdout, stderr = first.communicate()
+                    self.fail(f"첫 runner가 lock 보유 전에 종료했다: {stdout}{stderr}")
+                time.sleep(0.02)
+            self.assertTrue(ready.exists(), "첫 runner가 timeout 진입 전 멈췄다")
+
+            second = self._run(root, bin_dir, out, *self._uid_args(root, "canary-y"))
+            self.assertNotEqual(second.returncode, 0)
+            self.assertIn("이미 실행 중", second.stderr)
+        finally:
+            release.touch()
+            try:
+                stdout, stderr = first.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                first.kill()
+                stdout, stderr = first.communicate(timeout=5)
         self.assertEqual(first.returncode, 0, stdout + stderr)
         run_calls = [line for line in log.read_text().splitlines() if line.startswith("docker run")]
         self.assertEqual(len(run_calls), 1)
