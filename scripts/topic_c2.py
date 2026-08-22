@@ -54,6 +54,7 @@ EXPECTED_DOC_HEADER_FILES = 6
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 FIXPOINT_LIMIT = 8
+MAX_CITED_RANGE = 2000
 GATE_TESTS = (
     "tests/test_topic_c2.py",
     "tests/test_topic_only_semantic_review.py",
@@ -554,10 +555,47 @@ def _cited_lines() -> dict[str, set[int]]:
     for path in sources:
         for match in pattern.finditer(path.read_text()):
             name = match.group(1).split("/")[-1]
-            cited.setdefault(name, set()).add(int(match.group(2)))
-            if match.group(3):
-                cited[name].add(int(match.group(3)))
+            start = int(match.group(2))
+            end = int(match.group(3)) if match.group(3) else start
+            if end < start or end - start > MAX_CITED_RANGE:
+                # 뒤집힌 범위/비정상 폭은 좌표가 아니라 오탈자다. 끝점만 표시해 두고 넘어간다.
+                cited.setdefault(name, set()).update({start, end})
+                continue
+            cited.setdefault(name, set()).update(range(start, end + 1))
     return cited
+
+
+def parse_hunks(diff: str) -> list[tuple[int, int, int, int]]:
+    """`@@ -a,b +c,d @@` → (old_start, old_len, new_start, new_len). 개수 생략은 1이다."""
+    return [
+        (int(m.group(1)), 1 if m.group(2) is None else int(m.group(2)),
+         int(m.group(3)), 1 if m.group(4) is None else int(m.group(4)))
+        for m in re.finditer(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", diff, re.M)
+    ]
+
+
+def coordinate_findings(cited_lines: set[int],
+                        hunks: list[tuple[int, int, int, int]]) -> tuple[bool, bool]:
+    """(좌표가 밀렸는가, 인용된 줄의 내용이 바뀌었는가) — **두 신호는 다른 사건이다**.
+
+    ⛔ 처음엔 "최초 변경행 ≤ 최대 인용행" 하나로 뭉쳤다가, 첫 실사용에서 **1:1 치환**
+    (`@@ -333 +333 @@`, 체크박스 한 줄)에 거짓 경보가 났다. 줄 수가 그대로면 아래 인용은
+    한 줄도 안 밀린다.
+
+    · **밀림**: 인용 위에서 줄 수가 바뀌었다(삽입/삭제) → 좌표를 **다시 도출**해야 한다.
+    · **내용 변경**: 인용된 줄 자체가 바뀌었다 → 좌표는 그대로여도 **주장문이 여전히 참인지**
+      다시 읽어야 한다(게이트는 줄의 실재만 보고 문장의 참을 안 본다).
+    """
+    if not cited_lines:
+        return False, False
+    top = max(cited_lines)
+    shifted = any(old_len != new_len and old_start <= top
+                  for old_start, old_len, _new_start, new_len in hunks)
+    touched = any(
+        old_len > 0 and any(old_start <= line < old_start + old_len for line in cited_lines)
+        for old_start, old_len, _new_start, _new_len in hunks
+    )
+    return shifted, touched
 
 
 def check_coordinates(ios_from: str, ios_to: str = "HEAD") -> list[str]:
@@ -576,15 +614,18 @@ def check_coordinates(ios_from: str, ios_to: str = "HEAD") -> list[str]:
             _say("COORD", f"{name}: 인용 없음")
             continue
         diff = _run(["git", "-C", str(IOS_ROOT), "diff", "-U0", f"{ios_from}..{ios_to}", "--", name])
-        starts = [int(m.group(1)) for m in re.finditer(r"^@@ -\d+(?:,\d+)? \+(\d+)", diff, re.M)]
-        if not starts:
+        hunks = parse_hunks(diff)
+        if not hunks:
             continue
-        top, first = max(cited[base]), min(starts)
-        if first <= top:
-            warnings.append(f"{name}: 최초 변경행 {first} ≤ 최대 인용행 {top} — 주장문으로 좌표를 **다시 찾아라**")
+        shifted, touched = coordinate_findings(cited[base], hunks)
+        if shifted:
+            warnings.append(f"{name}: 인용 위에서 줄 수가 바뀌었다 — 좌표를 주장문으로 **다시 찾아라**")
             _say("COORD", f"⚠️ {warnings[-1]}")
-        else:
-            _say("COORD", f"✅ {name}: 최초 변경 {first} > 최대 인용 {top} — 이동 없음")
+        if touched:
+            warnings.append(f"{name}: 인용된 줄의 **내용**이 바뀌었다 — 그 주장이 아직 참인지 확인하라")
+            _say("COORD", f"⚠️ {warnings[-1]}")
+        if not shifted and not touched:
+            _say("COORD", f"✅ {name}: 인용 밀림 없음 · 인용 줄 내용 불변")
     return warnings
 
 

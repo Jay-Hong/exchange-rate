@@ -344,6 +344,51 @@ def test_coordinate_check_is_quiet_below_every_citation(monkeypatch):
     assert topic_c2.check_coordinates("HEAD~1") == []
 
 
+def test_one_for_one_replacement_below_a_citation_does_not_shift():
+    """**첫 실사용 거짓 경보** — 체크박스 한 줄 치환(`@@ -333 +333 @@`)에 경보가 났었다.
+
+    줄 수가 그대로면 아래 인용은 한 줄도 안 밀린다. 그리고 333 은 인용된 줄도 아니다.
+    """
+    cited = {313, *range(341, 363), 369}
+    shifted, touched = topic_c2.coordinate_findings(cited, [(333, 1, 333, 1)])
+    assert (shifted, touched) == (False, False)
+
+
+def test_insertion_above_a_citation_shifts():
+    """앞 시험이 공허하지 않음을 보인다 — **줄 수가 바뀌면** 반드시 밀림으로 잡힌다."""
+    cited = {313, 369}
+    shifted, touched = topic_c2.coordinate_findings(cited, [(100, 0, 100, 3)])
+    assert shifted and not touched
+
+
+def test_replacing_a_cited_line_is_reported_as_content_change_not_shift():
+    """좌표는 그대로여도 **주장문이 여전히 참인지**는 따로 물어야 한다."""
+    shifted, touched = topic_c2.coordinate_findings({369}, [(369, 1, 369, 1)])
+    assert (shifted, touched) == (False, True)
+
+
+def test_deleting_a_cited_line_is_both_shift_and_content_change():
+    shifted, touched = topic_c2.coordinate_findings({369}, [(369, 1, 369, 0)])
+    assert shifted and touched
+
+
+def test_append_below_every_citation_is_clean():
+    shifted, touched = topic_c2.coordinate_findings({369}, [(530, 2, 530, 47)])
+    assert (shifted, touched) == (False, False)
+
+
+def test_hunk_header_without_counts_means_one_line():
+    assert topic_c2.parse_hunks("@@ -333 +333 @@ x\n") == [(333, 1, 333, 1)]
+    assert topic_c2.parse_hunks("@@ -10,0 +11,3 @@\n") == [(10, 0, 11, 3)]
+
+
+def test_cited_ranges_expand_to_every_line_inside():
+    """끝점만 담으면 범위 **안쪽** 줄이 바뀌어도 못 잡는다."""
+    monkey = topic_c2._cited_lines()
+    runbook = monkey.get("TOPIC_V2_RELEASE_RUNBOOK.md", set())
+    assert {341, 350, 362}.issubset(runbook), "341-362 범위 안쪽이 비어 있다"
+
+
 def test_coordinate_check_rejects_an_empty_range(monkeypatch):
     monkeypatch.setattr(topic_c2, "_run", lambda *a, **k: "")
     with pytest.raises(topic_c2.C2Error, match="변경 파일이 0"):
