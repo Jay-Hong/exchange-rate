@@ -87,7 +87,9 @@
           "C2 재결속 (ios pin `7c30b15`). 서버 쪽은 `FREE_TIER_ACCESS_MODEL_PLAN` ⑤ 를 완료로 전환(정본 문서가 아니라 해시 체인 밖). 런북이 행 중립이라 좌표 재도출 대상 없음 — pin 전진과 재봉인만 수행했다. ⚠️ 운영 사실을 memory 에만 적고 정본을 안 고치면 그것도 drift 다 — 다음부터 운영 실행 결과는 정본 결속을 같은 작업 단위에 넣는다.",
           "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=Claude Code:reviewer=OpenAI Codex",
           "⚠️ **epoch 0020 의 서술 두 곳을 정정한다**(append-only — 0020 문장은 당시 기록으로 보존). (1) 0020 은 영구 ON 범위를 \"**4 → 5 topic 으로 정정**\" 했다고 적었으나, **구 정본에 `4개` 라는 수치는 없었다**(grep 0건). 정확한 서술은 \"`dxy:spot` land 후 영구 ON 범위를 **5개로 명시**했다\" 다 — 존재하지 않던 before-state 를 지어내 인과를 과장했다. (2) 재검토자가 보고에서 \"§2-e ⑥ = 서버 영구 flag ON → smoke → arming\" 이라 적고 런북 `234` 행을 \"flag ON 구간에도 arming 은 계속 OFF\" 의 근거로 인용했는데 **둘 다 틀렸다**. §2-e ⑥ 은 watchdog 종료 후의 **별도 결정 조건**이고, 영구 ON 은 런북 **3번(238행)**, smoke 는 **4번(268행)**, arming 은 smoke 통과 뒤다. `234` 는 지금 `topic_flag_watchdog.sh` 잔여 한계 문장이다 — 몇 시간 전 읽은 좌표를 **다시 읽지 않고** 인용했고, 그 사이 같은 파일을 편집해 좌표가 밀렸다. 세션 내내 기록해온 함정을 자기 산문에서 반복했다. OpenAI Codex 가 두 건을 짚었고 재검토자가 현재 런북 234/238/268 과 구 정본 grep 으로 각각 확인했다.",
-          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `cd407c0`). ⚠️ **`server safety-stop` 항목을 미체크로 남긴 판단을 지지한다** — 그 항목은 \"topic 값을 **전부 지우고**\" 라 **healthy → disabled 전이**를 요구하는데, 이번 관측은 이미 꺼진 서버로의 **cold start** 였다(지울 값이 없었다). 같은 화면을 봤다고 같은 시험이 아니다. 그 전이 시험은 healthy 상태에서 서버를 끄는 별도 실행이 필요하며, 이번 자동 복구 통과로 **회복 가능한 kill** 임은 이미 증명됐으므로 위험은 낮아졌다. FREE_TIER rollout ⑥ 은 ✅ 가 아니라 🟡(서버 ON 완료·smoke 진행 중)로 뒀다.",
+          "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -159,7 +161,9 @@
           "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code",
           "bounded E2E 인증 canary 운영 PASS 를 정본에 결속 (iOS `7c30b15`). OpenAI Codex 가 **증거가 정본이 아니라 개인 memory 에만 남은 공백**을 짚었다 — 런북 §2-e 는 계속 '미실행' 이었고 열등한 token-file 절차를 규정하고 있었다. 세션 내내 잡아온 doc/reality 괴리를 재검토자가 스스로 만든 셈이다. §2-e 에 PASS 결과(익명 registry 0 + legacy rates·pong / 비구독 `premium_required` / 구독 2 topic snapshot / REST 401·403·200 / 종료 후 OFF 복원)와 PENDING 503→403 계약을 기록하고, token 절차를 **무저장 stdin** 으로 교체했다(mint 는 호스트에 `firebase_admin` 이 없어 `docker exec -i` 경유). 영구 ON 범위도 **4 → 5 topic** 으로 정정했다 — `dxy:spot` 이 이번 세션에 land 해서 범위가 커졌다. Claude Code 재검토: 커밋된 정본이 실제로 stale 이었음(0600 절차 202-203행, FREE_TIER ⑤ 미실행), 5 topic 계산(usdt+dxy+FX3, KRX 는 G2∧G3 별개), 그리고 **인용 7좌표가 내용으로 불변**임을 각각 확인했다 (148/313/341/346/350/356/369 — 추가분이 380행부터라 최대 인용 369 아래를 밀지 않는다).",
           "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code",
+          "서버 dispatcher **영구 ON** 실행 + 자동 복구 smoke 실기기 통과 (iOS `cd407c0`). OpenAI Codex 가 선행조건을 재확인하고 `topic_flag.py on` 으로 활성화했다(재검토자 쪽은 auto-mode 분류기가 명령 전체를 차단해 실행하지 못했다 — 운영 무변경 상태로 남았었다). 실기기(구독 계정, DEBUG 빌드)에서 `topics_disabled` 상태의 앱을 foreground 로 두고 **아무 조작 없이** 서버를 켜자 로딩을 거쳐 배너가 스스로 사라지고 11:03 실시간 은행 환율이 채워졌다 — 런북 `server 재활성화` 합격 기준 충족. 정본에는 그 한 항목만 `[x]` 로 하고 나머지 12 항목과 Release arming 은 그대로 뒀다. Claude Code 독립 검증: `dispatcher True` · `auth FINAL_ACTIVE` · FX 3 topic ON · KRX OFF · `active_ws 1` · restarts 0 · ERROR 0, 그리고 **익명 `topics/snapshot` 401** — dispatcher 를 켜도 무인증이 열리지 않았다(이전엔 전부 404 였으므로 인증 게이트가 하중을 받는 건 이번이 처음이다). 문서 편집이 인용 구간에 N-for-N 이고 추가분이 409행부터라 7좌표 미이동임도 확인했다.",
+          "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -238,7 +242,9 @@
           "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code",
           "bounded E2E 인증 canary 운영 PASS 를 정본에 결속 (iOS `7c30b15`). OpenAI Codex 가 **증거가 정본이 아니라 개인 memory 에만 남은 공백**을 짚었다 — 런북 §2-e 는 계속 '미실행' 이었고 열등한 token-file 절차를 규정하고 있었다. 세션 내내 잡아온 doc/reality 괴리를 재검토자가 스스로 만든 셈이다. §2-e 에 PASS 결과(익명 registry 0 + legacy rates·pong / 비구독 `premium_required` / 구독 2 topic snapshot / REST 401·403·200 / 종료 후 OFF 복원)와 PENDING 503→403 계약을 기록하고, token 절차를 **무저장 stdin** 으로 교체했다(mint 는 호스트에 `firebase_admin` 이 없어 `docker exec -i` 경유). 영구 ON 범위도 **4 → 5 topic** 으로 정정했다 — `dxy:spot` 이 이번 세션에 land 해서 범위가 커졌다. Claude Code 재검토: 커밋된 정본이 실제로 stale 이었음(0600 절차 202-203행, FREE_TIER ⑤ 미실행), 5 topic 계산(usdt+dxy+FX3, KRX 는 G2∧G3 별개), 그리고 **인용 7좌표가 내용으로 불변**임을 각각 확인했다 (148/313/341/346/350/356/369 — 추가분이 380행부터라 최대 인용 369 아래를 밀지 않는다).",
           "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code",
+          "서버 dispatcher **영구 ON** 실행 + 자동 복구 smoke 실기기 통과 (iOS `cd407c0`). OpenAI Codex 가 선행조건을 재확인하고 `topic_flag.py on` 으로 활성화했다(재검토자 쪽은 auto-mode 분류기가 명령 전체를 차단해 실행하지 못했다 — 운영 무변경 상태로 남았었다). 실기기(구독 계정, DEBUG 빌드)에서 `topics_disabled` 상태의 앱을 foreground 로 두고 **아무 조작 없이** 서버를 켜자 로딩을 거쳐 배너가 스스로 사라지고 11:03 실시간 은행 환율이 채워졌다 — 런북 `server 재활성화` 합격 기준 충족. 정본에는 그 한 항목만 `[x]` 로 하고 나머지 12 항목과 Release arming 은 그대로 뒀다. Claude Code 독립 검증: `dispatcher True` · `auth FINAL_ACTIVE` · FX 3 topic ON · KRX OFF · `active_ws 1` · restarts 0 · ERROR 0, 그리고 **익명 `topics/snapshot` 401** — dispatcher 를 켜도 무인증이 열리지 않았다(이전엔 전부 404 였으므로 인증 게이트가 하중을 받는 건 이번이 처음이다). 문서 편집이 인용 구간에 N-for-N 이고 추가분이 409행부터라 7좌표 미이동임도 확인했다.",
+          "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -317,7 +323,9 @@
           "C2 재결속 (ios pin `7c30b15`). 서버 쪽은 `FREE_TIER_ACCESS_MODEL_PLAN` ⑤ 를 완료로 전환(정본 문서가 아니라 해시 체인 밖). 런북이 행 중립이라 좌표 재도출 대상 없음 — pin 전진과 재봉인만 수행했다. ⚠️ 운영 사실을 memory 에만 적고 정본을 안 고치면 그것도 drift 다 — 다음부터 운영 실행 결과는 정본 결속을 같은 작업 단위에 넣는다.",
           "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=Claude Code:reviewer=OpenAI Codex",
           "⚠️ **epoch 0020 의 서술 두 곳을 정정한다**(append-only — 0020 문장은 당시 기록으로 보존). (1) 0020 은 영구 ON 범위를 \"**4 → 5 topic 으로 정정**\" 했다고 적었으나, **구 정본에 `4개` 라는 수치는 없었다**(grep 0건). 정확한 서술은 \"`dxy:spot` land 후 영구 ON 범위를 **5개로 명시**했다\" 다 — 존재하지 않던 before-state 를 지어내 인과를 과장했다. (2) 재검토자가 보고에서 \"§2-e ⑥ = 서버 영구 flag ON → smoke → arming\" 이라 적고 런북 `234` 행을 \"flag ON 구간에도 arming 은 계속 OFF\" 의 근거로 인용했는데 **둘 다 틀렸다**. §2-e ⑥ 은 watchdog 종료 후의 **별도 결정 조건**이고, 영구 ON 은 런북 **3번(238행)**, smoke 는 **4번(268행)**, arming 은 smoke 통과 뒤다. `234` 는 지금 `topic_flag_watchdog.sh` 잔여 한계 문장이다 — 몇 시간 전 읽은 좌표를 **다시 읽지 않고** 인용했고, 그 사이 같은 파일을 편집해 좌표가 밀렸다. 세션 내내 기록해온 함정을 자기 산문에서 반복했다. OpenAI Codex 가 두 건을 짚었고 재검토자가 현재 런북 234/238/268 과 구 정본 grep 으로 각각 확인했다.",
-          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `cd407c0`). ⚠️ **`server safety-stop` 항목을 미체크로 남긴 판단을 지지한다** — 그 항목은 \"topic 값을 **전부 지우고**\" 라 **healthy → disabled 전이**를 요구하는데, 이번 관측은 이미 꺼진 서버로의 **cold start** 였다(지울 값이 없었다). 같은 화면을 봤다고 같은 시험이 아니다. 그 전이 시험은 healthy 상태에서 서버를 끄는 별도 실행이 필요하며, 이번 자동 복구 통과로 **회복 가능한 kill** 임은 이미 증명됐으므로 위험은 낮아졌다. FREE_TIER rollout ⑥ 은 ✅ 가 아니라 🟡(서버 ON 완료·smoke 진행 중)로 뒀다.",
+          "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -402,7 +410,9 @@
           "C2 재결속 (ios pin `7c30b15`). 서버 쪽은 `FREE_TIER_ACCESS_MODEL_PLAN` ⑤ 를 완료로 전환(정본 문서가 아니라 해시 체인 밖). 런북이 행 중립이라 좌표 재도출 대상 없음 — pin 전진과 재봉인만 수행했다. ⚠️ 운영 사실을 memory 에만 적고 정본을 안 고치면 그것도 drift 다 — 다음부터 운영 실행 결과는 정본 결속을 같은 작업 단위에 넣는다.",
           "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=Claude Code:reviewer=OpenAI Codex",
           "⚠️ **epoch 0020 의 서술 두 곳을 정정한다**(append-only — 0020 문장은 당시 기록으로 보존). (1) 0020 은 영구 ON 범위를 \"**4 → 5 topic 으로 정정**\" 했다고 적었으나, **구 정본에 `4개` 라는 수치는 없었다**(grep 0건). 정확한 서술은 \"`dxy:spot` land 후 영구 ON 범위를 **5개로 명시**했다\" 다 — 존재하지 않던 before-state 를 지어내 인과를 과장했다. (2) 재검토자가 보고에서 \"§2-e ⑥ = 서버 영구 flag ON → smoke → arming\" 이라 적고 런북 `234` 행을 \"flag ON 구간에도 arming 은 계속 OFF\" 의 근거로 인용했는데 **둘 다 틀렸다**. §2-e ⑥ 은 watchdog 종료 후의 **별도 결정 조건**이고, 영구 ON 은 런북 **3번(238행)**, smoke 는 **4번(268행)**, arming 은 smoke 통과 뒤다. `234` 는 지금 `topic_flag_watchdog.sh` 잔여 한계 문장이다 — 몇 시간 전 읽은 좌표를 **다시 읽지 않고** 인용했고, 그 사이 같은 파일을 편집해 좌표가 밀렸다. 세션 내내 기록해온 함정을 자기 산문에서 반복했다. OpenAI Codex 가 두 건을 짚었고 재검토자가 현재 런북 234/238/268 과 구 정본 grep 으로 각각 확인했다.",
-          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `cd407c0`). ⚠️ **`server safety-stop` 항목을 미체크로 남긴 판단을 지지한다** — 그 항목은 \"topic 값을 **전부 지우고**\" 라 **healthy → disabled 전이**를 요구하는데, 이번 관측은 이미 꺼진 서버로의 **cold start** 였다(지울 값이 없었다). 같은 화면을 봤다고 같은 시험이 아니다. 그 전이 시험은 healthy 상태에서 서버를 끄는 별도 실행이 필요하며, 이번 자동 복구 통과로 **회복 가능한 kill** 임은 이미 증명됐으므로 위험은 낮아졌다. FREE_TIER rollout ⑥ 은 ✅ 가 아니라 🟡(서버 ON 완료·smoke 진행 중)로 뒀다.",
+          "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -479,7 +489,9 @@
           "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code",
           "bounded E2E 인증 canary 운영 PASS 를 정본에 결속 (iOS `7c30b15`). OpenAI Codex 가 **증거가 정본이 아니라 개인 memory 에만 남은 공백**을 짚었다 — 런북 §2-e 는 계속 '미실행' 이었고 열등한 token-file 절차를 규정하고 있었다. 세션 내내 잡아온 doc/reality 괴리를 재검토자가 스스로 만든 셈이다. §2-e 에 PASS 결과(익명 registry 0 + legacy rates·pong / 비구독 `premium_required` / 구독 2 topic snapshot / REST 401·403·200 / 종료 후 OFF 복원)와 PENDING 503→403 계약을 기록하고, token 절차를 **무저장 stdin** 으로 교체했다(mint 는 호스트에 `firebase_admin` 이 없어 `docker exec -i` 경유). 영구 ON 범위도 **4 → 5 topic** 으로 정정했다 — `dxy:spot` 이 이번 세션에 land 해서 범위가 커졌다. Claude Code 재검토: 커밋된 정본이 실제로 stale 이었음(0600 절차 202-203행, FREE_TIER ⑤ 미실행), 5 topic 계산(usdt+dxy+FX3, KRX 는 G2∧G3 별개), 그리고 **인용 7좌표가 내용으로 불변**임을 각각 확인했다 (148/313/341/346/350/356/369 — 추가분이 380행부터라 최대 인용 369 아래를 밀지 않는다).",
           "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code",
+          "서버 dispatcher **영구 ON** 실행 + 자동 복구 smoke 실기기 통과 (iOS `cd407c0`). OpenAI Codex 가 선행조건을 재확인하고 `topic_flag.py on` 으로 활성화했다(재검토자 쪽은 auto-mode 분류기가 명령 전체를 차단해 실행하지 못했다 — 운영 무변경 상태로 남았었다). 실기기(구독 계정, DEBUG 빌드)에서 `topics_disabled` 상태의 앱을 foreground 로 두고 **아무 조작 없이** 서버를 켜자 로딩을 거쳐 배너가 스스로 사라지고 11:03 실시간 은행 환율이 채워졌다 — 런북 `server 재활성화` 합격 기준 충족. 정본에는 그 한 항목만 `[x]` 로 하고 나머지 12 항목과 Release arming 은 그대로 뒀다. Claude Code 독립 검증: `dispatcher True` · `auth FINAL_ACTIVE` · FX 3 topic ON · KRX OFF · `active_ws 1` · restarts 0 · ERROR 0, 그리고 **익명 `topics/snapshot` 401** — dispatcher 를 켜도 무인증이 열리지 않았다(이전엔 전부 404 였으므로 인증 게이트가 하중을 받는 건 이번이 처음이다). 문서 편집이 인용 구간에 N-for-N 이고 추가분이 409행부터라 7좌표 미이동임도 확인했다.",
+          "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -493,21 +505,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "a5828aa7f75d0a0e3e2c409907e2168b2d0aa9912445499b705c0113f8141502",
+    "manifest_sha256": "4e50e0c8305093ca3069598b7ea4c4cd242108f9bdfba9ba1efaf4a0fd4c80e7",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "17c3978502fac1800ab32dd9e1e288b2a1f060fc5956658b535cfdf5886a240b",
+    "lock_sha256": "9854a4bd91f327d2145579df99c5121dd368ebfd4dab2e1fca50123f18623d39",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "7c30b159e52b38ba0f82789fe98d59c4985d6a9b"
+    "ios_commit": "cd407c043cd9e5bcd6914c8fabcc9a18ed943da3"
   },
   "documents": {
-    "ADR": "a7a1b0a4cae99c3eff3690179aa5ecae0555659dbcceb77f08b9baa75bab31cc",
-    "CLIENT": "3823579d2c4dcad24f52632fa912d1f386b16db8c9407fd82378b22f01e85c88",
-    "CUT": "52b570d95658d877194d50087887b0ccbe1a61c576f4c3255119a98b7ecd6359",
-    "HAND": "50cca4f02c3678515a586b4b71817cd462b592f6c2f8a940f7b5a1d8a08d7e99",
-    "HEALTH": "cb7bb8feafce980e85dc2a65146cd570d6f8a0b7cbd99527bc35f7e16c9f7ea0",
-    "LOAD": "0adfdabb5afbeebbe3aa49cb928fdf48a77480c7264f932d9e37e67a93633cb4"
+    "ADR": "dcf12729abf8a7e3f4ad06e8192a79703a8db18044ea7bffc010a3101a1255fc",
+    "CLIENT": "57b8dc628b455a66d0d6fa371bfb48f1d45788398e8c092ad8bd1a7c62eac0e4",
+    "CUT": "b716d3fc40d827d0fdad7f33793821616b35129086d3bca98a1aaa8b4c6fe497",
+    "HAND": "66b27152d00b1bb31f1dd29abf757a98da083fc0c1919016e7cdc32a2e8890db",
+    "HEALTH": "ff220e7572a050c3cdf85d5b749d000008cdc86f2a2d38e2f145577fd534c7c6",
+    "LOAD": "c8ac05f73439389610fc58d9b3d515ae5d0a99edbc2bd1aaa4917cb65b0f1aee"
   },
-  "claim_ledger_sha256": "0ef754e494706b121a1a071d9eba459a867f96bb50c5120343070ababd5fd741",
+  "claim_ledger_sha256": "a0fea9eb12f3f1cba7a314dfca251d925217465cdca67cab8c01e1bc2d51a7ce",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,

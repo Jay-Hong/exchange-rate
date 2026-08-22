@@ -4,9 +4,9 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `7c30b159e52b38ba0f82789fe98d59c4985d6a9b`
+- iOS 기준 commit: `cd407c043cd9e5bcd6914c8fabcc9a18ed943da3`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `a5828aa7f75d0a0e3e2c409907e2168b2d0aa9912445499b705c0113f8141502`
+- manifest SHA: `4e50e0c8305093ca3069598b7ea4c4cd242108f9bdfba9ba1efaf4a0fd4c80e7`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
