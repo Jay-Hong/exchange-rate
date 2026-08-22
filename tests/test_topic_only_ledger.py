@@ -63,6 +63,8 @@ MARKDOWN_LITERAL_CANDIDATE_INVENTORY = {
     "test_document_citations.py",
     "test_krx_deploy_verifier.py",
     "test_topic_c2.py",
+    # 실사용 통합 시험 — 복제본 iOS 런북(.md)을 실제로 고친다.
+    "test_topic_c2_integration.py",
     "test_topic_docs_semantic_drift.py",
     "test_topic_migration_doc_bundle.py",
     # 2026-08-21 canonical-only provenance 행동 시험이 임시 canonical.md RID 문서를 만든다.

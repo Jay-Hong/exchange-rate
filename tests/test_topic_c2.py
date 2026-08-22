@@ -89,6 +89,28 @@ def test_current_ios_pin_is_a_full_sha():
     assert topic_c2.SHA40.match(topic_c2.current_ios_pin())
 
 
+def test_pin_files_returns_empty_for_a_normal_no_match(monkeypatch):
+    """git grep exit 1은 오류가 아니라 0건이다 — 치환 후에는 이 상태가 성공 조건이다."""
+    completed = subprocess.CompletedProcess(["git", "grep"], 1, stdout="", stderr="")
+    monkeypatch.setattr(topic_c2.subprocess, "run", lambda *_a, **_k: completed)
+    assert topic_c2._pin_files(OLD) == []
+
+
+def test_advance_pin_accepts_zero_old_matches_after_replacement(monkeypatch, tmp_path):
+    """사전에는 old pin이 있어야 하지만 치환 뒤 0건은 정상 완료다."""
+    target = tmp_path / "pin.json"
+    target.write_text(f'{{"ios": "{OLD}"}}\n')
+    searches = iter(([target], []))
+    monkeypatch.setattr(topic_c2, "REPO", tmp_path)
+    monkeypatch.setattr(topic_c2, "_run", lambda *_a, **_k: NEW + "\n")
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "_pin_files", lambda _old: list(next(searches)))
+
+    result = topic_c2.advance_pin(NEW)
+    assert result["replaced"] == 1
+    assert target.read_text() == f'{{"ios": "{NEW}"}}\n'
+
+
 # --------------------------------------------------------- 체인
 
 def test_chain_is_at_its_fixed_point():
@@ -109,23 +131,46 @@ def test_missing_helper_symbol_is_fatal():
 
 # --------------------------------------------------------- 봉인
 
-def test_seal_derives_sequence_from_history_and_fingerprint_ignores_markers(monkeypatch):
+def _use_committed_seal_fixture(monkeypatch, tmp_path) -> list[tuple[int, str, str]]:
+    """Run seal unit tests against HEAD, not an in-flight C2 working tree."""
+    semantic_text = topic_c2._committed_text("spec/topic-only-semantic-review.json")
+    history_text = topic_c2._committed_text("tests/test_topic_only_semantic_review.py")
+    assert semantic_text and history_text
+
+    semantic = tmp_path / "head-semantic.json"
+    history = tmp_path / "head-history.py"
+    semantic.write_text(semantic_text)
+    history.write_text(history_text)
+    committed = topic_c2._history_entries_from_text(
+        history_text, source="HEAD semantic binding history fixture",
+    )
+
+    monkeypatch.setattr(topic_c2, "SEMANTIC", semantic)
+    monkeypatch.setattr(topic_c2, "HISTORY_FILE", history)
+    monkeypatch.setattr(
+        topic_c2, "_committed_history_entries", lambda: list(committed),
+    )
+    return committed
+
+
+def test_seal_derives_sequence_from_history_and_fingerprint_ignores_markers(monkeypatch, tmp_path):
     """parent·번호를 **손으로 옮겨 적지 않는다**(세션 중 3회 재입력했다).
 
     그리고 산문이 안 바뀌었으면 지문도 그대로여야 한다 — 지문은 **marker 를 제외**하고
     의미 표면만 해싱하기 때문이다. 이게 깨지면 marker 하나 붙일 때마다 체인이 흔들린다.
     """
-    last_sequence, _, last_fingerprint = topic_c2._history_entries()[-1]
+    committed = _use_committed_seal_fixture(monkeypatch, tmp_path)
+    last_sequence, _, last_fingerprint = committed[-1]
     monkeypatch.setattr(topic_c2, "_prose_added_since_head", lambda: 1)
     sequence, fingerprint = topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True)
     assert sequence == last_sequence + 1
     assert fingerprint == last_fingerprint, "의미 변화 0인데 지문이 움직였다 — marker 제외 규칙이 깨졌다"
 
 
-def test_fingerprint_moves_when_prose_is_added(monkeypatch):
+def test_fingerprint_moves_when_prose_is_added(monkeypatch, tmp_path):
     """앞 시험이 공허하지 않음을 보인다 — 산문을 실제로 더하면 지문은 **반드시** 달라진다."""
-    import json
-    _, _, last_fingerprint = topic_c2._history_entries()[-1]
+    committed = _use_committed_seal_fixture(monkeypatch, tmp_path)
+    _, _, last_fingerprint = committed[-1]
     original = topic_c2.SEMANTIC.read_text()
     data = json.loads(original)
     data["review_process"]["review_edges"][0]["scope"].append("임시 산문 작업 단위 — 지문 변화 확인용")
@@ -139,21 +184,24 @@ def test_fingerprint_moves_when_prose_is_added(monkeypatch):
     assert topic_c2.SEMANTIC.read_text() == original
 
 
-def test_seal_refuses_without_new_prose():
+def test_seal_refuses_without_new_prose(monkeypatch, tmp_path):
     """기록할 일이 없으면 epoch 을 열지 않는다."""
+    _use_committed_seal_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(topic_c2, "_prose_added_since_head", lambda: 0)
     with pytest.raises(topic_c2.C2Error, match="새 산문 작업 단위가 없다"):
         topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True)
 
 
-def test_allow_reseal_refuses_when_there_is_no_uncommitted_epoch(monkeypatch):
+def test_allow_reseal_refuses_when_there_is_no_uncommitted_epoch(monkeypatch, tmp_path):
     """커밋된 마지막 epoch 은 재봉인하지 않고 다음 epoch 으로 supersede 한다."""
+    _use_committed_seal_fixture(monkeypatch, tmp_path)
     monkeypatch.setattr(topic_c2, "_prose_added_since_head", lambda: 1)
     with pytest.raises(topic_c2.C2Error, match="미커밋 epoch 이 정확히 1개"):
         topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True, allow_reseal=True)
 
 
 def test_allow_reseal_replaces_exactly_one_uncommitted_epoch(monkeypatch, tmp_path):
-    committed = topic_c2._history_entries()
+    committed = _use_committed_seal_fixture(monkeypatch, tmp_path)
     sequence = committed[-1][0] + 1
     parent = committed[-1][2]
     old_fingerprint = "c" * 64

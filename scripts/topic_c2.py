@@ -108,8 +108,20 @@ def current_ios_pin() -> str:
 
 
 def _pin_files(old: str) -> list[pathlib.Path]:
-    out = _run(["grep", "-rl", "-e", old, *PIN_ROOTS], cwd=REPO)
-    return [REPO / line for line in out.split()]
+    # `git grep` 은 tracked working-tree 파일만 본다. 일반 `grep -r` 는 spec 아래의
+    # untracked 초안까지 pin 치환 대상으로 끌어들일 수 있다.
+    done = subprocess.run(
+        ["git", "grep", "-l", "-F", old, "--", *PIN_ROOTS],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+    )
+    if done.returncode == 1:
+        # 검색 결과 0건. 사전 탐색에서는 호출자가 치명 처리하고, 치환 후 검증에서는 성공이다.
+        return []
+    if done.returncode != 0:
+        raise C2Error(f"git grep pin 탐색 실패: {done.stderr.strip() or done.stdout.strip()}")
+    return [REPO / line for line in done.stdout.splitlines()]
 
 
 def replace_pin_in_lines(lines: list[str], old: str, new: str) -> tuple[list[str], int, int]:
@@ -580,7 +592,10 @@ def check_coordinates(ios_from: str, ios_to: str = "HEAD") -> list[str]:
 
 def _c2_mutation_paths(old_pin: str) -> list[pathlib.Path]:
     """Return every tracked file that pin/refresh/seal may mutate."""
-    paths = set(_pin_files(old_pin))
+    pin_files = _pin_files(old_pin)
+    if not pin_files:
+        raise C2Error(f"구 pin {old_pin[:7]} 을 어느 tracked 파일에서도 못 찾았다")
+    paths = set(pin_files)
     paths.update(_doc_header_files())
     paths.update((IMPL_LEDGER, CLAIM_LEDGER, SEMANTIC, HISTORY_FILE, LOCK, MANIFEST))
     missing = [path for path in paths if not path.is_file()]
