@@ -4,10 +4,10 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `7cd5e45f4138c979cc409dd8086503cafb4858aa`
+- iOS 기준 commit: `54fdbfb161c75d8556cf8eef76b647cf8b6d848c`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5ea8854c939a60a0976fc62e824f3130cda3dab8a55b2ed904c47165dc26968a`
-- baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
+- manifest SHA: `cba3deae78cadbd65f98e85f3d8c62a468f4e1d7171f3b3a1a02f1cca9927ec2`
+- baseline SHA: `f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -104,20 +104,20 @@ admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 �
 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은
 iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현**됐고, 아래 좌표는
 **pinned** iOS `99316a9` 트리에서 재도출한 것이다 — 구현 시점 commit 과 pin 은 같지 않다
-(`ios/FXi/Services/WebSocketService.swift:1415-1433` ·
-`ios/FXi/Services/WebSocketService.swift:1528-1568` ·
-`ios/FXi/Services/WebSocketService.swift:1607-1629` ·
-`ios/FXi/Services/WebSocketService.swift:2039-2098`). 그리고 pinned 트리에는 이 네 좌표가 덮지
+(`ios/FXi/Services/WebSocketService.swift:1430-1448` ·
+`ios/FXi/Services/WebSocketService.swift:1543-1583` ·
+`ios/FXi/Services/WebSocketService.swift:1622-1644` ·
+`ios/FXi/Services/WebSocketService.swift:2057-2116`). 그리고 pinned 트리에는 이 네 좌표가 덮지
 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는
 "재구독을 흩뜨린다"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2`
 (`ios/FXi/Utils/Constants.swift:268-269`)를 `topicRevalidationDelayNanoseconds`
-(`ios/FXi/Services/WebSocketService.swift:946-951`)가 `U(0, 2초)`로 바꾸고,
+(`ios/FXi/Services/WebSocketService.swift:951-956`)가 `U(0, 2초)`로 바꾸고,
 `revalidateSilencedTopic` 이 그만큼 기다린 **뒤에야** 재검증 subscribe 를 보낸다
-(`ios/FXi/Services/WebSocketService.swift:1185-1218`). jitter seam 의 프로덕션 기본값은
-`Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:94` ·
-`ios/FXi/Services/WebSocketService.swift:160`), 이미 예약된 재검증이 있거나 channel 이 없거나
+(`ios/FXi/Services/WebSocketService.swift:1196-1229`). jitter seam 의 프로덕션 기본값은
+`Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:99` ·
+`ios/FXi/Services/WebSocketService.swift:165`), 이미 예약된 재검증이 있거나 channel 이 없거나
 변환이 실패하면 **지연 없이 보내는 fallback 대신** degraded 로 접는다
-(`ios/FXi/Services/WebSocketService.swift:1185-1207`).
+(`ios/FXi/Services/WebSocketService.swift:1196-1218`).
 ⚠️ 이 축은 `45a8a12` 에는 **없었다**(그 트리의 `FXi/Utils/Constants.swift` 에
 `topicRevalidationJitterMaxSeconds` 부재) — 그러니 "`45a8a12` 에서 구현됐다"를 pinned 트리의 클라
 절반 **전체**로 읽으면 안 된다. 서버 기본 1초와 클라이언트 jitter를 사용한

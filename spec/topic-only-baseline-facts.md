@@ -157,22 +157,22 @@
 
 - **F1 [코드]** `ios/FXi/ViewModels/ExchangeRateViewModel.swift:315-323` — tether 45초 deadline이
   fresh→stale로 바뀌면 `revalidateSilencedTopic("usdt:krw")`을 호출한다. 화면 값은 지우지 않는다.
-- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift:1164-1183`은 foreground/수동 복구에서
+- **F2 [코드]** `ios/FXi/Services/WebSocketService.swift:1175-1194`은 foreground/수동 복구에서
   desired topic을 재검증하고, 자동 reconnect 뒤 복구 batch는 별도 `U(0, 2초)` jitter를 거친다.
-- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:528-625` — 단일 deadline arbiter가 송신
+- **F3 [코드]** `ios/FXi/Services/WebSocketService.swift:533-630` — 단일 deadline arbiter가 송신
   시점부터 control deadline과 delivery deadline을 함께 소유한다. ACK 뒤에는 control task를 취소하고
   같은 arbiter를 delivery phase로 전환하므로 initial snapshot에도 클라이언트 상한이 남는다.
-- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:250` `sendTopicCommand` — subscribe 는
+- **F4 [코드]** `ios/FXi/Services/WebSocketService.swift:255` `sendTopicCommand` — subscribe 는
   **배치**(한 요청에 여러 topic).
-- **F5 [코드]** `ios/FXi/Services/WebSocketService.swift:850-905` —
+- **F5 [코드]** `ios/FXi/Services/WebSocketService.swift:855-910` —
   `shouldRetryCommandFailure` denylist + 최초 시도 포함 최대 3회 bounded retry. 서버 최소 cooldown 뒤
   `U(0, base)` additive jitter를 더하고 exact `(verb, sorted topics)` 실패는 cooldown task 하나를 공유한다.
 - **F6 [코드]** desired/confirmed/receive-generation/delivery/rejection은
   `TopicSubscriptionSnapshot`이 canonical하게 소유하고, ACK는 sent scope에 한해 confirmed와 rejection을
-  수렴시킨다(`ios/FXi/Services/WebSocketService.swift:1057-1088`).
+  수렴시킨다(`ios/FXi/Services/WebSocketService.swift:1062-1093`).
 - **F7 [코드]** lease는 topic별 절대 만료를 추적한다. 새 lease id만 만료를 연장하고, hard-expiry는
   desired를 보존한 채 confirmed를 제거한 뒤 lease 세대당 한 번 reconnect한다
-  (`ios/FXi/Services/WebSocketService.swift:750-849`).
+  (`ios/FXi/Services/WebSocketService.swift:755-854`).
 - **F8 [코드]** `ios/FXi/Services/TopicSnapshotMerger.swift:38` —
   `mergeAt <= existing.mergeAt` 이면 entry 를 버린다.
   **F8-inf [추론]** 서버가 rate 불변 시 `rate_changed_at` 보존(B2 파일) ⇒ 평평하면 store timestamp 가

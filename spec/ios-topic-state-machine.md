@@ -4,10 +4,10 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `7cd5e45f4138c979cc409dd8086503cafb4858aa`
+- iOS 기준 commit: `54fdbfb161c75d8556cf8eef76b647cf8b6d848c`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5ea8854c939a60a0976fc62e824f3130cda3dab8a55b2ed904c47165dc26968a`
-- baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
+- manifest SHA: `cba3deae78cadbd65f98e85f3d8c62a468f4e1d7171f3b3a1a02f1cca9927ec2`
+- baseline SHA: `f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -133,8 +133,8 @@ ACK deadline 을 먼저 두는 진짜 이유는 프레임 도착 순서가 아�
 
 ✅ **세 경우의 단일 소유자는 공용 arbiter 하나로 구현됐다.** 한 요청이 control/delivery deadline을
 함께 저장하고, ACK 전에는 control phase 하나만, ACK 뒤에는 delivery phase 하나만 무장한다
-(`ios/FXi/Services/WebSocketService.swift:530-648` ·
-`ios/FXi/Services/WebSocketService.swift:801-818`). 따라서 독립 watchdog `Task` 둘의 재개 순서에
+(`ios/FXi/Services/WebSocketService.swift:535-653` ·
+`ios/FXi/Services/WebSocketService.swift:806-823`). 따라서 독립 watchdog `Task` 둘의 재개 순서에
 의존하지 않고 아래 전이표를 한 소유자가 집행한다.
 
 ⛔ **arbiter 는 두 가지를 _분리해서_ 든다** — 섞으면 ACK 유실이 **이미 받은 데이터 증거를 지운다**:
@@ -261,16 +261,16 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 ✅ **다섯 거부 코드가 모두 배선됐다.** `handleSubscriptionAck` 가 `topicRejection(from:)` 으로
 `topics_disabled`·`topic_unavailable`·`unknown_topic`·`premium_required`·`krx_entitlement_required`
 를 각각 `TopicRejectionReason` 으로 옮기고
-(`ios/FXi/Services/WebSocketService.swift:1091-1100`), **이번 배치로 보낸 topic 에 한해**
+(`ios/FXi/Services/WebSocketService.swift:1102-1111`), **이번 배치로 보낸 topic 에 한해**
 `topicStateStore.applyAck(rejections:)` 로 per-topic 기록한다
-(`ios/FXi/Services/WebSocketService.swift:1048-1061` ·
+(`ios/FXi/Services/WebSocketService.swift:1053-1066` ·
 `ios/FXi/Models/TopicSubscriptionState.swift:165-186`). 기록된 사유는 접근 상태
 (`accessState(authResolution:)` — `ios/FXi/Models/TopicSubscriptionState.swift:72-86`)와
 재시도 trigger(`rejectionRetryTriggers(for:)` — 같은 파일 `117-137`)에서 위 표대로 서로 다르게
 갈라지므로, `topic_unavailable`·`unknown_topic`·`topics_disabled` 도 더는 로그만 남기지 않는다.
 그 위에 **추가로** 전용 콜백을 갖는 것은 `premium_required`(`onPremiumAccessRejected`)와
 `krx_entitlement_required`(`onKrxAccessRejected`) 둘뿐이다
-(`ios/FXi/Services/WebSocketService.swift:1078-1083`).
+(`ios/FXi/Services/WebSocketService.swift:1083-1088`).
 `SubscriptionError.isTerminal`/`isRetryable` 은 그대로다
 (`ios/FXi/Models/TopicMessage.swift:237-259`).
 
@@ -544,16 +544,16 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
 수행했고, 그 뒤 아래 튜닝 값 자체는 그대로이며 좌표만 재도출됐다):**
 - 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를
   초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다
-  (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2039-2097`).
+  (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2057-2115`).
 - 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의
   subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와
-  중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1607-1628` ·
-  `ios/FXi/Services/WebSocketService.swift:1863-1882`).
+  중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1622-1643` ·
+  `ios/FXi/Services/WebSocketService.swift:1881-1900`).
 - 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact
   `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초
   시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다
-  (`ios/FXi/Utils/Constants.swift:248` · `ios/FXi/Services/WebSocketService.swift:1415-1567` ·
-  `ios/FXi/Services/WebSocketService.swift:1669-1678`).
+  (`ios/FXi/Utils/Constants.swift:248` · `ios/FXi/Services/WebSocketService.swift:1430-1582` ·
+  `ios/FXi/Services/WebSocketService.swift:1684-1693`).
 
 ⚠️ 위 값은 다수 client의 45초 동시 도착에서 서버 queue wait·1013·cooldown suppression과
 클라이언트 retry 시간축을 함께 보는 LOAD-S4 리허설을 통과했다. 다만 이 결과를 waiter 개수 hard
