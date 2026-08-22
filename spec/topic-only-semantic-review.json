@@ -102,7 +102,8 @@
           "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex",
           "`server safety-stop` 실기기 통과 → smoke **11/13** (iOS `9ba1458`). 운영에서 healthy → OFF → purge → ON → **무조작 복구** 전 주기를 처음으로 끝까지 관측했다. 이전 관측은 이미 꺼진 서버로의 **cold start** 라 \"topic 값을 **전부 지우고**\" 를 증명하지 못했는데(지울 값이 없었다), 이번엔 baseline 을 먼저 세우고 (usdt 1 · fx {1,1,1} · 폰에 시세 표시) 껐다. ⚠️ **핵심 관측**: OFF 중에도 `active_ws 1` 이 유지됐다 — 연결은 살아 있고 topic 만 닫혔다. 즉 앱이 본 것은 연결 끊김이 아니라 `topics_disabled` 수신이고, 값 purge 가 **그 신호에 대한 반응**임이 구분됐다(끊김에서는 last-known 을 유지해야 한다 — 이 세션에서 고친 `hasTopicLastKnown` 축과 정확히 대응). 총 OFF 1분 46초. 복구는 재시도·재실행 없이 일어났고 서버 구독은 baseline 과 동일하게 복귀했다(usdt 1 · fx {1,1,1} · restarts 0 · ERROR 0). → 문서화된 rollback 사다리 **2차(coarse kill)가 회복 가능**함이 실증됐다 — 이전에는 \"끄면 v2 사용자가 빈 화면\" 이라는 위험만 있었고 복구 가능성은 미실증이었다. ℹ️ 부수: purge 중에도 헤더 `업데이트: 18:09` 잔존(막는 사안 아님, 후속 UX).",
           "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0030:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:283627224f969df0b4f3cf9adae018fa190692ebf2afb32f33d3e8e74cb27983:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -188,7 +189,9 @@
           "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code",
           "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=OpenAI Codex:reviewer=Claude Code",
           "**epoch 0028 의 인과 정정 (append-only supersede, iOS `cfde229`)**. 0028 은 safety-stop 중 읽은 `active_ws 1` 을 \"연결은 살아 있고 topic 만 닫혔다\" 로 해석했다 — **거짓**이다. `topic_flag.turn_off` → `_apply` 는 `canary_monitor.recreate_and_verify_health`, 즉 `up -d --force-recreate fastapi` 를 하므로 **기존 WebSocket 은 전부 끊긴다**. 게다가 `ConnectionManager.active_connections` 는 프로세스 로컬 리스트라 재생성하면 0 부터 다시 센다 — **같은 숫자는 같은 연결이 아니다**(두 시점에서 같은 1 을 읽고 동일성을 추론한 것이 오류다. 이 세션에서 같은 counter 로 세 번째 정정). 정정된 경로: **재생성으로 끊김 → 자동 재연결 → `topics_disabled` 수신 → purge**. ⛔ 따라서 \"끊김 vs `topics_disabled`\" 분리는 **이 관측이 증명하지 못한다**(한 사이클에 둘 다 일어났다) — 0028 이 이 관측에 걸어 둔 분리 근거를 회수하고, 근거를 코드 경로 `hasTopicLastKnown` 과 그 회귀 테스트로 되돌린다. legacy 도 정정: `/api/rates` 200 은 **수렴 후** 값이라 \"legacy 표면이 topic OFF 자체에 영향받지 않는다\"까지이고, 재생성 순단은 단일 컨테이너라 legacy 도 함께 겪으며 그 구간 UX·WS 연속성은 미실측이다. ✅ **살아남는 결론**: rollback 사다리 2차(coarse kill)가 회복 가능하다 — 시험한 DEBUG 빌드에서 purge 와 **무조작 자동 복구**가 모두 통과했고, `on` 도 재생성이라 앱은 **끊김 2회를 스스로 재연결**했다(결론은 오히려 강해진다). 체크박스 [x] 와 smoke 11/13 유지.",
-          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=OpenAI Codex:reviewer=Claude Code",
+          "**epoch 0029 의 잔여 오류 정정 (append-only supersede, iOS `e2e9b75`)**. 0029 는 `active_ws 1` 의 **방향만 뒤집고 추론 형식은 그대로 뒀다** — \"연결 유지의 증거\" 를 \"앱이 재연결했다는 증거\" 로 바꿨지만, 둘 다 **익명 집계에서 신원을 읽는** 동일한 오류다. 그 게이지는 새 프로세스에 연결이 **하나 있다**는 것만 말하고, 그것이 **누구 것인지**는 말하지 못한다(다른 단말·관리자 페이지·구버전 앱 무엇이든 가능). ⚠️ 같은 counter 로 **네 번째**이고, **그 오류를 명시한 정정 안에서** 다시 저질렀다. 재연결의 근거를 게이지에서 **폰 관측 + 코드 배선의 결합**으로 이관한다: ① force-recreate 로 기존 소켓은 반드시 종료된다 → ② REST bootstrap 의 404 는 `try?` 로 격리돼 `appState` 를 건드리지 않으므로 (`FXi/ViewModels/ExchangeRateViewModel.swift:722`) **배너의 원인이 될 수 없다** → ③ `topics_disabled` rejection 은 **WS subscribe ACK** 에서만 생성되고 (`FXi/Services/WebSocketService.swift:1118`) → ④ 그 rejection 이 있어야만 이 배너 문구가 나온다 (`FXi/ViewModels/ExchangeRateViewModel.swift:512`). → 실기기에서 **이 전용 배너**를 봤다는 것은 앱이 종료된 소켓을 대신할 **새 WS 연결을 맺고 subscribe 해서 ACK 를 받았다**는 뜻이다 — 그것이 자동 재연결의 증거다. `active_ws 1` 은 **보조 관측**으로 격하한다. 결론(coarse kill 회복 가능 · 무조작 복구) · 체크박스 [x] · smoke 11/13 은 그대로 유지된다.",
+          "semantic-input-binding/v1:0030:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:283627224f969df0b4f3cf9adae018fa190692ebf2afb32f33d3e8e74cb27983:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -281,7 +284,9 @@
           "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code",
           "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=OpenAI Codex:reviewer=Claude Code",
           "**epoch 0028 의 인과 정정 (append-only supersede, iOS `cfde229`)**. 0028 은 safety-stop 중 읽은 `active_ws 1` 을 \"연결은 살아 있고 topic 만 닫혔다\" 로 해석했다 — **거짓**이다. `topic_flag.turn_off` → `_apply` 는 `canary_monitor.recreate_and_verify_health`, 즉 `up -d --force-recreate fastapi` 를 하므로 **기존 WebSocket 은 전부 끊긴다**. 게다가 `ConnectionManager.active_connections` 는 프로세스 로컬 리스트라 재생성하면 0 부터 다시 센다 — **같은 숫자는 같은 연결이 아니다**(두 시점에서 같은 1 을 읽고 동일성을 추론한 것이 오류다. 이 세션에서 같은 counter 로 세 번째 정정). 정정된 경로: **재생성으로 끊김 → 자동 재연결 → `topics_disabled` 수신 → purge**. ⛔ 따라서 \"끊김 vs `topics_disabled`\" 분리는 **이 관측이 증명하지 못한다**(한 사이클에 둘 다 일어났다) — 0028 이 이 관측에 걸어 둔 분리 근거를 회수하고, 근거를 코드 경로 `hasTopicLastKnown` 과 그 회귀 테스트로 되돌린다. legacy 도 정정: `/api/rates` 200 은 **수렴 후** 값이라 \"legacy 표면이 topic OFF 자체에 영향받지 않는다\"까지이고, 재생성 순단은 단일 컨테이너라 legacy 도 함께 겪으며 그 구간 UX·WS 연속성은 미실측이다. ✅ **살아남는 결론**: rollback 사다리 2차(coarse kill)가 회복 가능하다 — 시험한 DEBUG 빌드에서 purge 와 **무조작 자동 복구**가 모두 통과했고, `on` 도 재생성이라 앱은 **끊김 2회를 스스로 재연결**했다(결론은 오히려 강해진다). 체크박스 [x] 와 smoke 11/13 유지.",
-          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=OpenAI Codex:reviewer=Claude Code",
+          "**epoch 0029 의 잔여 오류 정정 (append-only supersede, iOS `e2e9b75`)**. 0029 는 `active_ws 1` 의 **방향만 뒤집고 추론 형식은 그대로 뒀다** — \"연결 유지의 증거\" 를 \"앱이 재연결했다는 증거\" 로 바꿨지만, 둘 다 **익명 집계에서 신원을 읽는** 동일한 오류다. 그 게이지는 새 프로세스에 연결이 **하나 있다**는 것만 말하고, 그것이 **누구 것인지**는 말하지 못한다(다른 단말·관리자 페이지·구버전 앱 무엇이든 가능). ⚠️ 같은 counter 로 **네 번째**이고, **그 오류를 명시한 정정 안에서** 다시 저질렀다. 재연결의 근거를 게이지에서 **폰 관측 + 코드 배선의 결합**으로 이관한다: ① force-recreate 로 기존 소켓은 반드시 종료된다 → ② REST bootstrap 의 404 는 `try?` 로 격리돼 `appState` 를 건드리지 않으므로 (`FXi/ViewModels/ExchangeRateViewModel.swift:722`) **배너의 원인이 될 수 없다** → ③ `topics_disabled` rejection 은 **WS subscribe ACK** 에서만 생성되고 (`FXi/Services/WebSocketService.swift:1118`) → ④ 그 rejection 이 있어야만 이 배너 문구가 나온다 (`FXi/ViewModels/ExchangeRateViewModel.swift:512`). → 실기기에서 **이 전용 배너**를 봤다는 것은 앱이 종료된 소켓을 대신할 **새 WS 연결을 맺고 subscribe 해서 ACK 를 받았다**는 뜻이다 — 그것이 자동 재연결의 증거다. `active_ws 1` 은 **보조 관측**으로 격하한다. 결론(coarse kill 회복 가능 · 무조작 복구) · 체크박스 [x] · smoke 11/13 은 그대로 유지된다.",
+          "semantic-input-binding/v1:0030:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:283627224f969df0b4f3cf9adae018fa190692ebf2afb32f33d3e8e74cb27983:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -375,7 +380,8 @@
           "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex",
           "`server safety-stop` 실기기 통과 → smoke **11/13** (iOS `9ba1458`). 운영에서 healthy → OFF → purge → ON → **무조작 복구** 전 주기를 처음으로 끝까지 관측했다. 이전 관측은 이미 꺼진 서버로의 **cold start** 라 \"topic 값을 **전부 지우고**\" 를 증명하지 못했는데(지울 값이 없었다), 이번엔 baseline 을 먼저 세우고 (usdt 1 · fx {1,1,1} · 폰에 시세 표시) 껐다. ⚠️ **핵심 관측**: OFF 중에도 `active_ws 1` 이 유지됐다 — 연결은 살아 있고 topic 만 닫혔다. 즉 앱이 본 것은 연결 끊김이 아니라 `topics_disabled` 수신이고, 값 purge 가 **그 신호에 대한 반응**임이 구분됐다(끊김에서는 last-known 을 유지해야 한다 — 이 세션에서 고친 `hasTopicLastKnown` 축과 정확히 대응). 총 OFF 1분 46초. 복구는 재시도·재실행 없이 일어났고 서버 구독은 baseline 과 동일하게 복귀했다(usdt 1 · fx {1,1,1} · restarts 0 · ERROR 0). → 문서화된 rollback 사다리 **2차(coarse kill)가 회복 가능**함이 실증됐다 — 이전에는 \"끄면 v2 사용자가 빈 화면\" 이라는 위험만 있었고 복구 가능성은 미실증이었다. ℹ️ 부수: purge 중에도 헤더 `업데이트: 18:09` 잔존(막는 사안 아님, 후속 UX).",
           "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0030:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:283627224f969df0b4f3cf9adae018fa190692ebf2afb32f33d3e8e74cb27983:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -475,7 +481,8 @@
           "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex",
           "`server safety-stop` 실기기 통과 → smoke **11/13** (iOS `9ba1458`). 운영에서 healthy → OFF → purge → ON → **무조작 복구** 전 주기를 처음으로 끝까지 관측했다. 이전 관측은 이미 꺼진 서버로의 **cold start** 라 \"topic 값을 **전부 지우고**\" 를 증명하지 못했는데(지울 값이 없었다), 이번엔 baseline 을 먼저 세우고 (usdt 1 · fx {1,1,1} · 폰에 시세 표시) 껐다. ⚠️ **핵심 관측**: OFF 중에도 `active_ws 1` 이 유지됐다 — 연결은 살아 있고 topic 만 닫혔다. 즉 앱이 본 것은 연결 끊김이 아니라 `topics_disabled` 수신이고, 값 purge 가 **그 신호에 대한 반응**임이 구분됐다(끊김에서는 last-known 을 유지해야 한다 — 이 세션에서 고친 `hasTopicLastKnown` 축과 정확히 대응). 총 OFF 1분 46초. 복구는 재시도·재실행 없이 일어났고 서버 구독은 baseline 과 동일하게 복귀했다(usdt 1 · fx {1,1,1} · restarts 0 · ERROR 0). → 문서화된 rollback 사다리 **2차(coarse kill)가 회복 가능**함이 실증됐다 — 이전에는 \"끄면 v2 사용자가 빈 화면\" 이라는 위험만 있었고 복구 가능성은 미실증이었다. ℹ️ 부수: purge 중에도 헤더 `업데이트: 18:09` 잔존(막는 사안 아님, 후속 UX).",
           "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=Claude Code:reviewer=OpenAI Codex",
-          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=Claude Code:reviewer=OpenAI Codex",
+          "semantic-input-binding/v1:0030:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:283627224f969df0b4f3cf9adae018fa190692ebf2afb32f33d3e8e74cb27983:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -566,7 +573,9 @@
           "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code",
           "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=OpenAI Codex:reviewer=Claude Code",
           "**epoch 0028 의 인과 정정 (append-only supersede, iOS `cfde229`)**. 0028 은 safety-stop 중 읽은 `active_ws 1` 을 \"연결은 살아 있고 topic 만 닫혔다\" 로 해석했다 — **거짓**이다. `topic_flag.turn_off` → `_apply` 는 `canary_monitor.recreate_and_verify_health`, 즉 `up -d --force-recreate fastapi` 를 하므로 **기존 WebSocket 은 전부 끊긴다**. 게다가 `ConnectionManager.active_connections` 는 프로세스 로컬 리스트라 재생성하면 0 부터 다시 센다 — **같은 숫자는 같은 연결이 아니다**(두 시점에서 같은 1 을 읽고 동일성을 추론한 것이 오류다. 이 세션에서 같은 counter 로 세 번째 정정). 정정된 경로: **재생성으로 끊김 → 자동 재연결 → `topics_disabled` 수신 → purge**. ⛔ 따라서 \"끊김 vs `topics_disabled`\" 분리는 **이 관측이 증명하지 못한다**(한 사이클에 둘 다 일어났다) — 0028 이 이 관측에 걸어 둔 분리 근거를 회수하고, 근거를 코드 경로 `hasTopicLastKnown` 과 그 회귀 테스트로 되돌린다. legacy 도 정정: `/api/rates` 200 은 **수렴 후** 값이라 \"legacy 표면이 topic OFF 자체에 영향받지 않는다\"까지이고, 재생성 순단은 단일 컨테이너라 legacy 도 함께 겪으며 그 구간 UX·WS 연속성은 미실측이다. ✅ **살아남는 결론**: rollback 사다리 2차(coarse kill)가 회복 가능하다 — 시험한 DEBUG 빌드에서 purge 와 **무조작 자동 복구**가 모두 통과했고, `on` 도 재생성이라 앱은 **끊김 2회를 스스로 재연결**했다(결론은 오히려 강해진다). 체크박스 [x] 와 smoke 11/13 유지.",
-          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0029:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:author=OpenAI Codex:reviewer=Claude Code",
+          "**epoch 0029 의 잔여 오류 정정 (append-only supersede, iOS `e2e9b75`)**. 0029 는 `active_ws 1` 의 **방향만 뒤집고 추론 형식은 그대로 뒀다** — \"연결 유지의 증거\" 를 \"앱이 재연결했다는 증거\" 로 바꿨지만, 둘 다 **익명 집계에서 신원을 읽는** 동일한 오류다. 그 게이지는 새 프로세스에 연결이 **하나 있다**는 것만 말하고, 그것이 **누구 것인지**는 말하지 못한다(다른 단말·관리자 페이지·구버전 앱 무엇이든 가능). ⚠️ 같은 counter 로 **네 번째**이고, **그 오류를 명시한 정정 안에서** 다시 저질렀다. 재연결의 근거를 게이지에서 **폰 관측 + 코드 배선의 결합**으로 이관한다: ① force-recreate 로 기존 소켓은 반드시 종료된다 → ② REST bootstrap 의 404 는 `try?` 로 격리돼 `appState` 를 건드리지 않으므로 (`FXi/ViewModels/ExchangeRateViewModel.swift:722`) **배너의 원인이 될 수 없다** → ③ `topics_disabled` rejection 은 **WS subscribe ACK** 에서만 생성되고 (`FXi/Services/WebSocketService.swift:1118`) → ④ 그 rejection 이 있어야만 이 배너 문구가 나온다 (`FXi/ViewModels/ExchangeRateViewModel.swift:512`). → 실기기에서 **이 전용 배너**를 봤다는 것은 앱이 종료된 소켓을 대신할 **새 WS 연결을 맺고 subscribe 해서 ACK 를 받았다**는 뜻이다 — 그것이 자동 재연결의 증거다. `active_ws 1` 은 **보조 관측**으로 격하한다. 결론(coarse kill 회복 가능 · 무조작 복구) · 체크박스 [x] · smoke 11/13 은 그대로 유지된다.",
+          "semantic-input-binding/v1:0030:17deddf184b23ee3f395513fad65e18da361d37452c6f9dc92383341eaec22bc:283627224f969df0b4f3cf9adae018fa190692ebf2afb32f33d3e8e74cb27983:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -580,21 +589,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "9d0081c429939e2b790ba9efd4d9dc3115504f7b6a98d7e4fef8004170e32b2d",
+    "manifest_sha256": "250da984a71af2a1bb13cd62f1664b7983003c7e2a9cd1d9d386cabca24c71d9",
     "baseline_sha256": "f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc",
-    "lock_sha256": "24544032ffca4b9c49be9c6026435cb287e1324ae798d9f9146fce0db320a517",
+    "lock_sha256": "b85bf53f28d30f6d6fbd2be3ebc4bd575c427a56ee69cc41dd9a341cd84257a4",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "cfde229e611223f642ad13aa7ec449e2acf0de62"
+    "ios_commit": "e2e9b75735fc6522fc95acc8730000df34412413"
   },
   "documents": {
-    "ADR": "6645d487443377f7f152f2ca300f6dcbe28d9000f3e6de2b16104b132a584793",
-    "CLIENT": "262973bb747dc185999beebb01f012c1b139abc15b548a62c4c50b1fafae7aec",
-    "CUT": "7391ddc2b1ef7615eb2a0143d2e6cc8449442267c55dab208ab3a527ae7cec34",
-    "HAND": "9aacd4333220c752144d577cf7330396dccb93e5199031d85282cbce61c7d84f",
-    "HEALTH": "1b66ad140a0cf568b7715228f2fdc6f5e9e9cb13614a42839f682d874dec61f8",
-    "LOAD": "6eaef304958cd6d9ffc8d4c904d439f88682c7699b0a3478164118d8c12b3bdc"
+    "ADR": "a6d0f5fcab4b0579a5bc8b5d3aefd620c6ed0089be47ddc52a0677ede7d8affc",
+    "CLIENT": "3ee264ac5a79c2d3aae19e290156d3f6637f0e4571129ff99e3becb69dbea52e",
+    "CUT": "e38c787ad767882a609a877f103683622c819b3ee6106eec4374719ca151c7f4",
+    "HAND": "9b102351a6216350b9116cee5d59d1c633983b0c737fb00035f35ce9dfa09852",
+    "HEALTH": "d1806c6dc35dabd2cb5bcce1e5e09f5d19f6e547edfd9a5540e77f0d5d0dc892",
+    "LOAD": "e29c7dc405e590409a2ee4ac715edddb5a519ab5f9275ac573d55cdcfd47f072"
   },
-  "claim_ledger_sha256": "39ebd0265f0c714c5f13b893b1f10f663868e92c553996037238e6927c65de66",
+  "claim_ledger_sha256": "bcab2a17cc5e3babbcfb7498c8c3898115d9c38473e766d3686dff723a6a7afa",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
