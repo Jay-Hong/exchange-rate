@@ -62,6 +62,7 @@ MARKDOWN_LITERAL_CANDIDATE_INVENTORY = {
     "test_adr041_grounds.py",
     "test_document_citations.py",
     "test_krx_deploy_verifier.py",
+    "test_topic_c2.py",
     "test_topic_docs_semantic_drift.py",
     "test_topic_migration_doc_bundle.py",
     # 2026-08-21 canonical-only provenance 행동 시험이 임시 canonical.md RID 문서를 만든다.

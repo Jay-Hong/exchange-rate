@@ -57,6 +57,7 @@ jobs:
             tests/test_topic_only_documents.py \
             tests/test_topic_only_ledger.py \
             tests/test_topic_only_semantic_review.py \
+            tests/test_topic_c2.py \
             tests/test_topic_docs_semantic_drift.py \
             tests/test_topic_wire.py \
             tests/test_ws_message_limit.py
