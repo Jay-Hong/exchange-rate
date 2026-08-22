@@ -99,7 +99,9 @@
           "C2 재결속 (ios pin `7cd5e45`). **좌표 재도출 3건** — `WebSocketService.swift` 1724(+3)·1744(+4) 편집이 그 아래 인용을 밀었다. pin 시점 원본의 앵커와 1:1 대조해 확정했다: `1856-1875`(`@unknown default:` … `}`) → **1863-1882**, `2032-2090`(`// MARK: - Error Handling & Reconnection` … `.failed(...)`) → **2039-2097**, `2032-2091` → **2039-2098**. 처음엔 신 좌표 내용만 보고 \"경계가 안 맞는다\" 고 의심했는데, **pin 시점 그 좌표의 내용**과 비교하니 앵커가 정확히 일치했다 — 기대가 아니라 원본과 대조해야 한다. 1744 이하 인용과 다른 파일은 미이동이라 손대지 않았다.",
           "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (ios pin `54fdbfb`). **좌표 재도출 25건 / 63곳** — `WebSocketService.swift` 편집 6곳(80·1089·1365·1726·1749·1773)이 구간별로 다른 누적 이동(+5/+11/+15/+18)을 만들어 **인용 25건이 전부** 밀렸다. 구간마다 다르므로 단일 오프셋 산술은 틀린다 — pin 시점 파일과 difflib 로 매핑하고 각 앵커(`revalidationJitter` · `channel?.resume()` · `reconciler 는 다르다` · `@unknown default:` · `// MARK: - Error Handling & Reconnection`)를 신 좌표에서 재확인했다. 치환 후 형식 검사로 깨진 좌표 0 확인.",
-          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex",
+          "`server safety-stop` 실기기 통과 → smoke **11/13** (iOS `9ba1458`). 운영에서 healthy → OFF → purge → ON → **무조작 복구** 전 주기를 처음으로 끝까지 관측했다. 이전 관측은 이미 꺼진 서버로의 **cold start** 라 \"topic 값을 **전부 지우고**\" 를 증명하지 못했는데(지울 값이 없었다), 이번엔 baseline 을 먼저 세우고 (usdt 1 · fx {1,1,1} · 폰에 시세 표시) 껐다. ⚠️ **핵심 관측**: OFF 중에도 `active_ws 1` 이 유지됐다 — 연결은 살아 있고 topic 만 닫혔다. 즉 앱이 본 것은 연결 끊김이 아니라 `topics_disabled` 수신이고, 값 purge 가 **그 신호에 대한 반응**임이 구분됐다(끊김에서는 last-known 을 유지해야 한다 — 이 세션에서 고친 `hasTopicLastKnown` 축과 정확히 대응). 총 OFF 1분 46초. 복구는 재시도·재실행 없이 일어났고 서버 구독은 baseline 과 동일하게 복귀했다(usdt 1 · fx {1,1,1} · restarts 0 · ERROR 0). → 문서화된 rollback 사다리 **2차(coarse kill)가 회복 가능**함이 실증됐다 — 이전에는 \"끄면 v2 사용자가 빈 화면\" 이라는 위험만 있었고 복구 가능성은 미실증이었다. ℹ️ 부수: purge 중에도 헤더 `업데이트: 18:09` 잔존(막는 사안 아님, 후속 UX).",
+          "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -182,7 +184,8 @@
           "남은 3축 smoke 재현 도구 C1 (iOS `7cd5e45`). OpenAI Codex 가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 **운영 서버 조작 없이** 실기기에서 재현하도록 DEBUG 주입기를 확장했다. 세 축을 같은 방식으로 주입하지 않고 각각 실제 경로를 통과시킨 게 핵심이다 — 재검증은 실제 요청의 ACK 를 `temporarily_unavailable` 로 바꿔 **같은 재시도 예산**을 소진시키고, 배치는 ACK 만 유실시키되 한 topic frame 은 통과시켜 격리를 보이며, lease 는 ACK 의 lease 만 짧게 해 **foreground 만료 판정**을 태운다. ⛔ 세 축 모두 **카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴**으로만 PASS 한다. lease 는 복구 snapshot 도착이 아니라 **topic 상태 healthy** 까지 요구하도록 스스로 강화했다(decode·state 반영 실패 구분). 응답이 send 완료보다 먼저 오는 경합도 찾아 고치고 순서 회귀를 추가했다. Claude Code 독립 검증: 790 tests 0 failures · clean Release 빌드 exit 0 · **Release 산출물 `strings` 에서 `DebugTopicSmokeController`/`Channel`/`Section`/`TOPIC-SMOKE` 전부 0**, ASCII 대조군은 존재해 검사가 공허하지 않음까지 보였다(⚠️ 한국어 문자열은 대조군도 0 이라 무의미 — 오라클을 확인하지 않았으면 거짓 확신이었다).",
           "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=OpenAI Codex:reviewer=Claude Code",
           "smoke 3축 실기기 통과 → **10/13** (iOS `54fdbfb`). 사용자가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 실기기에서 통과시켰다. 판정은 카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴이다 — 재검증은 `degradedTopics ∧ manualRetryTopics`, 배치는 usdt `healthy` + 나머지 degraded, lease 는 만료 집행 → foreground 판정 → 재연결 → 회복 snapshot 전 단계. ⚠️ OpenAI Codex 가 lease smoke 실행 중 **실제 순서 버그**를 찾아 고쳤다 — foreground observer 보다 먼저 lease 를 제거하면 뒤 observer 가 빈 만료 집합을 받아 **정상 집행을 '만료 전 복귀'로 오판**했다. 도구가 거짓 FAIL 을 내는 결함이었고, 만료 집행 훅 제거 변이가 assertion 2건으로 검출되도록 잠갔다. Claude Code 독립 검증: 792 tests 0 failures · clean Release 빌드 exit 0 · Release 바이너리 `strings` 에서 DEBUG 심볼 0 + ASCII 대조군 존재 · arming OFF.",
-          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code",
+          "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -272,7 +275,8 @@
           "남은 3축 smoke 재현 도구 C1 (iOS `7cd5e45`). OpenAI Codex 가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 **운영 서버 조작 없이** 실기기에서 재현하도록 DEBUG 주입기를 확장했다. 세 축을 같은 방식으로 주입하지 않고 각각 실제 경로를 통과시킨 게 핵심이다 — 재검증은 실제 요청의 ACK 를 `temporarily_unavailable` 로 바꿔 **같은 재시도 예산**을 소진시키고, 배치는 ACK 만 유실시키되 한 topic frame 은 통과시켜 격리를 보이며, lease 는 ACK 의 lease 만 짧게 해 **foreground 만료 판정**을 태운다. ⛔ 세 축 모두 **카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴**으로만 PASS 한다. lease 는 복구 snapshot 도착이 아니라 **topic 상태 healthy** 까지 요구하도록 스스로 강화했다(decode·state 반영 실패 구분). 응답이 send 완료보다 먼저 오는 경합도 찾아 고치고 순서 회귀를 추가했다. Claude Code 독립 검증: 790 tests 0 failures · clean Release 빌드 exit 0 · **Release 산출물 `strings` 에서 `DebugTopicSmokeController`/`Channel`/`Section`/`TOPIC-SMOKE` 전부 0**, ASCII 대조군은 존재해 검사가 공허하지 않음까지 보였다(⚠️ 한국어 문자열은 대조군도 0 이라 무의미 — 오라클을 확인하지 않았으면 거짓 확신이었다).",
           "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=OpenAI Codex:reviewer=Claude Code",
           "smoke 3축 실기기 통과 → **10/13** (iOS `54fdbfb`). 사용자가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 실기기에서 통과시켰다. 판정은 카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴이다 — 재검증은 `degradedTopics ∧ manualRetryTopics`, 배치는 usdt `healthy` + 나머지 degraded, lease 는 만료 집행 → foreground 판정 → 재연결 → 회복 snapshot 전 단계. ⚠️ OpenAI Codex 가 lease smoke 실행 중 **실제 순서 버그**를 찾아 고쳤다 — foreground observer 보다 먼저 lease 를 제거하면 뒤 observer 가 빈 만료 집합을 받아 **정상 집행을 '만료 전 복귀'로 오판**했다. 도구가 거짓 FAIL 을 내는 결함이었고, 만료 집행 훅 제거 변이가 assertion 2건으로 검출되도록 잠갔다. Claude Code 독립 검증: 792 tests 0 failures · clean Release 빌드 exit 0 · Release 바이너리 `strings` 에서 DEBUG 심볼 0 + ASCII 대조군 존재 · arming OFF.",
-          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code",
+          "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -363,7 +367,9 @@
           "C2 재결속 (ios pin `7cd5e45`). **좌표 재도출 3건** — `WebSocketService.swift` 1724(+3)·1744(+4) 편집이 그 아래 인용을 밀었다. pin 시점 원본의 앵커와 1:1 대조해 확정했다: `1856-1875`(`@unknown default:` … `}`) → **1863-1882**, `2032-2090`(`// MARK: - Error Handling & Reconnection` … `.failed(...)`) → **2039-2097**, `2032-2091` → **2039-2098**. 처음엔 신 좌표 내용만 보고 \"경계가 안 맞는다\" 고 의심했는데, **pin 시점 그 좌표의 내용**과 비교하니 앵커가 정확히 일치했다 — 기대가 아니라 원본과 대조해야 한다. 1744 이하 인용과 다른 파일은 미이동이라 손대지 않았다.",
           "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (ios pin `54fdbfb`). **좌표 재도출 25건 / 63곳** — `WebSocketService.swift` 편집 6곳(80·1089·1365·1726·1749·1773)이 구간별로 다른 누적 이동(+5/+11/+15/+18)을 만들어 **인용 25건이 전부** 밀렸다. 구간마다 다르므로 단일 오프셋 산술은 틀린다 — pin 시점 파일과 difflib 로 매핑하고 각 앵커(`revalidationJitter` · `channel?.resume()` · `reconciler 는 다르다` · `@unknown default:` · `// MARK: - Error Handling & Reconnection`)를 신 좌표에서 재확인했다. 치환 후 형식 검사로 깨진 좌표 0 확인.",
-          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex",
+          "`server safety-stop` 실기기 통과 → smoke **11/13** (iOS `9ba1458`). 운영에서 healthy → OFF → purge → ON → **무조작 복구** 전 주기를 처음으로 끝까지 관측했다. 이전 관측은 이미 꺼진 서버로의 **cold start** 라 \"topic 값을 **전부 지우고**\" 를 증명하지 못했는데(지울 값이 없었다), 이번엔 baseline 을 먼저 세우고 (usdt 1 · fx {1,1,1} · 폰에 시세 표시) 껐다. ⚠️ **핵심 관측**: OFF 중에도 `active_ws 1` 이 유지됐다 — 연결은 살아 있고 topic 만 닫혔다. 즉 앱이 본 것은 연결 끊김이 아니라 `topics_disabled` 수신이고, 값 purge 가 **그 신호에 대한 반응**임이 구분됐다(끊김에서는 last-known 을 유지해야 한다 — 이 세션에서 고친 `hasTopicLastKnown` 축과 정확히 대응). 총 OFF 1분 46초. 복구는 재시도·재실행 없이 일어났고 서버 구독은 baseline 과 동일하게 복귀했다(usdt 1 · fx {1,1,1} · restarts 0 · ERROR 0). → 문서화된 rollback 사다리 **2차(coarse kill)가 회복 가능**함이 실증됐다 — 이전에는 \"끄면 v2 사용자가 빈 화면\" 이라는 위험만 있었고 복구 가능성은 미실증이었다. ℹ️ 부수: purge 중에도 헤더 `업데이트: 18:09` 잔존(막는 사안 아님, 후속 UX).",
+          "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -460,7 +466,9 @@
           "C2 재결속 (ios pin `7cd5e45`). **좌표 재도출 3건** — `WebSocketService.swift` 1724(+3)·1744(+4) 편집이 그 아래 인용을 밀었다. pin 시점 원본의 앵커와 1:1 대조해 확정했다: `1856-1875`(`@unknown default:` … `}`) → **1863-1882**, `2032-2090`(`// MARK: - Error Handling & Reconnection` … `.failed(...)`) → **2039-2097**, `2032-2091` → **2039-2098**. 처음엔 신 좌표 내용만 보고 \"경계가 안 맞는다\" 고 의심했는데, **pin 시점 그 좌표의 내용**과 비교하니 앵커가 정확히 일치했다 — 기대가 아니라 원본과 대조해야 한다. 1744 이하 인용과 다른 파일은 미이동이라 손대지 않았다.",
           "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (ios pin `54fdbfb`). **좌표 재도출 25건 / 63곳** — `WebSocketService.swift` 편집 6곳(80·1089·1365·1726·1749·1773)이 구간별로 다른 누적 이동(+5/+11/+15/+18)을 만들어 **인용 25건이 전부** 밀렸다. 구간마다 다르므로 단일 오프셋 산술은 틀린다 — pin 시점 파일과 difflib 로 매핑하고 각 앵커(`revalidationJitter` · `channel?.resume()` · `reconciler 는 다르다` · `@unknown default:` · `// MARK: - Error Handling & Reconnection`)를 신 좌표에서 재확인했다. 치환 후 형식 검사로 깨진 좌표 0 확인.",
-          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=Claude Code:reviewer=OpenAI Codex",
+          "`server safety-stop` 실기기 통과 → smoke **11/13** (iOS `9ba1458`). 운영에서 healthy → OFF → purge → ON → **무조작 복구** 전 주기를 처음으로 끝까지 관측했다. 이전 관측은 이미 꺼진 서버로의 **cold start** 라 \"topic 값을 **전부 지우고**\" 를 증명하지 못했는데(지울 값이 없었다), 이번엔 baseline 을 먼저 세우고 (usdt 1 · fx {1,1,1} · 폰에 시세 표시) 껐다. ⚠️ **핵심 관측**: OFF 중에도 `active_ws 1` 이 유지됐다 — 연결은 살아 있고 topic 만 닫혔다. 즉 앱이 본 것은 연결 끊김이 아니라 `topics_disabled` 수신이고, 값 purge 가 **그 신호에 대한 반응**임이 구분됐다(끊김에서는 last-known 을 유지해야 한다 — 이 세션에서 고친 `hasTopicLastKnown` 축과 정확히 대응). 총 OFF 1분 46초. 복구는 재시도·재실행 없이 일어났고 서버 구독은 baseline 과 동일하게 복귀했다(usdt 1 · fx {1,1,1} · restarts 0 · ERROR 0). → 문서화된 rollback 사다리 **2차(coarse kill)가 회복 가능**함이 실증됐다 — 이전에는 \"끄면 v2 사용자가 빈 화면\" 이라는 위험만 있었고 복구 가능성은 미실증이었다. ℹ️ 부수: purge 중에도 헤더 `업데이트: 18:09` 잔존(막는 사안 아님, 후속 UX).",
+          "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -548,7 +556,8 @@
           "남은 3축 smoke 재현 도구 C1 (iOS `7cd5e45`). OpenAI Codex 가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 **운영 서버 조작 없이** 실기기에서 재현하도록 DEBUG 주입기를 확장했다. 세 축을 같은 방식으로 주입하지 않고 각각 실제 경로를 통과시킨 게 핵심이다 — 재검증은 실제 요청의 ACK 를 `temporarily_unavailable` 로 바꿔 **같은 재시도 예산**을 소진시키고, 배치는 ACK 만 유실시키되 한 topic frame 은 통과시켜 격리를 보이며, lease 는 ACK 의 lease 만 짧게 해 **foreground 만료 판정**을 태운다. ⛔ 세 축 모두 **카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴**으로만 PASS 한다. lease 는 복구 snapshot 도착이 아니라 **topic 상태 healthy** 까지 요구하도록 스스로 강화했다(decode·state 반영 실패 구분). 응답이 send 완료보다 먼저 오는 경합도 찾아 고치고 순서 회귀를 추가했다. Claude Code 독립 검증: 790 tests 0 failures · clean Release 빌드 exit 0 · **Release 산출물 `strings` 에서 `DebugTopicSmokeController`/`Channel`/`Section`/`TOPIC-SMOKE` 전부 0**, ASCII 대조군은 존재해 검사가 공허하지 않음까지 보였다(⚠️ 한국어 문자열은 대조군도 0 이라 무의미 — 오라클을 확인하지 않았으면 거짓 확신이었다).",
           "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=OpenAI Codex:reviewer=Claude Code",
           "smoke 3축 실기기 통과 → **10/13** (iOS `54fdbfb`). 사용자가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 실기기에서 통과시켰다. 판정은 카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴이다 — 재검증은 `degradedTopics ∧ manualRetryTopics`, 배치는 usdt `healthy` + 나머지 degraded, lease 는 만료 집행 → foreground 판정 → 재연결 → 회복 snapshot 전 단계. ⚠️ OpenAI Codex 가 lease smoke 실행 중 **실제 순서 버그**를 찾아 고쳤다 — foreground observer 보다 먼저 lease 를 제거하면 뒤 observer 가 빈 만료 집합을 받아 **정상 집행을 '만료 전 복귀'로 오판**했다. 도구가 거짓 FAIL 을 내는 결함이었고, 만료 집행 훅 제거 변이가 assertion 2건으로 검출되도록 잠갔다. Claude Code 독립 검증: 792 tests 0 failures · clean Release 빌드 exit 0 · Release 바이너리 `strings` 에서 DEBUG 심볼 0 + ASCII 대조군 존재 · arming OFF.",
-          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0027:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:author=OpenAI Codex:reviewer=Claude Code",
+          "semantic-input-binding/v1:0028:b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c:865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -562,21 +571,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "cba3deae78cadbd65f98e85f3d8c62a468f4e1d7171f3b3a1a02f1cca9927ec2",
+    "manifest_sha256": "9346fd850248e240fed1550cc1b9f2ac5ead68f60de821dd2d24f12084e384d5",
     "baseline_sha256": "f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc",
-    "lock_sha256": "4b7db8b96c073a532463d60f12c75b438af86cf7b2ddca8eed13323b9a85fb78",
+    "lock_sha256": "130d8ef467048a1818fb591a862bea9db6a609d3df8f2fba0f7e227db4cb4ca2",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "54fdbfb161c75d8556cf8eef76b647cf8b6d848c"
+    "ios_commit": "9ba1458095e03af9ca036088112ef715ee2cb943"
   },
   "documents": {
-    "ADR": "c308675efa1fcd267d5551e161bd57666ba3bb0ae696f370ff926a3467fb88ad",
-    "CLIENT": "a850c6a00a8452487095a7c7dc9a6aa8ce76c4430b658b174ad78f821cbbf262",
-    "CUT": "abde4c8f1a1cfecd32ec86df7338c40fc0ab529dd1d8c653ce5326a56f410f83",
-    "HAND": "891aa6ce6920e00268f13e14e0d39ae4adbd9a3abff2486ccad1c2c94aa007a9",
-    "HEALTH": "99f902cd78f05c2acece36882f024cdf727784504965251951491ee463ef4c8c",
-    "LOAD": "db92e6a6d9cbf1f04bcf396326b8f6b9beccefef01d97b8719ea369812234231"
+    "ADR": "4e4139dd25bd7b1838e6d62d2bd9d8bf01966fbd2c46a8abe7628a6db3066fd5",
+    "CLIENT": "6a623fb7e7445e3cd70d8c0781750493cd6db08af43f28daf6adf3643cdb530c",
+    "CUT": "47aa0eb63149250a5b0ee6516fb8cb8e3d0907ed67edaa9a59f0c5c1117ec0cf",
+    "HAND": "faaa32a79fe9a1c902ed5fc4725ed2e9aa6b4cb9874fa5f356852b7e00dff153",
+    "HEALTH": "85ed960c84363a9462b8c8d8aa4636b6280b5791acc77d01f6ab920b6817edfc",
+    "LOAD": "fcd6f910a5696d3ce91421727d99a361300aaf63ec2d3fefe3a9d00b51f1786e"
   },
-  "claim_ledger_sha256": "658a33c1241d1f4fa1f64baf496db2af2597c30f696ee05791b09302abb9f3cc",
+  "claim_ledger_sha256": "108f3b9eed82ac9625cb37bfc2cade92a6bd678be1dac53406a6d04132cec6e2",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,

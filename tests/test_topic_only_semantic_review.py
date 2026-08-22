@@ -161,6 +161,11 @@ SEMANTIC_BINDING_HISTORY = (
         "677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a",
         "b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c",
     ),
+    (
+        28,
+        "b8caef18e00a55162f293c53434be2263e9900cd44ebe132d899995d1e4f900c",
+        "865120dc8cd3cefd17705d0c6f46da980a2f4c3d7ede3c8da697c0715d50b851",
+    ),
 )
 SEMANTIC_BINDING_RE = re.compile(
     rf"^{re.escape(SEMANTIC_BINDING_PREFIX)}"
