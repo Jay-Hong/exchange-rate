@@ -681,7 +681,7 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   | ② **서버 canary 실행** | `TOPIC_DISPATCHER_ENABLED=true`. 측정. | OFF | ✅ 2026-08-05 완주 |
   | ③ **W 확정** | 측정 결과로 `W` 와 조정·rollback **숫자 기준**을 기록. | OFF | ✅ `W=4` 확정 |
   | ④ **Release GO(결정)** | 세 잔여 위험(IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용)을 명시 수용. 런북 §2-d 에 기록. | OFF | ✅ 2026-08-21 |
-  | ⑤ **인증 bounded E2E canary** | 런북 §2-e — **dispatcher 만** 유계 ON 후 자동 OFF 수렴. 익명 침묵 · 비구독 `premium_required` · 구독자 snapshot 을 실제 wire 로 증명. | OFF (계속 OFF) | ⏳ 미실행 |
+  | ⑤ **인증 bounded E2E canary** | 런북 §2-e — **dispatcher 만** 유계 ON 후 자동 OFF 수렴. 익명 침묵 · 비구독 `premium_required` · 구독자 snapshot 을 실제 wire 로 증명. | OFF (계속 OFF) | ✅ 2026-08-22 (`6a1ec65`, watchdog `DONE`·최종 `OFF`) |
   | ⑥ **활성화** | 서버 영구 flag ON(런북 3) → **smoke 통과**(런북 4) → arming → phased release. ⚠️ flag ON 구간에도 arming 은 계속 OFF 다. | OFF → ON (smoke 통과 후) | ⏳ 별도 GO |
 
   ⚠️ **부하 공급원을 반드시 정한다** — Release 앱이 OFF 인 동안에는 **자연 인증 트래픽이 거의 없다**.

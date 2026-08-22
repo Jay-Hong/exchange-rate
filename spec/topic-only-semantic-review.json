@@ -83,7 +83,9 @@
           "C2 재결속(코드 변경 0 — 문서·게이트 전용). pin 은 `7f0b6f2`/`1c80653` 유지: 인용된 코드 파일이 바뀌지 않았다. ⚠️ **재검토자 자기 정정** — 직전 epoch 에서 `:20-26 → 20-27` 을 '주장문 대조로 재도출했다' 고 적었으나 실제로는 **옛 좌표의 모양을 옮겼을 뿐**이다(`_publish_tasks` 가 밀린 것만 반영). 바로 그 epoch 에서 '좌표는 옮기는 게 아니라 주장문으로 다시 찾는 것' 이라고 쓰고도 같은 실수를 했다 — 범위를 옮기기 전에 **그 범위가 주장을 증명하는지**를 먼저 물었어야 했다. 0017 의 문장들은 append-only 원칙대로 보존하고 여기서 앞으로 정정한다.",
           "semantic-input-binding/v1:0018:d88c7d6e92b9c09337af07902e72bd4f786feb48e4655891e48679b8d74801cd:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (server pin `b1d1fc4` · ios pin `f8eaafb`). 신규 파일이라 기존 인용 이동 0, 런북도 행 중립이라 좌표 재도출 대상이 없다 — pin 전진과 해시 체인 재봉인만 수행했다. 이로써 런북 §2-e ① 이 **요구만 하는 문장에서 실행 가능한 절차**가 됐다.",
-          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `7c30b15`). 서버 쪽은 `FREE_TIER_ACCESS_MODEL_PLAN` ⑤ 를 완료로 전환(정본 문서가 아니라 해시 체인 밖). 런북이 행 중립이라 좌표 재도출 대상 없음 — pin 전진과 재봉인만 수행했다. ⚠️ 운영 사실을 memory 에만 적고 정본을 안 고치면 그것도 drift 다 — 다음부터 운영 실행 결과는 정본 결속을 같은 작업 단위에 넣는다.",
+          "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -152,7 +154,9 @@
           "epoch 0017 인과 서술 정정 + DXY 근거 좌표 직접화. OpenAI Codex 가 두 가지를 짚었다. (1) **0017 의 원인 설명이 과장이다** — 0017 은 'UTC 를 실은 정상 DXY 데이터에서 canary 가 false-fail 했을 것' 이라고 적었으나, 운영 DXY 는 `crud.to_kst_isoformat(record.timestamp)`(`app/crud.py:1423`)로 이미 KST 로 직렬화되고 운영 실측값도 `+09:00` 이다. 근거로 들었던 커밋된 테스트는 **합성 UTC 입력을 넣은 단위 테스트**라 함수 동작을 증명할 뿐 운영 데이터가 UTC 임을 증명하지 않는다. 따라서 publisher 정규화는 장애 수정이 아니라 **방어적 계약 강화**이고, 만약 UTC 가 wire 에 나타나면 canary 실패는 false-fail 이 아니라 **계약 위반을 잡은 true positive** 다. (2) **R-INV-1 의 `:20-27` 은 주장을 받치지 못한다** — 상수와 task 보관 set 만 가리켜 'payload 와 live 발행을 소유한다' 를 증명하지 않는다. `73-83`(`build_dxy_topic_payload`) + `115-134`(`publish_dxy_topic_snapshot`, `return sent > 0` 까지)로 직접화했고, R-INV-3 의 과도한 `20-132` 도 `115-134` 로 좁혔다. 같은 기계적 이동이 다시 통과하지 못하게 ADR-030/031 anti-stale 시험과 같은 패턴의 회귀 잠금을 추가했다.",
           "semantic-input-binding/v1:0018:d88c7d6e92b9c09337af07902e72bd4f786feb48e4655891e48679b8d74801cd:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:author=OpenAI Codex:reviewer=Claude Code",
           "WS 인증 stage 전환 실행기 C1 (`b1d1fc4` · iOS `f8eaafb`). OpenAI Codex 가 **절차의 도달 불가 공백**을 찾았다 — 런북 §2-e ① 은 `WS_TOPIC_AUTH_STAGE` 가 file·runtime 모두 final 이어야 한다고 요구했지만 그 값을 **쓰는 도구가 없었다**(`topic_flag.py` 는 검사만 한다). 남은 길이 수동 `.env` 편집인데 셸 변수가 `--env-file` 을 이기고 backup 이 리포에 노출되는 등 이미 겪은 함정이다. `scripts/topic_auth_stage.py` 를 availability flag 와 **분리해** 신설: dispatcher OFF 를 file·runtime 양쪽에서 **두 방향 모두** 강제(완화가 live dispatcher 에서 불가능해야 무인증 노출을 실수로 열 수 없다), strict 파싱 재사용, 공유 lock + atomic write + CAS, `mutation_started` 소유권을 **CAS 통과 뒤에만** 잡아 그 전 실패의 rollback 이 외부 편집을 덮지 않게, 재생성 + health + 사후 교차 검증, 실패·취소 시 **직전 런타임 stage** 복귀. no-op 도 사전검사를 신뢰하지 않고 재검증한다. Claude Code 재검토: 기존 도구가 정말 이 키를 쓰지 않는지(write 패턴 0), 승인된 primitive(`atomic_write_bytes`/`env_operation_lock`)를 쓰는지, 런북이 5-for-5 행 중립(379행)이라 좌표가 안 밀리는지를 확인했고, **런타임 dispatcher OFF 강제를 제거하는 변이를 직접 실행해 2건 RED** 를 실측했다.",
-          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code",
+          "bounded E2E 인증 canary 운영 PASS 를 정본에 결속 (iOS `7c30b15`). OpenAI Codex 가 **증거가 정본이 아니라 개인 memory 에만 남은 공백**을 짚었다 — 런북 §2-e 는 계속 '미실행' 이었고 열등한 token-file 절차를 규정하고 있었다. 세션 내내 잡아온 doc/reality 괴리를 재검토자가 스스로 만든 셈이다. §2-e 에 PASS 결과(익명 registry 0 + legacy rates·pong / 비구독 `premium_required` / 구독 2 topic snapshot / REST 401·403·200 / 종료 후 OFF 복원)와 PENDING 503→403 계약을 기록하고, token 절차를 **무저장 stdin** 으로 교체했다(mint 는 호스트에 `firebase_admin` 이 없어 `docker exec -i` 경유). 영구 ON 범위도 **4 → 5 topic** 으로 정정했다 — `dxy:spot` 이 이번 세션에 land 해서 범위가 커졌다. Claude Code 재검토: 커밋된 정본이 실제로 stale 이었음(0600 절차 202-203행, FREE_TIER ⑤ 미실행), 5 topic 계산(usdt+dxy+FX3, KRX 는 G2∧G3 별개), 그리고 **인용 7좌표가 내용으로 불변**임을 각각 확인했다 (148/313/341/346/350/356/369 — 추가분이 380행부터라 최대 인용 369 아래를 밀지 않는다).",
+          "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -228,7 +232,9 @@
           "epoch 0017 인과 서술 정정 + DXY 근거 좌표 직접화. OpenAI Codex 가 두 가지를 짚었다. (1) **0017 의 원인 설명이 과장이다** — 0017 은 'UTC 를 실은 정상 DXY 데이터에서 canary 가 false-fail 했을 것' 이라고 적었으나, 운영 DXY 는 `crud.to_kst_isoformat(record.timestamp)`(`app/crud.py:1423`)로 이미 KST 로 직렬화되고 운영 실측값도 `+09:00` 이다. 근거로 들었던 커밋된 테스트는 **합성 UTC 입력을 넣은 단위 테스트**라 함수 동작을 증명할 뿐 운영 데이터가 UTC 임을 증명하지 않는다. 따라서 publisher 정규화는 장애 수정이 아니라 **방어적 계약 강화**이고, 만약 UTC 가 wire 에 나타나면 canary 실패는 false-fail 이 아니라 **계약 위반을 잡은 true positive** 다. (2) **R-INV-1 의 `:20-27` 은 주장을 받치지 못한다** — 상수와 task 보관 set 만 가리켜 'payload 와 live 발행을 소유한다' 를 증명하지 않는다. `73-83`(`build_dxy_topic_payload`) + `115-134`(`publish_dxy_topic_snapshot`, `return sent > 0` 까지)로 직접화했고, R-INV-3 의 과도한 `20-132` 도 `115-134` 로 좁혔다. 같은 기계적 이동이 다시 통과하지 못하게 ADR-030/031 anti-stale 시험과 같은 패턴의 회귀 잠금을 추가했다.",
           "semantic-input-binding/v1:0018:d88c7d6e92b9c09337af07902e72bd4f786feb48e4655891e48679b8d74801cd:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:author=OpenAI Codex:reviewer=Claude Code",
           "WS 인증 stage 전환 실행기 C1 (`b1d1fc4` · iOS `f8eaafb`). OpenAI Codex 가 **절차의 도달 불가 공백**을 찾았다 — 런북 §2-e ① 은 `WS_TOPIC_AUTH_STAGE` 가 file·runtime 모두 final 이어야 한다고 요구했지만 그 값을 **쓰는 도구가 없었다**(`topic_flag.py` 는 검사만 한다). 남은 길이 수동 `.env` 편집인데 셸 변수가 `--env-file` 을 이기고 backup 이 리포에 노출되는 등 이미 겪은 함정이다. `scripts/topic_auth_stage.py` 를 availability flag 와 **분리해** 신설: dispatcher OFF 를 file·runtime 양쪽에서 **두 방향 모두** 강제(완화가 live dispatcher 에서 불가능해야 무인증 노출을 실수로 열 수 없다), strict 파싱 재사용, 공유 lock + atomic write + CAS, `mutation_started` 소유권을 **CAS 통과 뒤에만** 잡아 그 전 실패의 rollback 이 외부 편집을 덮지 않게, 재생성 + health + 사후 교차 검증, 실패·취소 시 **직전 런타임 stage** 복귀. no-op 도 사전검사를 신뢰하지 않고 재검증한다. Claude Code 재검토: 기존 도구가 정말 이 키를 쓰지 않는지(write 패턴 0), 승인된 primitive(`atomic_write_bytes`/`env_operation_lock`)를 쓰는지, 런북이 5-for-5 행 중립(379행)이라 좌표가 안 밀리는지를 확인했고, **런타임 dispatcher OFF 강제를 제거하는 변이를 직접 실행해 2건 RED** 를 실측했다.",
-          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code",
+          "bounded E2E 인증 canary 운영 PASS 를 정본에 결속 (iOS `7c30b15`). OpenAI Codex 가 **증거가 정본이 아니라 개인 memory 에만 남은 공백**을 짚었다 — 런북 §2-e 는 계속 '미실행' 이었고 열등한 token-file 절차를 규정하고 있었다. 세션 내내 잡아온 doc/reality 괴리를 재검토자가 스스로 만든 셈이다. §2-e 에 PASS 결과(익명 registry 0 + legacy rates·pong / 비구독 `premium_required` / 구독 2 topic snapshot / REST 401·403·200 / 종료 후 OFF 복원)와 PENDING 503→403 계약을 기록하고, token 절차를 **무저장 stdin** 으로 교체했다(mint 는 호스트에 `firebase_admin` 이 없어 `docker exec -i` 경유). 영구 ON 범위도 **4 → 5 topic** 으로 정정했다 — `dxy:spot` 이 이번 세션에 land 해서 범위가 커졌다. Claude Code 재검토: 커밋된 정본이 실제로 stale 이었음(0600 절차 202-203행, FREE_TIER ⑤ 미실행), 5 topic 계산(usdt+dxy+FX3, KRX 는 G2∧G3 별개), 그리고 **인용 7좌표가 내용으로 불변**임을 각각 확인했다 (148/313/341/346/350/356/369 — 추가분이 380행부터라 최대 인용 369 아래를 밀지 않는다).",
+          "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -303,7 +309,9 @@
           "C2 재결속(코드 변경 0 — 문서·게이트 전용). pin 은 `7f0b6f2`/`1c80653` 유지: 인용된 코드 파일이 바뀌지 않았다. ⚠️ **재검토자 자기 정정** — 직전 epoch 에서 `:20-26 → 20-27` 을 '주장문 대조로 재도출했다' 고 적었으나 실제로는 **옛 좌표의 모양을 옮겼을 뿐**이다(`_publish_tasks` 가 밀린 것만 반영). 바로 그 epoch 에서 '좌표는 옮기는 게 아니라 주장문으로 다시 찾는 것' 이라고 쓰고도 같은 실수를 했다 — 범위를 옮기기 전에 **그 범위가 주장을 증명하는지**를 먼저 물었어야 했다. 0017 의 문장들은 append-only 원칙대로 보존하고 여기서 앞으로 정정한다.",
           "semantic-input-binding/v1:0018:d88c7d6e92b9c09337af07902e72bd4f786feb48e4655891e48679b8d74801cd:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (server pin `b1d1fc4` · ios pin `f8eaafb`). 신규 파일이라 기존 인용 이동 0, 런북도 행 중립이라 좌표 재도출 대상이 없다 — pin 전진과 해시 체인 재봉인만 수행했다. 이로써 런북 §2-e ① 이 **요구만 하는 문장에서 실행 가능한 절차**가 됐다.",
-          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `7c30b15`). 서버 쪽은 `FREE_TIER_ACCESS_MODEL_PLAN` ⑤ 를 완료로 전환(정본 문서가 아니라 해시 체인 밖). 런북이 행 중립이라 좌표 재도출 대상 없음 — pin 전진과 재봉인만 수행했다. ⚠️ 운영 사실을 memory 에만 적고 정본을 안 고치면 그것도 drift 다 — 다음부터 운영 실행 결과는 정본 결속을 같은 작업 단위에 넣는다.",
+          "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -384,7 +392,9 @@
           "C2 재결속(코드 변경 0 — 문서·게이트 전용). pin 은 `7f0b6f2`/`1c80653` 유지: 인용된 코드 파일이 바뀌지 않았다. ⚠️ **재검토자 자기 정정** — 직전 epoch 에서 `:20-26 → 20-27` 을 '주장문 대조로 재도출했다' 고 적었으나 실제로는 **옛 좌표의 모양을 옮겼을 뿐**이다(`_publish_tasks` 가 밀린 것만 반영). 바로 그 epoch 에서 '좌표는 옮기는 게 아니라 주장문으로 다시 찾는 것' 이라고 쓰고도 같은 실수를 했다 — 범위를 옮기기 전에 **그 범위가 주장을 증명하는지**를 먼저 물었어야 했다. 0017 의 문장들은 append-only 원칙대로 보존하고 여기서 앞으로 정정한다.",
           "semantic-input-binding/v1:0018:d88c7d6e92b9c09337af07902e72bd4f786feb48e4655891e48679b8d74801cd:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (server pin `b1d1fc4` · ios pin `f8eaafb`). 신규 파일이라 기존 인용 이동 0, 런북도 행 중립이라 좌표 재도출 대상이 없다 — pin 전진과 해시 체인 재봉인만 수행했다. 이로써 런북 §2-e ① 이 **요구만 하는 문장에서 실행 가능한 절차**가 됐다.",
-          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `7c30b15`). 서버 쪽은 `FREE_TIER_ACCESS_MODEL_PLAN` ⑤ 를 완료로 전환(정본 문서가 아니라 해시 체인 밖). 런북이 행 중립이라 좌표 재도출 대상 없음 — pin 전진과 재봉인만 수행했다. ⚠️ 운영 사실을 memory 에만 적고 정본을 안 고치면 그것도 drift 다 — 다음부터 운영 실행 결과는 정본 결속을 같은 작업 단위에 넣는다.",
+          "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -458,7 +468,9 @@
           "epoch 0017 인과 서술 정정 + DXY 근거 좌표 직접화. OpenAI Codex 가 두 가지를 짚었다. (1) **0017 의 원인 설명이 과장이다** — 0017 은 'UTC 를 실은 정상 DXY 데이터에서 canary 가 false-fail 했을 것' 이라고 적었으나, 운영 DXY 는 `crud.to_kst_isoformat(record.timestamp)`(`app/crud.py:1423`)로 이미 KST 로 직렬화되고 운영 실측값도 `+09:00` 이다. 근거로 들었던 커밋된 테스트는 **합성 UTC 입력을 넣은 단위 테스트**라 함수 동작을 증명할 뿐 운영 데이터가 UTC 임을 증명하지 않는다. 따라서 publisher 정규화는 장애 수정이 아니라 **방어적 계약 강화**이고, 만약 UTC 가 wire 에 나타나면 canary 실패는 false-fail 이 아니라 **계약 위반을 잡은 true positive** 다. (2) **R-INV-1 의 `:20-27` 은 주장을 받치지 못한다** — 상수와 task 보관 set 만 가리켜 'payload 와 live 발행을 소유한다' 를 증명하지 않는다. `73-83`(`build_dxy_topic_payload`) + `115-134`(`publish_dxy_topic_snapshot`, `return sent > 0` 까지)로 직접화했고, R-INV-3 의 과도한 `20-132` 도 `115-134` 로 좁혔다. 같은 기계적 이동이 다시 통과하지 못하게 ADR-030/031 anti-stale 시험과 같은 패턴의 회귀 잠금을 추가했다.",
           "semantic-input-binding/v1:0018:d88c7d6e92b9c09337af07902e72bd4f786feb48e4655891e48679b8d74801cd:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:author=OpenAI Codex:reviewer=Claude Code",
           "WS 인증 stage 전환 실행기 C1 (`b1d1fc4` · iOS `f8eaafb`). OpenAI Codex 가 **절차의 도달 불가 공백**을 찾았다 — 런북 §2-e ① 은 `WS_TOPIC_AUTH_STAGE` 가 file·runtime 모두 final 이어야 한다고 요구했지만 그 값을 **쓰는 도구가 없었다**(`topic_flag.py` 는 검사만 한다). 남은 길이 수동 `.env` 편집인데 셸 변수가 `--env-file` 을 이기고 backup 이 리포에 노출되는 등 이미 겪은 함정이다. `scripts/topic_auth_stage.py` 를 availability flag 와 **분리해** 신설: dispatcher OFF 를 file·runtime 양쪽에서 **두 방향 모두** 강제(완화가 live dispatcher 에서 불가능해야 무인증 노출을 실수로 열 수 없다), strict 파싱 재사용, 공유 lock + atomic write + CAS, `mutation_started` 소유권을 **CAS 통과 뒤에만** 잡아 그 전 실패의 rollback 이 외부 편집을 덮지 않게, 재생성 + health + 사후 교차 검증, 실패·취소 시 **직전 런타임 stage** 복귀. no-op 도 사전검사를 신뢰하지 않고 재검증한다. Claude Code 재검토: 기존 도구가 정말 이 키를 쓰지 않는지(write 패턴 0), 승인된 primitive(`atomic_write_bytes`/`env_operation_lock`)를 쓰는지, 런북이 5-for-5 행 중립(379행)이라 좌표가 안 밀리는지를 확인했고, **런타임 dispatcher OFF 강제를 제거하는 변이를 직접 실행해 2건 RED** 를 실측했다.",
-          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0019:b1d32c5724e6a52a4560be80149f66572d9c4626afb8464512fbb81ceb71cbc8:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:author=OpenAI Codex:reviewer=Claude Code",
+          "bounded E2E 인증 canary 운영 PASS 를 정본에 결속 (iOS `7c30b15`). OpenAI Codex 가 **증거가 정본이 아니라 개인 memory 에만 남은 공백**을 짚었다 — 런북 §2-e 는 계속 '미실행' 이었고 열등한 token-file 절차를 규정하고 있었다. 세션 내내 잡아온 doc/reality 괴리를 재검토자가 스스로 만든 셈이다. §2-e 에 PASS 결과(익명 registry 0 + legacy rates·pong / 비구독 `premium_required` / 구독 2 topic snapshot / REST 401·403·200 / 종료 후 OFF 복원)와 PENDING 503→403 계약을 기록하고, token 절차를 **무저장 stdin** 으로 교체했다(mint 는 호스트에 `firebase_admin` 이 없어 `docker exec -i` 경유). 영구 ON 범위도 **4 → 5 topic** 으로 정정했다 — `dxy:spot` 이 이번 세션에 land 해서 범위가 커졌다. Claude Code 재검토: 커밋된 정본이 실제로 stale 이었음(0600 절차 202-203행, FREE_TIER ⑤ 미실행), 5 topic 계산(usdt+dxy+FX3, KRX 는 G2∧G3 별개), 그리고 **인용 7좌표가 내용으로 불변**임을 각각 확인했다 (148/313/341/346/350/356/369 — 추가분이 380행부터라 최대 인용 369 아래를 밀지 않는다).",
+          "semantic-input-binding/v1:0020:13c47013122e075848b43fc5e792b4ce313aefb244fe0566410dd7b5aabf9ee5:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -472,21 +484,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "49195e0db4a7e74d1c6bc06f4feaab8f57fd8ede6dab833a87d2a2d282cea2e8",
+    "manifest_sha256": "a5828aa7f75d0a0e3e2c409907e2168b2d0aa9912445499b705c0113f8141502",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "8cdd47dde696137613317046ebe98eaf753ac4f233923e2dd4fa59b91cfd0674",
+    "lock_sha256": "17c3978502fac1800ab32dd9e1e288b2a1f060fc5956658b535cfdf5886a240b",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "f8eaafb346f7d403f50d54c4896fd6a6c79ef223"
+    "ios_commit": "7c30b159e52b38ba0f82789fe98d59c4985d6a9b"
   },
   "documents": {
-    "ADR": "9fe983966c4bee47ad88485722881ff8aaf4cfd856d593afbbc79453b29c7e2a",
-    "CLIENT": "73e69104c729d524ee076c08f9db364e4ff0bb65bfba1a47bef6fb763c206a89",
-    "CUT": "f7fc15864fa3468599b489e06f426bf8026211e8a5eb91313dd4e8e47ecbf7e4",
-    "HAND": "64bf435c7e9591ac7165c35b18e9848ab295e4c984a66952142f1ad901a25c4c",
-    "HEALTH": "5435296b52227350515ad27a17002510689451af1bfe4361b8804965143067a1",
-    "LOAD": "7b0cb11d2d5550fe67cc92e62833f4ec33b6bca72195fea2445c46385d648c8a"
+    "ADR": "a7a1b0a4cae99c3eff3690179aa5ecae0555659dbcceb77f08b9baa75bab31cc",
+    "CLIENT": "3823579d2c4dcad24f52632fa912d1f386b16db8c9407fd82378b22f01e85c88",
+    "CUT": "52b570d95658d877194d50087887b0ccbe1a61c576f4c3255119a98b7ecd6359",
+    "HAND": "50cca4f02c3678515a586b4b71817cd462b592f6c2f8a940f7b5a1d8a08d7e99",
+    "HEALTH": "cb7bb8feafce980e85dc2a65146cd570d6f8a0b7cbd99527bc35f7e16c9f7ea0",
+    "LOAD": "0adfdabb5afbeebbe3aa49cb928fdf48a77480c7264f932d9e37e67a93633cb4"
   },
-  "claim_ledger_sha256": "bb0169168abc25c38da19e6b16e818f16c8185d1d6e0d319fee9a36bcaf9f1f8",
+  "claim_ledger_sha256": "0ef754e494706b121a1a071d9eba459a867f96bb50c5120343070ababd5fd741",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
