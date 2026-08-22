@@ -4,9 +4,9 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `cd407c043cd9e5bcd6914c8fabcc9a18ed943da3`
+- iOS 기준 commit: `190dbb26c2bd7d376e7210ea857e8be7769eefab`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4e50e0c8305093ca3069598b7ea4c4cd242108f9bdfba9ba1efaf4a0fd4c80e7`
+- manifest SHA: `97bff70e6d7a7f3987801eaea48948969c8721d74a8fe4daa8dc2f47a47f9f5e`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -619,14 +619,14 @@ legacy 소비를 걷어내는 일([R-CUT-1](legacy-cutover.md#r-cut-1))은 이�
 ### R-CLI-13 — 메모리만 지우면 부족하다
 
 topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다
-(`ios/FXi/Services/CacheService.swift:31-36` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:446`).
+(`ios/FXi/Services/CacheService.swift:37-42` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:446`).
 지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다** — ✅ 이 요구는 충족됐다.
 `stop()` 이 마지막에 `purgeTopicData(.all)` 을 부르고
 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:550-568`), `.all` 분기가 in-memory store 를
 비우는 데 그치지 않고 `cachedTopicRates` 를 nil 로 만든 뒤
 `cacheService.removeCachedTopicRates()` 로 **디스크 키까지** 지운다
 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1078-1090` ·
-`ios/FXi/Services/CacheService.swift:45-48`).
+`ios/FXi/Services/CacheService.swift:51-54`).
 
 | 범위 | `topics_disabled` | 인가 거부(per-topic, [R-CLI-6](#r-cli-6)) |
 |---|---|---|

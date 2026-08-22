@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "4e50e0c8305093ca3069598b7ea4c4cd242108f9bdfba9ba1efaf4a0fd4c80e7",
+    "manifest_sha256": "97bff70e6d7a7f3987801eaea48948969c8721d74a8fe4daa8dc2f47a47f9f5e",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "9854a4bd91f327d2145579df99c5121dd368ebfd4dab2e1fca50123f18623d39",
+    "lock_sha256": "9894e488cf4f109f6504217c2819215d8999b033df759d8a64b1ed1d2344f9df",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "cd407c043cd9e5bcd6914c8fabcc9a18ed943da3"
+    "ios_commit": "190dbb26c2bd7d376e7210ea857e8be7769eefab"
   },
   "documents": {
-    "ADR": "dcf12729abf8a7e3f4ad06e8192a79703a8db18044ea7bffc010a3101a1255fc",
-    "CLIENT": "57b8dc628b455a66d0d6fa371bfb48f1d45788398e8c092ad8bd1a7c62eac0e4",
-    "CUT": "b716d3fc40d827d0fdad7f33793821616b35129086d3bca98a1aaa8b4c6fe497",
-    "HAND": "66b27152d00b1bb31f1dd29abf757a98da083fc0c1919016e7cdc32a2e8890db",
-    "HEALTH": "ff220e7572a050c3cdf85d5b749d000008cdc86f2a2d38e2f145577fd534c7c6",
-    "LOAD": "c8ac05f73439389610fc58d9b3d515ae5d0a99edbc2bd1aaa4917cb65b0f1aee"
+    "ADR": "0f2dcbb49e2ac79419f568d7a86cf1f36c61f6e30c3e22068757b8a8fcce14f0",
+    "CLIENT": "781042dfc885cabb9c9fde0402c19a4565340ff755239327480b661fa6cc0d95",
+    "CUT": "cc9f1a40df0067c039b2bcb9d739bb2e6a6ac2d99d6c50d8c3ef89f276201256",
+    "HAND": "12f4af4e95638195271797f5c491c9a94807c6535ffca0af3b9da4893517d13f",
+    "HEALTH": "fc451227c97098f374f03e9163bebf37fa60da6c58c0173671ac604585f8b046",
+    "LOAD": "1d34b8a168d8602858f5357ddee909e5135ae338e15bfa702addafe19ab0dd3f"
   },
   "entries": [
     {
@@ -188,13 +188,13 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-13",
-      "unit_sha256": "74b6dd54000360b59c555810429c1a3b230296a9ca3d60ab26edbce1320296a5",
-      "unit_text": "topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다 (`ios/FXi/Services/CacheService.swift:31-36` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:446`). 지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다** — ✅ 이 요구는 충족됐다. `stop()` 이 마지막에 `purgeTopicData(.all)` 을 부르고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:550-568`), `.all` 분기가 in-memory store 를 비우는 데 그치지 않고 `cachedTopicRates` 를 nil 로 만든 뒤 `cacheService.removeCachedTopicRates()` 로 **디스크 키까지** 지운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1078-1090` · `ios/FXi/Services/CacheService.swift:45-48`).",
+      "unit_sha256": "5fa8933b9522af653ecb8c9e745ecf66ad39f50c85c817692ccee1a5956cee4d",
+      "unit_text": "topic 값은 메모리뿐 아니라 **`cached_topic_rates` 로 디스크에 영속화되고 앱 시작 시 복원**된다 (`ios/FXi/Services/CacheService.swift:37-42` · `ios/FXi/ViewModels/ExchangeRateViewModel.swift:446`). 지우지 않으면 재실행 시 **비활성이어야 할 값이 되살아난다** — ✅ 이 요구는 충족됐다. `stop()` 이 마지막에 `purgeTopicData(.all)` 을 부르고 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:550-568`), `.all` 분기가 in-memory store 를 비우는 데 그치지 않고 `cachedTopicRates` 를 nil 로 만든 뒤 `cacheService.removeCachedTopicRates()` 로 **디스크 키까지** 지운다 (`ios/FXi/ViewModels/ExchangeRateViewModel.swift:1078-1090` · `ios/FXi/Services/CacheService.swift:51-54`).",
       "classification": "code_fact",
       "detail": "topic 값이 cached_topic_rates 로 UserDefaults 에 저장되고 VM init 에서 복원되며, stop() 이 purgeTopicData(.all) 로 in-memory store 와 디스크 캐시를 함께 지운다는 현재 iOS 동작 단정이다. (구 서술 '디스크를 지우지 않는다'는 R-GATE-3 purge 구현으로 supersede)",
       "provenance": [
-        "file:ios/FXi/Services/CacheService.swift:31-36",
-        "file:ios/FXi/Services/CacheService.swift:45-48",
+        "file:ios/FXi/Services/CacheService.swift:37-42",
+        "file:ios/FXi/Services/CacheService.swift:51-54",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:1078-1090",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:446",
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:550-568"

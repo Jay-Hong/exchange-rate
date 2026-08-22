@@ -91,7 +91,9 @@
           "C2 재결속 (ios pin `cd407c0`). ⚠️ **`server safety-stop` 항목을 미체크로 남긴 판단을 지지한다** — 그 항목은 \"topic 값을 **전부 지우고**\" 라 **healthy → disabled 전이**를 요구하는데, 이번 관측은 이미 꺼진 서버로의 **cold start** 였다(지울 값이 없었다). 같은 화면을 봤다고 같은 시험이 아니다. 그 전이 시험은 healthy 상태에서 서버를 끄는 별도 실행이 필요하며, 이번 자동 복구 통과로 **회복 가능한 kill** 임은 이미 증명됐으므로 위험은 낮아졌다. FREE_TIER rollout ⑥ 은 ✅ 가 아니라 🟡(서버 ON 완료·smoke 진행 중)로 뒀다.",
           "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=Claude Code:reviewer=OpenAI Codex",
           "⚠️ **epoch 0022 의 서술 두 곳을 정정한다**(append-only — 0022 문장은 당시 기록으로 보존). (1) 0022 는 익명 401 을 두고 \"인증 게이트가 실제 하중을 받는 건 이번이 처음\" 이라 적었으나 **거짓이다**. bounded E2E canary 가 이미 dispatcher 를 **유계 ON** 으로 올린 상태에서 익명 REST **401** 과 익명 WS **registry 0** 을 검증했다(artifact `topic-auth-e2e-20260821T204232.541018Z.json`: `on.state=ON`, `rest.anonymous=401`, `anonymous_ws.registry_count=0`). 영구 ON 후의 401 은 **재확인**이지 최초가 아니다. '유계 ON 도 ON 이다' 를 놓치고 404 구간만 기억했다. (2) 0022 는 운영 상태를 \"서버 `e4d2f89`\" 로 적었으나 **운영 checkout 은 `2da60a6`** 이다. `e4d2f89` 는 origin 의 문서·C2 HEAD 이고 운영에 pull 되지 않았다 — `2da60a6..e4d2f89` 는 문서·spec 전용이라 런타임 delta 는 0 이지만, **리포 HEAD 를 배포본으로 적은 것 자체가 오류**다([[feedback_pinned_is_not_deployed]]). (3) 부수: \"active_ws 1(사용자 폰)\" 은 시각 상관에 기댄 추론이고 연결 신원을 증명한 값이 아니다 — smoke 근거는 실기기 화면이다. OpenAI Codex 가 세 건을 짚었고 재검토자가 canary artifact 와 운영 `git rev-parse` 로 각각 확인했다.",
-          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `190dbb2`). ⚠️ **좌표 재도출 2건** — `CacheService.swift` 12행에 +6 이 들어가 하위 인용이 밀렸다. 산술이 아니라 주장문으로 확정했다: `31-36`(\"디스크에 영속화\")= `saveTopicRates` → **37-42**, `45-48`(\"`removeCachedTopicRates()` 로 디스크 키까지 지운다\")= 그 함수 → **51-54**. `WebSocketService.swift` 는 편집이 **파일 끝 2123행 extension** 이라 최대 인용 2091 아래 → 미이동, `TopicSnapshotService.swift` 는 편집 67행이 인용 `53-58` 보다 아래 → 미이동. 런북도 인용 구간 N-for-N + 추가분 424행~ 이라 미이동. **밀린 파일만 골라 고쳤다.**",
+          "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -166,7 +168,9 @@
           "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code",
           "서버 dispatcher **영구 ON** 실행 + 자동 복구 smoke 실기기 통과 (iOS `cd407c0`). OpenAI Codex 가 선행조건을 재확인하고 `topic_flag.py on` 으로 활성화했다(재검토자 쪽은 auto-mode 분류기가 명령 전체를 차단해 실행하지 못했다 — 운영 무변경 상태로 남았었다). 실기기(구독 계정, DEBUG 빌드)에서 `topics_disabled` 상태의 앱을 foreground 로 두고 **아무 조작 없이** 서버를 켜자 로딩을 거쳐 배너가 스스로 사라지고 11:03 실시간 은행 환율이 채워졌다 — 런북 `server 재활성화` 합격 기준 충족. 정본에는 그 한 항목만 `[x]` 로 하고 나머지 12 항목과 Release arming 은 그대로 뒀다. Claude Code 독립 검증: `dispatcher True` · `auth FINAL_ACTIVE` · FX 3 topic ON · KRX OFF · `active_ws 1` · restarts 0 · ERROR 0, 그리고 **익명 `topics/snapshot` 401** — dispatcher 를 켜도 무인증이 열리지 않았다(이전엔 전부 404 였으므로 인증 게이트가 하중을 받는 건 이번이 처음이다). 문서 편집이 인용 구간에 N-for-N 이고 추가분이 409행부터라 7좌표 미이동임도 확인했다.",
           "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=OpenAI Codex:reviewer=Claude Code",
+          "MODE 2 · cold-start 실기기 재현 도구 C1 (iOS `190dbb2`) + smoke 3항목 통과. 사용자가 `topic ON 정상`· `Citi 미표시`·`MODE 1` 을 실기기에서 확인했고, 남은 MODE 2 와 cold-start 는 혼자 재현하기 어렵다고 했다. OpenAI Codex 가 **운영 fault-injection 대신 DEBUG 앱 내부 one-shot 시나리오**로 구현했다 — `DebugTopicSmokeController` 는 파일 1행부터 `#if DEBUG` 라 Release 에 존재하지 않고, 무장 안 하면 non-snapshot 은 락도 안 잡고 `.pass` 다. cold-start 는 WS 만 지연하면 REST bootstrap 이 먼저 화면을 채워 재현이 안 되므로 REST 억제까지 같은 시나리오에 묶었다. 구현 중 **`clearAllCache()` 가 FX·DXY topic 캐시를 안 지우던 기존 결함**을 찾아 고쳤고, 처음 `removeCachedTopicRates()` 에 잘못 넣었다가 스스로 되돌렸다 — 섞으면 테더 한 topic 의 인가 상실이 무관한 FX·DXY last-known 까지 날린다. Claude Code 독립 검증: decorator 가 idle 에서 순수 pass-through 인지, 캐시 수정이 `clearAllCache()` 에만 들어갔는지, **Release 빌드 exit 0 · error 0**(DEBUG seam 이 프로덕션 파일에서 참조되는 구조라 [[feedback_ios_debug_seam_release_compile]] 부류), 784 tests 0 failures, arming pbxproj 참조 0 을 각각 확인했다.",
+          "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -248,7 +252,9 @@
           "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code",
           "서버 dispatcher **영구 ON** 실행 + 자동 복구 smoke 실기기 통과 (iOS `cd407c0`). OpenAI Codex 가 선행조건을 재확인하고 `topic_flag.py on` 으로 활성화했다(재검토자 쪽은 auto-mode 분류기가 명령 전체를 차단해 실행하지 못했다 — 운영 무변경 상태로 남았었다). 실기기(구독 계정, DEBUG 빌드)에서 `topics_disabled` 상태의 앱을 foreground 로 두고 **아무 조작 없이** 서버를 켜자 로딩을 거쳐 배너가 스스로 사라지고 11:03 실시간 은행 환율이 채워졌다 — 런북 `server 재활성화` 합격 기준 충족. 정본에는 그 한 항목만 `[x]` 로 하고 나머지 12 항목과 Release arming 은 그대로 뒀다. Claude Code 독립 검증: `dispatcher True` · `auth FINAL_ACTIVE` · FX 3 topic ON · KRX OFF · `active_ws 1` · restarts 0 · ERROR 0, 그리고 **익명 `topics/snapshot` 401** — dispatcher 를 켜도 무인증이 열리지 않았다(이전엔 전부 404 였으므로 인증 게이트가 하중을 받는 건 이번이 처음이다). 문서 편집이 인용 구간에 N-for-N 이고 추가분이 409행부터라 7좌표 미이동임도 확인했다.",
           "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=OpenAI Codex:reviewer=Claude Code",
+          "MODE 2 · cold-start 실기기 재현 도구 C1 (iOS `190dbb2`) + smoke 3항목 통과. 사용자가 `topic ON 정상`· `Citi 미표시`·`MODE 1` 을 실기기에서 확인했고, 남은 MODE 2 와 cold-start 는 혼자 재현하기 어렵다고 했다. OpenAI Codex 가 **운영 fault-injection 대신 DEBUG 앱 내부 one-shot 시나리오**로 구현했다 — `DebugTopicSmokeController` 는 파일 1행부터 `#if DEBUG` 라 Release 에 존재하지 않고, 무장 안 하면 non-snapshot 은 락도 안 잡고 `.pass` 다. cold-start 는 WS 만 지연하면 REST bootstrap 이 먼저 화면을 채워 재현이 안 되므로 REST 억제까지 같은 시나리오에 묶었다. 구현 중 **`clearAllCache()` 가 FX·DXY topic 캐시를 안 지우던 기존 결함**을 찾아 고쳤고, 처음 `removeCachedTopicRates()` 에 잘못 넣었다가 스스로 되돌렸다 — 섞으면 테더 한 topic 의 인가 상실이 무관한 FX·DXY last-known 까지 날린다. Claude Code 독립 검증: decorator 가 idle 에서 순수 pass-through 인지, 캐시 수정이 `clearAllCache()` 에만 들어갔는지, **Release 빌드 exit 0 · error 0**(DEBUG seam 이 프로덕션 파일에서 참조되는 구조라 [[feedback_ios_debug_seam_release_compile]] 부류), 784 tests 0 failures, arming pbxproj 참조 0 을 각각 확인했다.",
+          "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -331,7 +337,9 @@
           "C2 재결속 (ios pin `cd407c0`). ⚠️ **`server safety-stop` 항목을 미체크로 남긴 판단을 지지한다** — 그 항목은 \"topic 값을 **전부 지우고**\" 라 **healthy → disabled 전이**를 요구하는데, 이번 관측은 이미 꺼진 서버로의 **cold start** 였다(지울 값이 없었다). 같은 화면을 봤다고 같은 시험이 아니다. 그 전이 시험은 healthy 상태에서 서버를 끄는 별도 실행이 필요하며, 이번 자동 복구 통과로 **회복 가능한 kill** 임은 이미 증명됐으므로 위험은 낮아졌다. FREE_TIER rollout ⑥ 은 ✅ 가 아니라 🟡(서버 ON 완료·smoke 진행 중)로 뒀다.",
           "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=Claude Code:reviewer=OpenAI Codex",
           "⚠️ **epoch 0022 의 서술 두 곳을 정정한다**(append-only — 0022 문장은 당시 기록으로 보존). (1) 0022 는 익명 401 을 두고 \"인증 게이트가 실제 하중을 받는 건 이번이 처음\" 이라 적었으나 **거짓이다**. bounded E2E canary 가 이미 dispatcher 를 **유계 ON** 으로 올린 상태에서 익명 REST **401** 과 익명 WS **registry 0** 을 검증했다(artifact `topic-auth-e2e-20260821T204232.541018Z.json`: `on.state=ON`, `rest.anonymous=401`, `anonymous_ws.registry_count=0`). 영구 ON 후의 401 은 **재확인**이지 최초가 아니다. '유계 ON 도 ON 이다' 를 놓치고 404 구간만 기억했다. (2) 0022 는 운영 상태를 \"서버 `e4d2f89`\" 로 적었으나 **운영 checkout 은 `2da60a6`** 이다. `e4d2f89` 는 origin 의 문서·C2 HEAD 이고 운영에 pull 되지 않았다 — `2da60a6..e4d2f89` 는 문서·spec 전용이라 런타임 delta 는 0 이지만, **리포 HEAD 를 배포본으로 적은 것 자체가 오류**다([[feedback_pinned_is_not_deployed]]). (3) 부수: \"active_ws 1(사용자 폰)\" 은 시각 상관에 기댄 추론이고 연결 신원을 증명한 값이 아니다 — smoke 근거는 실기기 화면이다. OpenAI Codex 가 세 건을 짚었고 재검토자가 canary artifact 와 운영 `git rev-parse` 로 각각 확인했다.",
-          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `190dbb2`). ⚠️ **좌표 재도출 2건** — `CacheService.swift` 12행에 +6 이 들어가 하위 인용이 밀렸다. 산술이 아니라 주장문으로 확정했다: `31-36`(\"디스크에 영속화\")= `saveTopicRates` → **37-42**, `45-48`(\"`removeCachedTopicRates()` 로 디스크 키까지 지운다\")= 그 함수 → **51-54**. `WebSocketService.swift` 는 편집이 **파일 끝 2123행 extension** 이라 최대 인용 2091 아래 → 미이동, `TopicSnapshotService.swift` 는 편집 67행이 인용 `53-58` 보다 아래 → 미이동. 런북도 인용 구간 N-for-N + 추가분 424행~ 이라 미이동. **밀린 파일만 골라 고쳤다.**",
+          "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -420,7 +428,9 @@
           "C2 재결속 (ios pin `cd407c0`). ⚠️ **`server safety-stop` 항목을 미체크로 남긴 판단을 지지한다** — 그 항목은 \"topic 값을 **전부 지우고**\" 라 **healthy → disabled 전이**를 요구하는데, 이번 관측은 이미 꺼진 서버로의 **cold start** 였다(지울 값이 없었다). 같은 화면을 봤다고 같은 시험이 아니다. 그 전이 시험은 healthy 상태에서 서버를 끄는 별도 실행이 필요하며, 이번 자동 복구 통과로 **회복 가능한 kill** 임은 이미 증명됐으므로 위험은 낮아졌다. FREE_TIER rollout ⑥ 은 ✅ 가 아니라 🟡(서버 ON 완료·smoke 진행 중)로 뒀다.",
           "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=Claude Code:reviewer=OpenAI Codex",
           "⚠️ **epoch 0022 의 서술 두 곳을 정정한다**(append-only — 0022 문장은 당시 기록으로 보존). (1) 0022 는 익명 401 을 두고 \"인증 게이트가 실제 하중을 받는 건 이번이 처음\" 이라 적었으나 **거짓이다**. bounded E2E canary 가 이미 dispatcher 를 **유계 ON** 으로 올린 상태에서 익명 REST **401** 과 익명 WS **registry 0** 을 검증했다(artifact `topic-auth-e2e-20260821T204232.541018Z.json`: `on.state=ON`, `rest.anonymous=401`, `anonymous_ws.registry_count=0`). 영구 ON 후의 401 은 **재확인**이지 최초가 아니다. '유계 ON 도 ON 이다' 를 놓치고 404 구간만 기억했다. (2) 0022 는 운영 상태를 \"서버 `e4d2f89`\" 로 적었으나 **운영 checkout 은 `2da60a6`** 이다. `e4d2f89` 는 origin 의 문서·C2 HEAD 이고 운영에 pull 되지 않았다 — `2da60a6..e4d2f89` 는 문서·spec 전용이라 런타임 delta 는 0 이지만, **리포 HEAD 를 배포본으로 적은 것 자체가 오류**다([[feedback_pinned_is_not_deployed]]). (3) 부수: \"active_ws 1(사용자 폰)\" 은 시각 상관에 기댄 추론이고 연결 신원을 증명한 값이 아니다 — smoke 근거는 실기기 화면이다. OpenAI Codex 가 세 건을 짚었고 재검토자가 canary artifact 와 운영 `git rev-parse` 로 각각 확인했다.",
-          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `190dbb2`). ⚠️ **좌표 재도출 2건** — `CacheService.swift` 12행에 +6 이 들어가 하위 인용이 밀렸다. 산술이 아니라 주장문으로 확정했다: `31-36`(\"디스크에 영속화\")= `saveTopicRates` → **37-42**, `45-48`(\"`removeCachedTopicRates()` 로 디스크 키까지 지운다\")= 그 함수 → **51-54**. `WebSocketService.swift` 는 편집이 **파일 끝 2123행 extension** 이라 최대 인용 2091 아래 → 미이동, `TopicSnapshotService.swift` 는 편집 67행이 인용 `53-58` 보다 아래 → 미이동. 런북도 인용 구간 N-for-N + 추가분 424행~ 이라 미이동. **밀린 파일만 골라 고쳤다.**",
+          "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -500,7 +510,9 @@
           "semantic-input-binding/v1:0021:72ce7a358a21783403e794f2892d8523ea60798bcbf9a31fe4b119bd2fa173b3:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:author=OpenAI Codex:reviewer=Claude Code",
           "서버 dispatcher **영구 ON** 실행 + 자동 복구 smoke 실기기 통과 (iOS `cd407c0`). OpenAI Codex 가 선행조건을 재확인하고 `topic_flag.py on` 으로 활성화했다(재검토자 쪽은 auto-mode 분류기가 명령 전체를 차단해 실행하지 못했다 — 운영 무변경 상태로 남았었다). 실기기(구독 계정, DEBUG 빌드)에서 `topics_disabled` 상태의 앱을 foreground 로 두고 **아무 조작 없이** 서버를 켜자 로딩을 거쳐 배너가 스스로 사라지고 11:03 실시간 은행 환율이 채워졌다 — 런북 `server 재활성화` 합격 기준 충족. 정본에는 그 한 항목만 `[x]` 로 하고 나머지 12 항목과 Release arming 은 그대로 뒀다. Claude Code 독립 검증: `dispatcher True` · `auth FINAL_ACTIVE` · FX 3 topic ON · KRX OFF · `active_ws 1` · restarts 0 · ERROR 0, 그리고 **익명 `topics/snapshot` 401** — dispatcher 를 켜도 무인증이 열리지 않았다(이전엔 전부 404 였으므로 인증 게이트가 하중을 받는 건 이번이 처음이다). 문서 편집이 인용 구간에 N-for-N 이고 추가분이 409행부터라 7좌표 미이동임도 확인했다.",
           "semantic-input-binding/v1:0022:68de97ed3d9fb65f713086c4bb3226618920b63c9262ad30026f7cebbe60aefc:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:author=OpenAI Codex:reviewer=Claude Code",
-          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0023:219245ebacaac24cff6ca555b3b9f5a79531bba14067a0044ef3a7fbf33dcd35:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:author=OpenAI Codex:reviewer=Claude Code",
+          "MODE 2 · cold-start 실기기 재현 도구 C1 (iOS `190dbb2`) + smoke 3항목 통과. 사용자가 `topic ON 정상`· `Citi 미표시`·`MODE 1` 을 실기기에서 확인했고, 남은 MODE 2 와 cold-start 는 혼자 재현하기 어렵다고 했다. OpenAI Codex 가 **운영 fault-injection 대신 DEBUG 앱 내부 one-shot 시나리오**로 구현했다 — `DebugTopicSmokeController` 는 파일 1행부터 `#if DEBUG` 라 Release 에 존재하지 않고, 무장 안 하면 non-snapshot 은 락도 안 잡고 `.pass` 다. cold-start 는 WS 만 지연하면 REST bootstrap 이 먼저 화면을 채워 재현이 안 되므로 REST 억제까지 같은 시나리오에 묶었다. 구현 중 **`clearAllCache()` 가 FX·DXY topic 캐시를 안 지우던 기존 결함**을 찾아 고쳤고, 처음 `removeCachedTopicRates()` 에 잘못 넣었다가 스스로 되돌렸다 — 섞으면 테더 한 topic 의 인가 상실이 무관한 FX·DXY last-known 까지 날린다. Claude Code 독립 검증: decorator 가 idle 에서 순수 pass-through 인지, 캐시 수정이 `clearAllCache()` 에만 들어갔는지, **Release 빌드 exit 0 · error 0**(DEBUG seam 이 프로덕션 파일에서 참조되는 구조라 [[feedback_ios_debug_seam_release_compile]] 부류), 784 tests 0 failures, arming pbxproj 참조 0 을 각각 확인했다.",
+          "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -514,21 +526,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "4e50e0c8305093ca3069598b7ea4c4cd242108f9bdfba9ba1efaf4a0fd4c80e7",
+    "manifest_sha256": "97bff70e6d7a7f3987801eaea48948969c8721d74a8fe4daa8dc2f47a47f9f5e",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "9854a4bd91f327d2145579df99c5121dd368ebfd4dab2e1fca50123f18623d39",
+    "lock_sha256": "9894e488cf4f109f6504217c2819215d8999b033df759d8a64b1ed1d2344f9df",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "cd407c043cd9e5bcd6914c8fabcc9a18ed943da3"
+    "ios_commit": "190dbb26c2bd7d376e7210ea857e8be7769eefab"
   },
   "documents": {
-    "ADR": "dcf12729abf8a7e3f4ad06e8192a79703a8db18044ea7bffc010a3101a1255fc",
-    "CLIENT": "57b8dc628b455a66d0d6fa371bfb48f1d45788398e8c092ad8bd1a7c62eac0e4",
-    "CUT": "b716d3fc40d827d0fdad7f33793821616b35129086d3bca98a1aaa8b4c6fe497",
-    "HAND": "66b27152d00b1bb31f1dd29abf757a98da083fc0c1919016e7cdc32a2e8890db",
-    "HEALTH": "ff220e7572a050c3cdf85d5b749d000008cdc86f2a2d38e2f145577fd534c7c6",
-    "LOAD": "c8ac05f73439389610fc58d9b3d515ae5d0a99edbc2bd1aaa4917cb65b0f1aee"
+    "ADR": "0f2dcbb49e2ac79419f568d7a86cf1f36c61f6e30c3e22068757b8a8fcce14f0",
+    "CLIENT": "781042dfc885cabb9c9fde0402c19a4565340ff755239327480b661fa6cc0d95",
+    "CUT": "cc9f1a40df0067c039b2bcb9d739bb2e6a6ac2d99d6c50d8c3ef89f276201256",
+    "HAND": "12f4af4e95638195271797f5c491c9a94807c6535ffca0af3b9da4893517d13f",
+    "HEALTH": "fc451227c97098f374f03e9163bebf37fa60da6c58c0173671ac604585f8b046",
+    "LOAD": "1d34b8a168d8602858f5357ddee909e5135ae338e15bfa702addafe19ab0dd3f"
   },
-  "claim_ledger_sha256": "a0fea9eb12f3f1cba7a314dfca251d925217465cdca67cab8c01e1bc2d51a7ce",
+  "claim_ledger_sha256": "2615934e31846236b40459661dfc061fa01ae5a8d4611d01bd805861812e4dff",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
