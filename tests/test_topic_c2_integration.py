@@ -9,7 +9,8 @@
      상태**를 실패로 판정했다 → 매번 롤백됐다.
 
 둘 다 mock 이 실제 경로를 대신하는 바람에 안 잡혔다. 그래서 이 파일은 **아무것도
-대신하지 않는다** — 두 리포를 복제해 진짜 commit 을 만들고 진짜 CLI 를 돌린다.
+대신하지 않는다** — 두 리포를 복제해 진짜 commit 을 만들고 권장 진입점인 복합 `c2`
+CLI 와 실패 rollback 을 실제로 돌린다.
 
 ⚠️ 이 파일은 `topic_c2.GATE_TESTS` 에 **넣지 않는다**. 복제본 안에서 다시 복제가 돌아
 비용이 곱해진다. 대신 복제본에서 `test_topic_c2.py` 를 직접 돌려 2번을 재현한다.
@@ -61,6 +62,17 @@ def _new_ios_commit_below_citations(ios: pathlib.Path) -> str:
     return _git("rev-parse", "HEAD", cwd=ios).strip()
 
 
+def _new_ios_commit_above_citations(ios: pathlib.Path) -> str:
+    """인용 위쪽을 고쳐 composite C2가 어떤 쓰기도 하기 전에 멈추게 한다."""
+    runbook = ios / "TOPIC_V2_RELEASE_RUNBOOK.md"
+    lines = runbook.read_text().splitlines(keepends=True)
+    lines.insert(99, "<!-- C2 coordinate-shift sentinel -->\n")
+    runbook.write_text("".join(lines))
+    _git("add", "-A", cwd=ios)
+    _git(*GIT_IDENTITY, "commit", "-q", "-m", "test: C2 coordinate shift", cwd=ios)
+    return _git("rev-parse", "HEAD", cwd=ios).strip()
+
+
 def _append_prose(server: pathlib.Path) -> None:
     path = server / "spec" / "topic-only-semantic-review.json"
     data = json.loads(path.read_text())
@@ -81,23 +93,26 @@ def _cli(server: pathlib.Path, ios: pathlib.Path, *args: str) -> subprocess.Comp
     )
 
 
-def test_real_pin_refresh_seal_moves_the_whole_chain(clones):
-    """**첫 실사용 blocker 1** 재현 방지 — 진짜 pin 전진이 성공으로 끝나야 한다."""
+def _working_state(repo: pathlib.Path) -> tuple[str, str]:
+    return (
+        _git("status", "--porcelain", cwd=repo),
+        _git("diff", "--binary", cwd=repo),
+    )
+
+
+def test_real_composite_c2_moves_the_whole_chain(clones):
+    """권장 진입점 `c2`가 pin부터 post-write verify까지 실제로 완주해야 한다."""
     server, ios = clones
-    old_pin = json.loads((server / "spec/topic-only.lock.json").read_text())["pinned_commit"]["ios"]
     new_pin = _new_ios_commit_below_citations(ios)
     _append_prose(server)
 
-    coords = _cli(server, ios, "coords", "--ios-from", old_pin, "--ios-to", new_pin)
-    assert coords.returncode == 0, f"인용 아래 변경인데 경고가 났다:\n{coords.stdout}{coords.stderr}"
-
-    pin = _cli(server, ios, "pin", "--ios", new_pin)
-    assert pin.returncode == 0, f"실제 pin 전진이 실패했다:\n{pin.stdout}{pin.stderr}"
-    assert "치환" in pin.stdout
-
-    assert _cli(server, ios, "refresh").returncode == 0
-    seal = _cli(server, ios, "seal", "--author", "Claude Code", "--reviewer", "OpenAI Codex")
-    assert seal.returncode == 0, f"봉인 실패:\n{seal.stdout}{seal.stderr}"
+    result = _cli(
+        server, ios, "c2", "--ios", new_pin,
+        "--author", "Claude Code", "--reviewer", "OpenAI Codex",
+    )
+    assert result.returncode == 0, f"복합 C2 실패:\n{result.stdout}{result.stderr}"
+    for tag in ("[COORD]", "[PIN]", "[REFRESH]", "[SEAL]", "[VERIFY]"):
+        assert tag in result.stdout, f"복합 C2가 {tag} 단계를 실행하지 않았다"
 
     for name in ("topic-only.lock.json", "topic-only-migration-manifest.json"):
         pinned = json.loads((server / "spec" / name).read_text())["pinned_commit"]["ios"]
@@ -122,6 +137,47 @@ def test_real_pin_refresh_seal_moves_the_whole_chain(clones):
         (server / "tests/test_topic_only_semantic_review.py").read_text(), source="clone history",
     )
     assert history[-1][0] == sequence and history[-1][2] == markers[0].split(":")[3]
+
+
+def test_real_composite_c2_aborts_before_writes_on_coordinate_warning(clones):
+    """좌표 경고는 snapshot/pin보다 앞에서 실제 working bytes를 그대로 보존해야 한다."""
+    server, ios = clones
+    old_pin = json.loads((server / "spec/topic-only.lock.json").read_text())["pinned_commit"]["ios"]
+    shifted_pin = _new_ios_commit_above_citations(ios)
+    before = _working_state(server)
+
+    result = _cli(
+        server, ios, "c2", "--ios", shifted_pin,
+        "--author", "Claude Code", "--reviewer", "OpenAI Codex",
+    )
+
+    assert result.returncode == 2
+    assert "좌표 재도출 경고가 있어 쓰기 전에 중단" in result.stdout
+    assert _working_state(server) == before
+    pinned = json.loads((server / "spec/topic-only.lock.json").read_text())["pinned_commit"]["ios"]
+    assert pinned == old_pin
+
+
+def test_real_composite_c2_rolls_back_bytes_after_seal_failure(clones):
+    """pin·refresh 뒤 seal이 실패해도 실행 전 working bytes로 실제 복원해야 한다."""
+    server, ios = clones
+    old_pin = json.loads((server / "spec/topic-only.lock.json").read_text())["pinned_commit"]["ios"]
+    new_pin = _new_ios_commit_below_citations(ios)
+    before = _working_state(server)
+
+    # 새 산문을 일부러 추가하지 않아 pin·refresh 뒤 seal에서 실패시킨다.
+    result = _cli(
+        server, ios, "c2", "--ios", new_pin,
+        "--author", "Claude Code", "--reviewer", "OpenAI Codex",
+    )
+
+    assert result.returncode == 2
+    assert "[PIN]" in result.stdout and "[REFRESH]" in result.stdout
+    assert "[ROLLBACK]" in result.stdout
+    assert "새 산문 작업 단위가 없다" in result.stdout
+    assert _working_state(server) == before
+    pinned = json.loads((server / "spec/topic-only.lock.json").read_text())["pinned_commit"]["ios"]
+    assert pinned == old_pin
 
 
 def test_self_tests_stay_green_in_the_mid_c2_state(clones):
