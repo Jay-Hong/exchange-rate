@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import copy
+import json
 import pathlib
 import subprocess
 import sys
@@ -143,25 +145,130 @@ def test_seal_refuses_without_new_prose():
         topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True)
 
 
-def test_seal_refuses_to_rewrite_a_committed_epoch(monkeypatch):
-    """append-only — 커밋된 epoch 은 다시 쓰지 않고 **앞으로** supersede 한다."""
-    next_sequence = topic_c2._history_entries()[-1][0] + 1
+def test_allow_reseal_refuses_when_there_is_no_uncommitted_epoch(monkeypatch):
+    """커밋된 마지막 epoch 은 재봉인하지 않고 다음 epoch 으로 supersede 한다."""
     monkeypatch.setattr(topic_c2, "_prose_added_since_head", lambda: 1)
-    monkeypatch.setattr(topic_c2, "_committed_text", lambda _p: f"{next_sequence:04d}:")
+    with pytest.raises(topic_c2.C2Error, match="미커밋 epoch 이 정확히 1개"):
+        topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True, allow_reseal=True)
 
-    module = topic_c2._test_module("test_topic_only_semantic_review", "SEMANTIC_BINDING_PREFIX")
-    marker = f"{module.SEMANTIC_BINDING_PREFIX}{next_sequence:04d}:x"
-    import json
+
+def test_allow_reseal_replaces_exactly_one_uncommitted_epoch(monkeypatch, tmp_path):
+    committed = topic_c2._history_entries()
+    sequence = committed[-1][0] + 1
+    parent = committed[-1][2]
+    old_fingerprint = "c" * 64
+    module = topic_c2._test_module(
+        "test_topic_only_semantic_review", "_semantic_binding_marker",
+    )
+
     data = json.loads(topic_c2.SEMANTIC.read_text())
-    data["review_process"]["review_edges"][0]["scope"].append(marker)
-    original = topic_c2.SEMANTIC.read_text()
-    topic_c2.SEMANTIC.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    try:
-        with pytest.raises(topic_c2.C2Error, match="이미 커밋됐다"):
-            topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True, allow_reseal=True)
-    finally:
-        topic_c2.SEMANTIC.write_text(original)
-    assert topic_c2.SEMANTIC.read_text() == original
+    edges = data["review_process"]["review_edges"]
+    edges[0]["scope"].append("미커밋 epoch 재봉인 판별용 산문")
+    for edge in edges:
+        edge["scope"].append(module._semantic_binding_marker(
+            sequence, parent, old_fingerprint, edge["author"], edge["reviewer"],
+        ))
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+    history = topic_c2.HISTORY_FILE.read_text()
+    anchor = f'        "{parent}",\n    ),\n)'
+    appended = (
+        f'        "{parent}",\n    ),\n    (\n        {sequence},\n'
+        f'        "{parent}",\n        "{old_fingerprint}",\n    ),\n)'
+    )
+    history_file = tmp_path / "history.py"
+    history_file.write_text(history.replace(anchor, appended))
+
+    monkeypatch.setattr(topic_c2, "SEMANTIC", semantic)
+    monkeypatch.setattr(topic_c2, "HISTORY_FILE", history_file)
+    monkeypatch.setattr(topic_c2, "_committed_history_entries", lambda: committed)
+    monkeypatch.setattr(topic_c2, "_prose_added_since_head", lambda: 1)
+    sealed_sequence, fingerprint = topic_c2.seal_epoch(
+        "Claude Code", "OpenAI Codex", allow_reseal=True,
+    )
+
+    assert sealed_sequence == sequence
+    assert fingerprint != old_fingerprint
+    assert topic_c2._history_entries()[-1] == (sequence, parent, fingerprint)
+    rebound = json.loads(semantic.read_text())
+    markers = [
+        item
+        for edge in rebound["review_process"]["review_edges"]
+        for item in edge["scope"]
+        if item.startswith(f"semantic-input-binding/v1:{sequence:04d}:")
+    ]
+    assert len(markers) == 2
+    assert all(f":{fingerprint}:" in marker for marker in markers)
+
+
+def test_review_edges_are_selected_by_roles_not_array_order():
+    data = json.loads(topic_c2.SEMANTIC.read_text())
+    author_edge, reviewer_edge, _ = topic_c2._select_review_edges(
+        data, "OpenAI Codex", "Claude Code",
+    )
+    assert author_edge["author"] == "OpenAI Codex"
+    assert reviewer_edge["author"] == "Claude Code"
+
+
+@pytest.mark.parametrize(
+    ("author", "reviewer", "message"),
+    [
+        ("Claude Code", "Claude Code", "자기검토"),
+        ("Unknown Agent", "Claude Code", "participant"),
+    ],
+)
+def test_review_role_validation_rejects_self_or_unknown(author, reviewer, message):
+    data = json.loads(topic_c2.SEMANTIC.read_text())
+    with pytest.raises(topic_c2.C2Error, match=message):
+        topic_c2._select_review_edges(data, author, reviewer)
+
+
+def test_prose_append_only_rejects_rewriting_a_committed_item(monkeypatch, tmp_path):
+    committed = json.loads(topic_c2.SEMANTIC.read_text())
+    current = copy.deepcopy(committed)
+    edge = current["review_process"]["review_edges"][0]
+    index = next(i for i, item in enumerate(edge["scope"]) if not item.startswith("semantic-input-binding/"))
+    edge["scope"][index] += " (rewrite)"
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n")
+    monkeypatch.setattr(topic_c2, "SEMANTIC", semantic)
+    monkeypatch.setattr(
+        topic_c2, "_committed_text",
+        lambda path: json.dumps(committed, ensure_ascii=False) if path.endswith("semantic-review.json") else "",
+    )
+    with pytest.raises(topic_c2.C2Error, match="rewrite/reorder"):
+        topic_c2._prose_added_since_head()
+
+
+def test_prose_append_only_counts_only_new_tail_items(monkeypatch, tmp_path):
+    committed = json.loads(topic_c2.SEMANTIC.read_text())
+    current = copy.deepcopy(committed)
+    current["review_process"]["review_edges"][1]["scope"].append("새 산문 작업 단위")
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(current, ensure_ascii=False, indent=2) + "\n")
+    monkeypatch.setattr(topic_c2, "SEMANTIC", semantic)
+    monkeypatch.setattr(
+        topic_c2, "_committed_text",
+        lambda path: json.dumps(committed, ensure_ascii=False) if path.endswith("semantic-review.json") else "",
+    )
+    assert topic_c2._prose_added_since_head() == 1
+
+
+def test_seal_rejects_a_missing_committed_marker(monkeypatch, tmp_path):
+    data = json.loads(topic_c2.SEMANTIC.read_text())
+    edge = data["review_process"]["review_edges"][0]
+    marker_index = next(
+        index for index, item in enumerate(edge["scope"])
+        if item.startswith("semantic-input-binding/")
+    )
+    edge["scope"].pop(marker_index)
+    semantic = tmp_path / "semantic.json"
+    semantic.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+    monkeypatch.setattr(topic_c2, "SEMANTIC", semantic)
+    monkeypatch.setattr(topic_c2, "_prose_added_since_head", lambda: 1)
+    with pytest.raises(topic_c2.C2Error, match="marker 이력"):
+        topic_c2.seal_epoch("Claude Code", "OpenAI Codex", dry_run=True)
 
 
 # --------------------------------------------------------- 좌표
@@ -193,3 +300,85 @@ def test_coordinate_check_rejects_an_empty_range(monkeypatch):
     monkeypatch.setattr(topic_c2, "_run", lambda *a, **k: "")
     with pytest.raises(topic_c2.C2Error, match="변경 파일이 0"):
         topic_c2.check_coordinates("HEAD")
+
+
+# --------------------------------------------------------- 복합 C2 안전 경계
+
+def test_c2_coordinate_warning_is_fatal_before_any_write(monkeypatch):
+    called: list[str] = []
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: ["좌표 이동"])
+    monkeypatch.setattr(topic_c2, "_c2_mutation_paths", lambda _old: called.append("paths"))
+    monkeypatch.setattr(topic_c2, "advance_pin", lambda _new: called.append("pin"))
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda: called.append("refresh"))
+    monkeypatch.setattr(topic_c2, "seal_epoch", lambda *_a, **_k: called.append("seal"))
+
+    result = topic_c2.main([
+        "c2", "--ios", NEW, "--author", "Claude Code", "--reviewer", "OpenAI Codex",
+    ])
+    assert result == 2
+    assert called == [], "좌표 경고 뒤 어떤 mutation 준비/쓰기라도 실행되면 안 된다"
+
+
+def test_c2_runs_all_steps_and_post_write_verification(monkeypatch, tmp_path):
+    target = tmp_path / "tracked"
+    target.write_text("before")
+    events: list[str] = []
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: [])
+    monkeypatch.setattr(topic_c2, "_c2_mutation_paths", lambda _old: [target])
+    monkeypatch.setattr(topic_c2, "advance_pin", lambda _new: events.append("pin"))
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda: events.append("refresh"))
+    monkeypatch.setattr(topic_c2, "seal_epoch", lambda *_a, **_k: events.append("seal"))
+    monkeypatch.setattr(topic_c2, "verify_gates", lambda: events.append("verify"))
+
+    topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex")
+    assert events == ["pin", "refresh", "seal", "verify"]
+
+
+def test_c2_restores_original_bytes_when_post_write_verification_fails(monkeypatch, tmp_path):
+    target = tmp_path / "tracked"
+    original = b"original\x00bytes\n"
+    target.write_bytes(original)
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: [])
+    monkeypatch.setattr(topic_c2, "_c2_mutation_paths", lambda _old: [target])
+    monkeypatch.setattr(topic_c2, "advance_pin", lambda _new: target.write_text("pin changed"))
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda: target.write_text("refresh changed"))
+    monkeypatch.setattr(
+        topic_c2, "seal_epoch", lambda *_a, **_k: target.write_text("seal changed"),
+    )
+
+    def fail_verification():
+        target.write_text("verify observed changed bytes")
+        raise topic_c2.C2Error("injected failure")
+
+    monkeypatch.setattr(topic_c2, "verify_gates", fail_verification)
+    with pytest.raises(topic_c2.C2Error, match="injected failure"):
+        topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex")
+    assert target.read_bytes() == original
+
+
+def test_verify_gates_runs_preflight_tests_and_both_diff_checks(monkeypatch):
+    calls: list[tuple[list[str], pathlib.Path | None]] = []
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda **_k: [])
+
+    def record(args, cwd=None, **_kwargs):
+        calls.append((args, cwd))
+        return ""
+
+    monkeypatch.setattr(topic_c2, "_run", record)
+    topic_c2.verify_gates()
+
+    commands = [args for args, _cwd in calls]
+    assert any(any(part.endswith("topic_migration_manifest.py") for part in args) for args in commands)
+    pytest_call = next(args for args in commands if "pytest" in args)
+    assert set(topic_c2.GATE_TESTS).issubset(pytest_call)
+    assert ["git", "diff", "--check"] in commands
+    assert ["git", "-C", str(topic_c2.IOS_ROOT), "diff", "--check"] in commands
+
+
+def test_verify_gates_rejects_a_non_fixed_chain(monkeypatch):
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda **_k: ["stale"])
+    with pytest.raises(topic_c2.C2Error, match="고정점이 아니다"):
+        topic_c2.verify_gates()

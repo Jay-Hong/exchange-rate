@@ -17,13 +17,14 @@ epoch 번호는 이력에서 도출하지, 사람이 옮겨 적지 않는다.
     python3 scripts/topic_c2.py pin --ios <sha> [--dry-run]
     python3 scripts/topic_c2.py refresh [--dry-run]
     python3 scripts/topic_c2.py seal --author <A> --reviewer <B> [--dry-run]
-    python3 scripts/topic_c2.py c2 --ios <sha> --author <A> --reviewer <B>
-    python3 scripts/topic_c2.py verify                        # 체인이 이미 고정점인가
+    python3 scripts/topic_c2.py c2 --ios <sha> --author <A> --reviewer <B>  # atomic + full gates
+    python3 scripts/topic_c2.py verify                        # 고정점 + C2 문서/원장 gates
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -53,6 +54,13 @@ EXPECTED_DOC_HEADER_FILES = 6
 
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
 FIXPOINT_LIMIT = 8
+GATE_TESTS = (
+    "tests/test_topic_c2.py",
+    "tests/test_topic_only_semantic_review.py",
+    "tests/test_document_citations.py",
+    "tests/test_topic_only_documents.py",
+    "tests/test_topic_only_ledger.py",
+)
 
 
 class C2Error(RuntimeError):
@@ -63,8 +71,13 @@ def _say(tag: str, message: str) -> None:
     print(f"[{tag}] {message}")
 
 
-def _run(args: list[str], cwd: pathlib.Path | None = None) -> str:
-    done = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+def _run(
+    args: list[str],
+    cwd: pathlib.Path | None = None,
+    *,
+    env: dict[str, str] | None = None,
+) -> str:
+    done = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True)
     if done.returncode != 0:
         raise C2Error(f"{' '.join(args)} 실패: {done.stderr.strip() or done.stdout.strip()}")
     return done.stdout
@@ -245,9 +258,56 @@ def refresh_chain(*, dry_run: bool = False) -> list[str]:
 
 # ---------------------------------------------------------------- seal
 
-def _history_entries() -> list[tuple]:
-    module = _test_module("test_topic_only_semantic_review", "SEMANTIC_BINDING_HISTORY")
-    return list(module.SEMANTIC_BINDING_HISTORY)
+def _history_entries_from_text(text: str, *, source: str) -> list[tuple[int, str, str]]:
+    """Parse the pinned history without importing possibly stale working-tree code."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError as error:
+        raise C2Error(f"{source} 의 Python 문법이 깨졌다: {error}") from error
+
+    raw = None
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(
+            isinstance(target, ast.Name) and target.id == "SEMANTIC_BINDING_HISTORY"
+            for target in node.targets
+        ):
+            try:
+                raw = ast.literal_eval(node.value)
+            except (ValueError, TypeError, SyntaxError) as error:
+                raise C2Error(f"{source} 의 SEMANTIC_BINDING_HISTORY 를 해석할 수 없다") from error
+            break
+    if not isinstance(raw, tuple) or not raw:
+        raise C2Error(f"{source} 에 비어 있지 않은 SEMANTIC_BINDING_HISTORY tuple 이 없다")
+
+    entries: list[tuple[int, str, str]] = []
+    for index, item in enumerate(raw, 1):
+        if (
+            not isinstance(item, tuple)
+            or len(item) != 3
+            or not isinstance(item[0], int)
+            or not isinstance(item[1], str)
+            or not isinstance(item[2], str)
+        ):
+            raise C2Error(f"{source} 이력 {index}번 항목의 모양이 (int, str, str) 이 아니다")
+        entries.append(item)
+
+    for index, (sequence, parent, fingerprint) in enumerate(entries):
+        expected_sequence = index + 1
+        expected_parent = "GENESIS" if index == 0 else entries[index - 1][2]
+        if sequence != expected_sequence or parent != expected_parent:
+            raise C2Error(
+                f"{source} 이력 체인이 {expected_sequence:04d}에서 끊겼다 "
+                f"(sequence={sequence}, parent={parent[:12]})"
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise C2Error(f"{source} epoch {sequence:04d} 지문이 64자리 sha 가 아니다")
+    return entries
+
+
+def _history_entries() -> list[tuple[int, str, str]]:
+    return _history_entries_from_text(HISTORY_FILE.read_text(), source=str(HISTORY_FILE))
 
 
 def _committed_text(relative: str) -> str:
@@ -257,23 +317,98 @@ def _committed_text(relative: str) -> str:
         return ""
 
 
+def _committed_history_entries() -> list[tuple[int, str, str]]:
+    text = _committed_text(str(HISTORY_FILE.relative_to(REPO)))
+    if not text:
+        raise C2Error("HEAD 의 semantic binding 이력을 읽지 못했다")
+    return _history_entries_from_text(text, source="HEAD semantic binding history")
+
+
+def _edge_map(data: dict, *, source: str) -> dict[tuple[str, str], dict]:
+    process = data.get("review_process")
+    edges = process.get("review_edges") if isinstance(process, dict) else None
+    if not isinstance(edges, list) or len(edges) != 2:
+        count = len(edges) if isinstance(edges, list) else "비-list"
+        raise C2Error(f"{source} review_edges 가 {count}개 — 2 여야 한다")
+
+    mapped: dict[tuple[str, str], dict] = {}
+    for index, edge in enumerate(edges):
+        if not isinstance(edge, dict):
+            raise C2Error(f"{source} review_edges[{index}] 가 object 가 아니다")
+        author, reviewer, scope = edge.get("author"), edge.get("reviewer"), edge.get("scope")
+        if not isinstance(author, str) or not isinstance(reviewer, str) or not isinstance(scope, list):
+            raise C2Error(f"{source} review_edges[{index}] 의 author/reviewer/scope 모양이 잘못됐다")
+        if author == reviewer:
+            raise C2Error(f"{source} review edge 가 자기검토다: {author}")
+        if not all(isinstance(item, str) for item in scope):
+            raise C2Error(f"{source} {author}→{reviewer} scope 에 문자열 아닌 항목이 있다")
+        key = (author, reviewer)
+        if key in mapped:
+            raise C2Error(f"{source} review edge 가 중복됐다: {author}→{reviewer}")
+        mapped[key] = edge
+    return mapped
+
+
+def _select_review_edges(data: dict, author: str, reviewer: str) -> tuple[dict, dict, dict[str, dict]]:
+    if author == reviewer:
+        raise C2Error("author 와 reviewer 는 달라야 한다 — 자기검토 봉인 금지")
+    process = data.get("review_process")
+    participants = process.get("participants") if isinstance(process, dict) else None
+    if not isinstance(participants, list):
+        raise C2Error("review_process.participants 가 list 가 아니다")
+    by_name = {
+        person.get("name"): person
+        for person in participants
+        if isinstance(person, dict) and isinstance(person.get("name"), str)
+    }
+    if len(by_name) != len(participants):
+        raise C2Error("review participant 이름이 없거나 중복됐다")
+    missing = [name for name in (author, reviewer) if name not in by_name]
+    if missing:
+        raise C2Error(f"review participant 에 없는 역할이다: {missing}")
+    if set(by_name) != {author, reviewer}:
+        raise C2Error(f"review participant 집합이 요청 역할쌍과 다르다: {sorted(by_name)}")
+
+    edges = _edge_map(data, source="working semantic review")
+    expected = {(author, reviewer), (reviewer, author)}
+    if set(edges) != expected:
+        rendered = [f"{left}→{right}" for left, right in sorted(edges)]
+        raise C2Error(f"요청 역할의 reciprocal review edge 가 아니다: {rendered}")
+    return edges[(author, reviewer)], edges[(reviewer, author)], by_name
+
+
+def _prose_scope(edge: dict, prefix: str) -> list[str]:
+    return [item for item in edge["scope"] if not item.startswith(prefix)]
+
+
 def _prose_added_since_head() -> int:
-    """산문 작업 단위가 실제로 늘었는가. epoch 은 **기록할 일이 있을 때만** 연다."""
+    """Require committed prose to remain an exact prefix, then count appended units."""
     head = _committed_text("spec/topic-only-semantic-review.json")
     if not head:
-        return 1
+        raise C2Error("HEAD 의 semantic review 를 읽지 못했다 — append-only 를 판정할 수 없다")
     prefix = _test_module("test_topic_only_semantic_review", "SEMANTIC_BINDING_PREFIX").SEMANTIC_BINDING_PREFIX
+    try:
+        committed = json.loads(head)
+        current = json.loads(SEMANTIC.read_text())
+    except json.JSONDecodeError as error:
+        raise C2Error(f"semantic review JSON 을 읽을 수 없다: {error}") from error
 
-    def prose(raw: str) -> int:
-        data = json.loads(raw)
-        return sum(
-            1
-            for edge in data["review_process"]["review_edges"]
-            for item in edge["scope"]
-            if not item.startswith(prefix)
-        )
+    committed_edges = _edge_map(committed, source="HEAD semantic review")
+    current_edges = _edge_map(current, source="working semantic review")
+    if set(current_edges) != set(committed_edges):
+        raise C2Error("review edge 역할쌍이 HEAD 와 달라졌다 — append-only 위반")
 
-    return prose(SEMANTIC.read_text()) - prose(head)
+    added = 0
+    for roles, committed_edge in committed_edges.items():
+        old = _prose_scope(committed_edge, prefix)
+        new = _prose_scope(current_edges[roles], prefix)
+        if new[:len(old)] != old:
+            raise C2Error(
+                f"커밋된 산문을 rewrite/reorder 했다: {roles[0]}→{roles[1]} — "
+                "정정은 기존 항목을 보존하고 뒤에 append 하라"
+            )
+        added += len(new) - len(old)
+    return added
 
 
 def seal_epoch(author: str, reviewer: str, *, dry_run: bool = False,
@@ -281,40 +416,74 @@ def seal_epoch(author: str, reviewer: str, *, dry_run: bool = False,
     module = _test_module(
         "test_topic_only_semantic_review",
         "_semantic_review_fingerprint", "_semantic_binding_marker", "SEMANTIC_BINDING_PREFIX",
+        "SEMANTIC_BINDING_RE", "_semantic_binding_histories",
     )
-    history = _history_entries()
-    if not history:
-        raise C2Error("이력이 비어 있다 — genesis 부터는 손으로 처리하라")
-    last_sequence, _, last_fingerprint = history[-1]
-    sequence = last_sequence + 1
-    parent = last_fingerprint            # ⛔ 손으로 옮겨 적지 않는다(3회 오타 위험 실측)
-
+    data = json.loads(SEMANTIC.read_text())
+    author_edge, reviewer_edge, by_name = _select_review_edges(data, author, reviewer)
     added = _prose_added_since_head()
-    if added <= 0 and not allow_reseal:
+    if added <= 0:
         raise C2Error(
             "HEAD 대비 새 산문 작업 단위가 없다 — 기록할 일이 없으면 epoch 을 열지 않는다. "
-            "미커밋 epoch 을 다시 봉인하려면 --allow-reseal"
+            "재봉인도 미커밋 산문 작업 단위가 있어야 한다"
         )
 
-    data = json.loads(SEMANTIC.read_text())
-    edges = data["review_process"]["review_edges"]
-    if len(edges) != 2:
-        raise C2Error(f"review_edges 가 {len(edges)}개 — 2 여야 한다")
-    author_edge, reviewer_edge = edges
+    committed_history = _committed_history_entries()
+    history = _history_entries()
+    if history[:len(committed_history)] != committed_history:
+        raise C2Error("working semantic binding history 가 HEAD 이력을 rewrite 했다 — append-only 위반")
+    uncommitted = history[len(committed_history):]
+    last_sequence, _, last_fingerprint = committed_history[-1]
+    marker_histories = module._semantic_binding_histories(data)
+    expected_marker_histories = [tuple(history), tuple(history)]
+    if marker_histories != expected_marker_histories:
+        raise C2Error("semantic 양방향 marker 이력이 working test 이력과 다르다 — 부분 변경/삭제 의심")
+
+    if allow_reseal:
+        if len(uncommitted) != 1:
+            raise C2Error(
+                "--allow-reseal 은 HEAD 뒤 미커밋 epoch 이 정확히 1개일 때만 가능하다 "
+                f"(현재 {len(uncommitted)}개)"
+            )
+        sequence, parent, old_fingerprint = uncommitted[0]
+        if sequence != last_sequence + 1 or parent != last_fingerprint:
+            raise C2Error("미커밋 epoch 이 HEAD 마지막 지문에 바로 이어지지 않는다")
+    else:
+        if uncommitted:
+            raise C2Error(
+                f"미커밋 epoch {uncommitted[0][0]:04d} 가 이미 있다 — "
+                "같은 epoch 재봉인은 --allow-reseal, 커밋된 정정은 다음 epoch"
+            )
+        sequence = last_sequence + 1
+        parent = last_fingerprint       # ⛔ 손으로 옮겨 적지 않는다(3회 오타 위험 실측)
+        old_fingerprint = None
 
     existing = re.compile(rf"^{re.escape(module.SEMANTIC_BINDING_PREFIX)}{sequence:04d}:")
-    already = any(existing.match(item) for edge in edges for item in edge["scope"])
-    if already:
-        if not allow_reseal:
-            raise C2Error(f"epoch {sequence:04d} 가 이미 있다 — 재봉인은 --allow-reseal")
-        if f"{sequence:04d}:" in _committed_text("spec/topic-only-semantic-review.json"):
-            # append-only 계약: 커밋된 epoch 은 **절대** 다시 쓰지 않는다. 앞으로 supersede 한다.
-            raise C2Error(f"epoch {sequence:04d} 는 이미 커밋됐다 — 재봉인 금지, 다음 epoch 으로 정정하라")
-        for edge in edges:
+    matching = [
+        (edge, item)
+        for edge in (author_edge, reviewer_edge)
+        for item in edge["scope"]
+        if existing.match(item)
+    ]
+    if allow_reseal:
+        if len(matching) != 2:
+            raise C2Error(f"미커밋 epoch {sequence:04d} marker 가 {len(matching)}개 — 2 여야 한다")
+        for edge, item in matching:
+            match = module.SEMANTIC_BINDING_RE.fullmatch(item)
+            if (
+                match is None
+                or int(match["sequence"]) != sequence
+                or match["parent"] != parent
+                or match["fingerprint"] != old_fingerprint
+                or match["author"] != edge["author"]
+                or match["reviewer"] != edge["reviewer"]
+            ):
+                raise C2Error(f"미커밋 epoch {sequence:04d} marker 역할/체인이 이력과 다르다")
+        for edge in (author_edge, reviewer_edge):
             edge["scope"] = [item for item in edge["scope"] if not existing.match(item)]
+    elif matching:
+        raise C2Error(f"epoch {sequence:04d} marker 는 있는데 이력 tuple 이 없다 — 부분 변경을 먼저 복구하라")
 
     def sync() -> None:
-        by_name = {p["name"]: p for p in data["review_process"]["participants"]}
         by_name[author]["authored_or_modified"] = list(author_edge["scope"])
         by_name[author]["independently_reviewed"] = list(reviewer_edge["scope"])
         by_name[reviewer]["authored_or_modified"] = list(reviewer_edge["scope"])
@@ -329,18 +498,37 @@ def seal_epoch(author: str, reviewer: str, *, dry_run: bool = False,
         raise C2Error("marker 삽입이 지문을 바꿨다 — marker 제외 규칙이 깨졌다")
 
     text = HISTORY_FILE.read_text()
-    anchor = f'        "{parent}",\n    ),\n)'
-    if text.count(anchor) != 1:
-        raise C2Error(f"이력 끝 앵커를 {text.count(anchor)}번 찾았다 — 1이어야 한다")
-    tuple_text = f'        "{parent}",\n    ),\n    (\n        {sequence},\n        "{parent}",\n        "{fingerprint}",\n    ),\n)'
+    if allow_reseal:
+        old_tuple = (
+            f'    (\n        {sequence},\n        "{parent}",\n'
+            f'        "{old_fingerprint}",\n    ),'
+        )
+        new_tuple = (
+            f'    (\n        {sequence},\n        "{parent}",\n'
+            f'        "{fingerprint}",\n    ),'
+        )
+        if text.count(old_tuple) != 1:
+            raise C2Error(f"재봉인할 epoch {sequence:04d} 이력 tuple 을 정확히 찾지 못했다")
+        updated_history = text.replace(old_tuple, new_tuple)
+    else:
+        anchor = f'        "{parent}",\n    ),\n)'
+        if text.count(anchor) != 1:
+            raise C2Error(f"이력 끝 앵커를 {text.count(anchor)}번 찾았다 — 1이어야 한다")
+        tuple_text = (
+            f'        "{parent}",\n    ),\n    (\n        {sequence},\n'
+            f'        "{parent}",\n        "{fingerprint}",\n    ),\n)'
+        )
+        updated_history = text.replace(anchor, tuple_text)
 
     if dry_run:
-        _say("SEAL", f"[dry-run] epoch {sequence:04d} parent={parent[:12]} fp={fingerprint[:12]} (산문 +{added})")
+        action = "재봉인" if allow_reseal else "봉인"
+        _say("SEAL", f"[dry-run] epoch {sequence:04d} {action} parent={parent[:12]} fp={fingerprint[:12]} (산문 +{added})")
         return sequence, fingerprint
 
     SEMANTIC.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
-    HISTORY_FILE.write_text(text.replace(anchor, tuple_text))
-    _say("SEAL", f"epoch {sequence:04d} 봉인 / parent={parent[:12]} fp={fingerprint} (산문 +{added})")
+    HISTORY_FILE.write_text(updated_history)
+    action = "재봉인" if allow_reseal else "봉인"
+    _say("SEAL", f"epoch {sequence:04d} {action} / parent={parent[:12]} fp={fingerprint} (산문 +{added})")
     return sequence, fingerprint
 
 
@@ -388,6 +576,72 @@ def check_coordinates(ios_from: str, ios_to: str = "HEAD") -> list[str]:
     return warnings
 
 
+# ---------------------------------------------------------------- composite safety
+
+def _c2_mutation_paths(old_pin: str) -> list[pathlib.Path]:
+    """Return every tracked file that pin/refresh/seal may mutate."""
+    paths = set(_pin_files(old_pin))
+    paths.update(_doc_header_files())
+    paths.update((IMPL_LEDGER, CLAIM_LEDGER, SEMANTIC, HISTORY_FILE, LOCK, MANIFEST))
+    missing = [path for path in paths if not path.is_file()]
+    if missing:
+        raise C2Error(f"C2 mutation 대상 파일이 없다: {[str(path) for path in missing]}")
+    return sorted(paths)
+
+
+def _snapshot_files(paths: list[pathlib.Path]) -> dict[pathlib.Path, bytes]:
+    return {path: path.read_bytes() for path in paths}
+
+
+def _restore_files(snapshot: dict[pathlib.Path, bytes]) -> None:
+    errors: list[str] = []
+    for path, content in snapshot.items():
+        try:
+            path.write_bytes(content)
+        except OSError as error:
+            errors.append(f"{path}: {error}")
+    if errors:
+        raise C2Error(f"C2 rollback 중 파일 복원 실패: {errors}")
+
+
+def verify_gates() -> None:
+    """Run the repository gates required before a composite C2 can report success."""
+    pending = refresh_chain(dry_run=True)
+    if pending:
+        raise C2Error(f"해시 체인이 고정점이 아니다: {pending}")
+
+    env = dict(os.environ)
+    env["TOPIC_MIGRATION_IOS_ROOT"] = str(IOS_ROOT)
+    _run([sys.executable, "scripts/topic_migration_manifest.py", "preflight"], cwd=REPO, env=env)
+    _run(
+        [sys.executable, "-m", "pytest", *GATE_TESTS, "-q", "-p", "no:asyncio"],
+        cwd=REPO,
+        env=env,
+    )
+    _run(["git", "diff", "--check"], cwd=REPO)
+    _run(["git", "-C", str(IOS_ROOT), "diff", "--check"])
+    _say("VERIFY", "체인 고정점 · preflight · 문서/원장/semantic tests · 양 리포 diff-check 통과")
+
+
+def run_c2(ios: str, author: str, reviewer: str, *, allow_reseal: bool = False) -> None:
+    old_pin = current_ios_pin()
+    warnings = check_coordinates(old_pin, ios)
+    if warnings:
+        rendered = " / ".join(warnings)
+        raise C2Error(f"좌표 재도출 경고가 있어 쓰기 전에 중단한다: {rendered}")
+
+    snapshot = _snapshot_files(_c2_mutation_paths(old_pin))
+    try:
+        advance_pin(ios)
+        refresh_chain()
+        seal_epoch(author, reviewer, allow_reseal=allow_reseal)
+        verify_gates()
+    except BaseException:
+        _restore_files(snapshot)
+        _say("ROLLBACK", "C2 실패 — pin/chain/semantic/history 파일을 실행 전 bytes 로 복원")
+        raise
+
+
 # ---------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
@@ -418,7 +672,7 @@ def main(argv: list[str] | None = None) -> int:
     whole.add_argument("--reviewer", required=True)
     whole.add_argument("--allow-reseal", action="store_true")
 
-    sub.add_parser("verify", help="체인이 이미 고정점인가 (변경 필요하면 실패)")
+    sub.add_parser("verify", help="고정점·preflight·문서/원장 tests·diff-check 전체 검증")
 
     args = parser.parse_args(argv)
     try:
@@ -434,18 +688,10 @@ def main(argv: list[str] | None = None) -> int:
             seal_epoch(args.author, args.reviewer, dry_run=args.dry_run, allow_reseal=args.allow_reseal)
             return 0
         if args.command == "verify":
-            pending = refresh_chain(dry_run=True)
-            if pending:
-                for item in pending:
-                    print(f"STALE: {item}")
-                return 1
-            print("체인 고정점 — 갱신할 것 없음")
+            verify_gates()
             return 0
         if args.command == "c2":
-            check_coordinates(current_ios_pin(), args.ios)
-            advance_pin(args.ios)
-            refresh_chain()
-            seal_epoch(args.author, args.reviewer, allow_reseal=args.allow_reseal)
+            run_c2(args.ios, args.author, args.reviewer, allow_reseal=args.allow_reseal)
             return 0
     except C2Error as error:
         print(f"ERROR: {error}")
