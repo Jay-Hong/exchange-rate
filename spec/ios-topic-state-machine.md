@@ -4,9 +4,9 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `721b334b469c21fc1932d5f728f6e443d529ab2c`
+- iOS 기준 commit: `7cd5e45f4138c979cc409dd8086503cafb4858aa`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5c10b140caf3876293efd79dc1e0aa0807c29c06534a0ce33dc1c26904c0df2b`
+- manifest SHA: `5ea8854c939a60a0976fc62e824f3130cda3dab8a55b2ed904c47165dc26968a`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -544,11 +544,11 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
 수행했고, 그 뒤 아래 튜닝 값 자체는 그대로이며 좌표만 재도출됐다):**
 - 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를
   초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다
-  (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2032-2090`).
+  (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2039-2097`).
 - 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의
   subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와
   중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1607-1628` ·
-  `ios/FXi/Services/WebSocketService.swift:1856-1875`).
+  `ios/FXi/Services/WebSocketService.swift:1863-1882`).
 - 현재 topic 실패 재시도는 서버 최소 cooldown 뒤 `U(0, base)`를 더하고, exact
   `(verb, sorted topics)` 실패는 저장된 cooldown task 하나를 공유한다. topic command는 최초
   시도를 포함해 최대 3회이며 cleanup은 저장 cooldown을 취소·제거한다

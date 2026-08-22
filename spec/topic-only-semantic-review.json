@@ -95,7 +95,9 @@
           "C2 재결속 (ios pin `190dbb2`). ⚠️ **좌표 재도출 2건** — `CacheService.swift` 12행에 +6 이 들어가 하위 인용이 밀렸다. 산술이 아니라 주장문으로 확정했다: `31-36`(\"디스크에 영속화\")= `saveTopicRates` → **37-42**, `45-48`(\"`removeCachedTopicRates()` 로 디스크 키까지 지운다\")= 그 함수 → **51-54**. `WebSocketService.swift` 는 편집이 **파일 끝 2123행 extension** 이라 최대 인용 2091 아래 → 미이동, `TopicSnapshotService.swift` 는 편집 67행이 인용 `53-58` 보다 아래 → 미이동. 런북도 인용 구간 N-for-N + 추가분 424행~ 이라 미이동. **밀린 파일만 골라 고쳤다.**",
           "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (ios pin `721b334`) — pin 전진과 재봉인만, 좌표 재도출 대상 없음. ⚠️ **재검토자 절차 정정**: 직전 C1 에서 `git add -A` 로 무관한 `project.pbxproj` 정렬 변경을 함께 커밋했다. 내용은 Xcode 의 알파벳 재정렬이고 arming 은 before=0/after=0 불변임을 확인했지만, **언젠가 arming 변경이 그렇게 섞일 수 있는 경로**다. 이번 커밋부터 파일을 지정해 staging 한다. (커밋·푸시 자체는 세션 초 상시 권한 범위였고, OpenAI Codex 는 매번 GO 를 받는 더 보수적인 지침으로 움직인다 — 권한 차이이지 위반이 아니다.)",
-          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `7cd5e45`). **좌표 재도출 3건** — `WebSocketService.swift` 1724(+3)·1744(+4) 편집이 그 아래 인용을 밀었다. pin 시점 원본의 앵커와 1:1 대조해 확정했다: `1856-1875`(`@unknown default:` … `}`) → **1863-1882**, `2032-2090`(`// MARK: - Error Handling & Reconnection` … `.failed(...)`) → **2039-2097**, `2032-2091` → **2039-2098**. 처음엔 신 좌표 내용만 보고 \"경계가 안 맞는다\" 고 의심했는데, **pin 시점 그 좌표의 내용**과 비교하니 앵커가 정확히 일치했다 — 기대가 아니라 원본과 대조해야 한다. 1744 이하 인용과 다른 파일은 미이동이라 손대지 않았다.",
+          "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -174,7 +176,9 @@
           "MODE 2 · cold-start 실기기 재현 도구 C1 (iOS `190dbb2`) + smoke 3항목 통과. 사용자가 `topic ON 정상`· `Citi 미표시`·`MODE 1` 을 실기기에서 확인했고, 남은 MODE 2 와 cold-start 는 혼자 재현하기 어렵다고 했다. OpenAI Codex 가 **운영 fault-injection 대신 DEBUG 앱 내부 one-shot 시나리오**로 구현했다 — `DebugTopicSmokeController` 는 파일 1행부터 `#if DEBUG` 라 Release 에 존재하지 않고, 무장 안 하면 non-snapshot 은 락도 안 잡고 `.pass` 다. cold-start 는 WS 만 지연하면 REST bootstrap 이 먼저 화면을 채워 재현이 안 되므로 REST 억제까지 같은 시나리오에 묶었다. 구현 중 **`clearAllCache()` 가 FX·DXY topic 캐시를 안 지우던 기존 결함**을 찾아 고쳤고, 처음 `removeCachedTopicRates()` 에 잘못 넣었다가 스스로 되돌렸다 — 섞으면 테더 한 topic 의 인가 상실이 무관한 FX·DXY last-known 까지 날린다. Claude Code 독립 검증: decorator 가 idle 에서 순수 pass-through 인지, 캐시 수정이 `clearAllCache()` 에만 들어갔는지, **Release 빌드 exit 0 · error 0**(DEBUG seam 이 프로덕션 파일에서 참조되는 구조라 [[feedback_ios_debug_seam_release_compile]] 부류), 784 tests 0 failures, arming pbxproj 참조 0 을 각각 확인했다.",
           "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=OpenAI Codex:reviewer=Claude Code",
           "MODE 2 · cold-start 실기기 통과 (iOS `721b334`) — smoke **7/13**. 사용자가 도구의 기계적 PASS 뿐 아니라 **화면 기준**까지 확인했다: MODE 2 대기 중 기존 값 유지·배너 없음 / 재검증 성공 시 화면 변화·배너 없이 healthy 복귀 / cold-start 두 경우 모두 legacy 부분 목록·값 없음. OpenAI Codex 가 그 셋만 `[x]` 로 하고 나머지 6개(`재검증 실패 확정`·`배치 실패`·`server safety-stop`·`lease hard-expiry`·`강등 중 구매 복원`· `Release arming`)는 미체크로 뒀다. 더해 **초기화 버튼 문구를 실제 동작에 맞게 정정**했다 — \"주입 중지\" 는 즉시 멈추는 것처럼 읽히지만 `reset()` 은 상태만 지우고 이미 시작된 4·12초 지연은 끝까지 간다([[feedback_passive_artifact_as_active_mechanism]] 부류). Claude Code 독립 검증: 784 tests 0 failures · **Release 빌드 exit 0 · error 0** · arming pbxproj 참조 0 · 런북 편집이 인용 구간 N-for-N + 추가분 434행~ 라 좌표 미이동.",
-          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=OpenAI Codex:reviewer=Claude Code",
+          "남은 3축 smoke 재현 도구 C1 (iOS `7cd5e45`). OpenAI Codex 가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 **운영 서버 조작 없이** 실기기에서 재현하도록 DEBUG 주입기를 확장했다. 세 축을 같은 방식으로 주입하지 않고 각각 실제 경로를 통과시킨 게 핵심이다 — 재검증은 실제 요청의 ACK 를 `temporarily_unavailable` 로 바꿔 **같은 재시도 예산**을 소진시키고, 배치는 ACK 만 유실시키되 한 topic frame 은 통과시켜 격리를 보이며, lease 는 ACK 의 lease 만 짧게 해 **foreground 만료 판정**을 태운다. ⛔ 세 축 모두 **카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴**으로만 PASS 한다. lease 는 복구 snapshot 도착이 아니라 **topic 상태 healthy** 까지 요구하도록 스스로 강화했다(decode·state 반영 실패 구분). 응답이 send 완료보다 먼저 오는 경합도 찾아 고치고 순서 회귀를 추가했다. Claude Code 독립 검증: 790 tests 0 failures · clean Release 빌드 exit 0 · **Release 산출물 `strings` 에서 `DebugTopicSmokeController`/`Channel`/`Section`/`TOPIC-SMOKE` 전부 0**, ASCII 대조군은 존재해 검사가 공허하지 않음까지 보였다(⚠️ 한국어 문자열은 대조군도 0 이라 무의미 — 오라클을 확인하지 않았으면 거짓 확신이었다).",
+          "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -260,7 +264,9 @@
           "MODE 2 · cold-start 실기기 재현 도구 C1 (iOS `190dbb2`) + smoke 3항목 통과. 사용자가 `topic ON 정상`· `Citi 미표시`·`MODE 1` 을 실기기에서 확인했고, 남은 MODE 2 와 cold-start 는 혼자 재현하기 어렵다고 했다. OpenAI Codex 가 **운영 fault-injection 대신 DEBUG 앱 내부 one-shot 시나리오**로 구현했다 — `DebugTopicSmokeController` 는 파일 1행부터 `#if DEBUG` 라 Release 에 존재하지 않고, 무장 안 하면 non-snapshot 은 락도 안 잡고 `.pass` 다. cold-start 는 WS 만 지연하면 REST bootstrap 이 먼저 화면을 채워 재현이 안 되므로 REST 억제까지 같은 시나리오에 묶었다. 구현 중 **`clearAllCache()` 가 FX·DXY topic 캐시를 안 지우던 기존 결함**을 찾아 고쳤고, 처음 `removeCachedTopicRates()` 에 잘못 넣었다가 스스로 되돌렸다 — 섞으면 테더 한 topic 의 인가 상실이 무관한 FX·DXY last-known 까지 날린다. Claude Code 독립 검증: decorator 가 idle 에서 순수 pass-through 인지, 캐시 수정이 `clearAllCache()` 에만 들어갔는지, **Release 빌드 exit 0 · error 0**(DEBUG seam 이 프로덕션 파일에서 참조되는 구조라 [[feedback_ios_debug_seam_release_compile]] 부류), 784 tests 0 failures, arming pbxproj 참조 0 을 각각 확인했다.",
           "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=OpenAI Codex:reviewer=Claude Code",
           "MODE 2 · cold-start 실기기 통과 (iOS `721b334`) — smoke **7/13**. 사용자가 도구의 기계적 PASS 뿐 아니라 **화면 기준**까지 확인했다: MODE 2 대기 중 기존 값 유지·배너 없음 / 재검증 성공 시 화면 변화·배너 없이 healthy 복귀 / cold-start 두 경우 모두 legacy 부분 목록·값 없음. OpenAI Codex 가 그 셋만 `[x]` 로 하고 나머지 6개(`재검증 실패 확정`·`배치 실패`·`server safety-stop`·`lease hard-expiry`·`강등 중 구매 복원`· `Release arming`)는 미체크로 뒀다. 더해 **초기화 버튼 문구를 실제 동작에 맞게 정정**했다 — \"주입 중지\" 는 즉시 멈추는 것처럼 읽히지만 `reset()` 은 상태만 지우고 이미 시작된 4·12초 지연은 끝까지 간다([[feedback_passive_artifact_as_active_mechanism]] 부류). Claude Code 독립 검증: 784 tests 0 failures · **Release 빌드 exit 0 · error 0** · arming pbxproj 참조 0 · 런북 편집이 인용 구간 N-for-N + 추가분 434행~ 라 좌표 미이동.",
-          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=OpenAI Codex:reviewer=Claude Code",
+          "남은 3축 smoke 재현 도구 C1 (iOS `7cd5e45`). OpenAI Codex 가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 **운영 서버 조작 없이** 실기기에서 재현하도록 DEBUG 주입기를 확장했다. 세 축을 같은 방식으로 주입하지 않고 각각 실제 경로를 통과시킨 게 핵심이다 — 재검증은 실제 요청의 ACK 를 `temporarily_unavailable` 로 바꿔 **같은 재시도 예산**을 소진시키고, 배치는 ACK 만 유실시키되 한 topic frame 은 통과시켜 격리를 보이며, lease 는 ACK 의 lease 만 짧게 해 **foreground 만료 판정**을 태운다. ⛔ 세 축 모두 **카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴**으로만 PASS 한다. lease 는 복구 snapshot 도착이 아니라 **topic 상태 healthy** 까지 요구하도록 스스로 강화했다(decode·state 반영 실패 구분). 응답이 send 완료보다 먼저 오는 경합도 찾아 고치고 순서 회귀를 추가했다. Claude Code 독립 검증: 790 tests 0 failures · clean Release 빌드 exit 0 · **Release 산출물 `strings` 에서 `DebugTopicSmokeController`/`Channel`/`Section`/`TOPIC-SMOKE` 전부 0**, ASCII 대조군은 존재해 검사가 공허하지 않음까지 보였다(⚠️ 한국어 문자열은 대조군도 0 이라 무의미 — 오라클을 확인하지 않았으면 거짓 확신이었다).",
+          "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -347,7 +353,9 @@
           "C2 재결속 (ios pin `190dbb2`). ⚠️ **좌표 재도출 2건** — `CacheService.swift` 12행에 +6 이 들어가 하위 인용이 밀렸다. 산술이 아니라 주장문으로 확정했다: `31-36`(\"디스크에 영속화\")= `saveTopicRates` → **37-42**, `45-48`(\"`removeCachedTopicRates()` 로 디스크 키까지 지운다\")= 그 함수 → **51-54**. `WebSocketService.swift` 는 편집이 **파일 끝 2123행 extension** 이라 최대 인용 2091 아래 → 미이동, `TopicSnapshotService.swift` 는 편집 67행이 인용 `53-58` 보다 아래 → 미이동. 런북도 인용 구간 N-for-N + 추가분 424행~ 이라 미이동. **밀린 파일만 골라 고쳤다.**",
           "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (ios pin `721b334`) — pin 전진과 재봉인만, 좌표 재도출 대상 없음. ⚠️ **재검토자 절차 정정**: 직전 C1 에서 `git add -A` 로 무관한 `project.pbxproj` 정렬 변경을 함께 커밋했다. 내용은 Xcode 의 알파벳 재정렬이고 arming 은 before=0/after=0 불변임을 확인했지만, **언젠가 arming 변경이 그렇게 섞일 수 있는 경로**다. 이번 커밋부터 파일을 지정해 staging 한다. (커밋·푸시 자체는 세션 초 상시 권한 범위였고, OpenAI Codex 는 매번 GO 를 받는 더 보수적인 지침으로 움직인다 — 권한 차이이지 위반이 아니다.)",
-          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `7cd5e45`). **좌표 재도출 3건** — `WebSocketService.swift` 1724(+3)·1744(+4) 편집이 그 아래 인용을 밀었다. pin 시점 원본의 앵커와 1:1 대조해 확정했다: `1856-1875`(`@unknown default:` … `}`) → **1863-1882**, `2032-2090`(`// MARK: - Error Handling & Reconnection` … `.failed(...)`) → **2039-2097**, `2032-2091` → **2039-2098**. 처음엔 신 좌표 내용만 보고 \"경계가 안 맞는다\" 고 의심했는데, **pin 시점 그 좌표의 내용**과 비교하니 앵커가 정확히 일치했다 — 기대가 아니라 원본과 대조해야 한다. 1744 이하 인용과 다른 파일은 미이동이라 손대지 않았다.",
+          "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -440,7 +448,9 @@
           "C2 재결속 (ios pin `190dbb2`). ⚠️ **좌표 재도출 2건** — `CacheService.swift` 12행에 +6 이 들어가 하위 인용이 밀렸다. 산술이 아니라 주장문으로 확정했다: `31-36`(\"디스크에 영속화\")= `saveTopicRates` → **37-42**, `45-48`(\"`removeCachedTopicRates()` 로 디스크 키까지 지운다\")= 그 함수 → **51-54**. `WebSocketService.swift` 는 편집이 **파일 끝 2123행 extension** 이라 최대 인용 2091 아래 → 미이동, `TopicSnapshotService.swift` 는 편집 67행이 인용 `53-58` 보다 아래 → 미이동. 런북도 인용 구간 N-for-N + 추가분 424행~ 이라 미이동. **밀린 파일만 골라 고쳤다.**",
           "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=Claude Code:reviewer=OpenAI Codex",
           "C2 재결속 (ios pin `721b334`) — pin 전진과 재봉인만, 좌표 재도출 대상 없음. ⚠️ **재검토자 절차 정정**: 직전 C1 에서 `git add -A` 로 무관한 `project.pbxproj` 정렬 변경을 함께 커밋했다. 내용은 Xcode 의 알파벳 재정렬이고 arming 은 before=0/after=0 불변임을 확인했지만, **언젠가 arming 변경이 그렇게 섞일 수 있는 경로**다. 이번 커밋부터 파일을 지정해 staging 한다. (커밋·푸시 자체는 세션 초 상시 권한 범위였고, OpenAI Codex 는 매번 GO 를 받는 더 보수적인 지침으로 움직인다 — 권한 차이이지 위반이 아니다.)",
-          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=Claude Code:reviewer=OpenAI Codex",
+          "C2 재결속 (ios pin `7cd5e45`). **좌표 재도출 3건** — `WebSocketService.swift` 1724(+3)·1744(+4) 편집이 그 아래 인용을 밀었다. pin 시점 원본의 앵커와 1:1 대조해 확정했다: `1856-1875`(`@unknown default:` … `}`) → **1863-1882**, `2032-2090`(`// MARK: - Error Handling & Reconnection` … `.failed(...)`) → **2039-2097**, `2032-2091` → **2039-2098**. 처음엔 신 좌표 내용만 보고 \"경계가 안 맞는다\" 고 의심했는데, **pin 시점 그 좌표의 내용**과 비교하니 앵커가 정확히 일치했다 — 기대가 아니라 원본과 대조해야 한다. 1744 이하 인용과 다른 파일은 미이동이라 손대지 않았다.",
+          "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -524,7 +534,9 @@
           "MODE 2 · cold-start 실기기 재현 도구 C1 (iOS `190dbb2`) + smoke 3항목 통과. 사용자가 `topic ON 정상`· `Citi 미표시`·`MODE 1` 을 실기기에서 확인했고, 남은 MODE 2 와 cold-start 는 혼자 재현하기 어렵다고 했다. OpenAI Codex 가 **운영 fault-injection 대신 DEBUG 앱 내부 one-shot 시나리오**로 구현했다 — `DebugTopicSmokeController` 는 파일 1행부터 `#if DEBUG` 라 Release 에 존재하지 않고, 무장 안 하면 non-snapshot 은 락도 안 잡고 `.pass` 다. cold-start 는 WS 만 지연하면 REST bootstrap 이 먼저 화면을 채워 재현이 안 되므로 REST 억제까지 같은 시나리오에 묶었다. 구현 중 **`clearAllCache()` 가 FX·DXY topic 캐시를 안 지우던 기존 결함**을 찾아 고쳤고, 처음 `removeCachedTopicRates()` 에 잘못 넣었다가 스스로 되돌렸다 — 섞으면 테더 한 topic 의 인가 상실이 무관한 FX·DXY last-known 까지 날린다. Claude Code 독립 검증: decorator 가 idle 에서 순수 pass-through 인지, 캐시 수정이 `clearAllCache()` 에만 들어갔는지, **Release 빌드 exit 0 · error 0**(DEBUG seam 이 프로덕션 파일에서 참조되는 구조라 [[feedback_ios_debug_seam_release_compile]] 부류), 784 tests 0 failures, arming pbxproj 참조 0 을 각각 확인했다.",
           "semantic-input-binding/v1:0024:fc08ec416a973b4a205d33a461baea21cc5f4235286d56e2e26a0a515788de18:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:author=OpenAI Codex:reviewer=Claude Code",
           "MODE 2 · cold-start 실기기 통과 (iOS `721b334`) — smoke **7/13**. 사용자가 도구의 기계적 PASS 뿐 아니라 **화면 기준**까지 확인했다: MODE 2 대기 중 기존 값 유지·배너 없음 / 재검증 성공 시 화면 변화·배너 없이 healthy 복귀 / cold-start 두 경우 모두 legacy 부분 목록·값 없음. OpenAI Codex 가 그 셋만 `[x]` 로 하고 나머지 6개(`재검증 실패 확정`·`배치 실패`·`server safety-stop`·`lease hard-expiry`·`강등 중 구매 복원`· `Release arming`)는 미체크로 뒀다. 더해 **초기화 버튼 문구를 실제 동작에 맞게 정정**했다 — \"주입 중지\" 는 즉시 멈추는 것처럼 읽히지만 `reset()` 은 상태만 지우고 이미 시작된 4·12초 지연은 끝까지 간다([[feedback_passive_artifact_as_active_mechanism]] 부류). Claude Code 독립 검증: 784 tests 0 failures · **Release 빌드 exit 0 · error 0** · arming pbxproj 참조 0 · 런북 편집이 인용 구간 N-for-N + 추가분 434행~ 라 좌표 미이동.",
-          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0025:093cfd9591f04584e1d7799b27244e79e7061b70172974b07d93f2bf3c004a70:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:author=OpenAI Codex:reviewer=Claude Code",
+          "남은 3축 smoke 재현 도구 C1 (iOS `7cd5e45`). OpenAI Codex 가 `재검증 실패 확정`·`배치 실패 격리`· `lease hard-expiry` 를 **운영 서버 조작 없이** 실기기에서 재현하도록 DEBUG 주입기를 확장했다. 세 축을 같은 방식으로 주입하지 않고 각각 실제 경로를 통과시킨 게 핵심이다 — 재검증은 실제 요청의 ACK 를 `temporarily_unavailable` 로 바꿔 **같은 재시도 예산**을 소진시키고, 배치는 ACK 만 유실시키되 한 topic frame 은 통과시켜 격리를 보이며, lease 는 ACK 의 lease 만 짧게 해 **foreground 만료 판정**을 태운다. ⛔ 세 축 모두 **카운터가 아니라 실제 `TopicSubscriptionSnapshot` 수렴**으로만 PASS 한다. lease 는 복구 snapshot 도착이 아니라 **topic 상태 healthy** 까지 요구하도록 스스로 강화했다(decode·state 반영 실패 구분). 응답이 send 완료보다 먼저 오는 경합도 찾아 고치고 순서 회귀를 추가했다. Claude Code 독립 검증: 790 tests 0 failures · clean Release 빌드 exit 0 · **Release 산출물 `strings` 에서 `DebugTopicSmokeController`/`Channel`/`Section`/`TOPIC-SMOKE` 전부 0**, ASCII 대조군은 존재해 검사가 공허하지 않음까지 보였다(⚠️ 한국어 문자열은 대조군도 0 이라 무의미 — 오라클을 확인하지 않았으면 거짓 확신이었다).",
+          "semantic-input-binding/v1:0026:77809b18219b09329c6313308870472b6f3c6e244570c477bfd6db78868d6ea3:677cebd331431cfc21da088a6020d64a0bf98ea5679ad52ee5f34c21e843090a:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -538,21 +550,21 @@
   "reviewed_at": "2026-08-20",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "5c10b140caf3876293efd79dc1e0aa0807c29c06534a0ce33dc1c26904c0df2b",
+    "manifest_sha256": "5ea8854c939a60a0976fc62e824f3130cda3dab8a55b2ed904c47165dc26968a",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "4ab11d0367a5b918317489baffedaf946baf03189f3080430c9dbf11f0115993",
+    "lock_sha256": "4cb581804bebd0fd85fffa7ba5618b442e6716bc9c768e0f92014bab3d76b077",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "721b334b469c21fc1932d5f728f6e443d529ab2c"
+    "ios_commit": "7cd5e45f4138c979cc409dd8086503cafb4858aa"
   },
   "documents": {
-    "ADR": "d4997a1ce712af451e308cd131818ca8bb988b934bf4eb6ec90e4bfcde0d8dc0",
-    "CLIENT": "f26ab567c10228c4288d9527a4650d50963254e12547a9c777785b7366689140",
-    "CUT": "4f1d61d35f4eb9760e10300ef6dd306f3ba4ac4c9df8fd7f96d3458988caaf16",
-    "HAND": "c0f0e19301faf6a3bb0a1c21d906957f4e36c1d74f01294dd99b32bfe6cc9181",
-    "HEALTH": "187900aab9122ab9e06b43cf3b8d4943cbe06f47cf920086269a58b1724a17a6",
-    "LOAD": "9dc21cebbb15a399178f6e5c095a21c0beff8a67e5cf8b09625df2d48a0c901a"
+    "ADR": "6c353af2b93a75d947fde74460424363796de64f0ec92e0fa3a996fec7bd49c4",
+    "CLIENT": "fd7ceeeaa6c8235b140de0a4e6ba58b42ac508a1b2c121ea6254fc5926f24aba",
+    "CUT": "19f7a703b3b7520f572602890ce30bfa1cce0d70820c01d60e3daf46eaed22b0",
+    "HAND": "6fc783aed07faea675c34b1a34e1f65571f8dcb8b74cb329af7a9943a0fb2bde",
+    "HEALTH": "d84e30145bf99bfe7a5b46f5d8afede96c8ef742fb1b7de8be955a80071e6f45",
+    "LOAD": "75eaebf8f68e6b6ddb429344386c599906b9578a9c36ce0ed79941d1b55dcb77"
   },
-  "claim_ledger_sha256": "ae8435cf90042200ca3362a199271b8461969f217968b881e6ed365ad366e8c4",
+  "claim_ledger_sha256": "cb2f23461fdf9bad0a9c219be3bc40093ace4cbdfd5c140f16f96bf808f6f614",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,

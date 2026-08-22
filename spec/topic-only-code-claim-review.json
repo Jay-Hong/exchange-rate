@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "5c10b140caf3876293efd79dc1e0aa0807c29c06534a0ce33dc1c26904c0df2b",
+    "manifest_sha256": "5ea8854c939a60a0976fc62e824f3130cda3dab8a55b2ed904c47165dc26968a",
     "baseline_sha256": "d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8",
-    "lock_sha256": "4ab11d0367a5b918317489baffedaf946baf03189f3080430c9dbf11f0115993",
+    "lock_sha256": "4cb581804bebd0fd85fffa7ba5618b442e6716bc9c768e0f92014bab3d76b077",
     "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "721b334b469c21fc1932d5f728f6e443d529ab2c"
+    "ios_commit": "7cd5e45f4138c979cc409dd8086503cafb4858aa"
   },
   "documents": {
-    "ADR": "d4997a1ce712af451e308cd131818ca8bb988b934bf4eb6ec90e4bfcde0d8dc0",
-    "CLIENT": "f26ab567c10228c4288d9527a4650d50963254e12547a9c777785b7366689140",
-    "CUT": "4f1d61d35f4eb9760e10300ef6dd306f3ba4ac4c9df8fd7f96d3458988caaf16",
-    "HAND": "c0f0e19301faf6a3bb0a1c21d906957f4e36c1d74f01294dd99b32bfe6cc9181",
-    "HEALTH": "187900aab9122ab9e06b43cf3b8d4943cbe06f47cf920086269a58b1724a17a6",
-    "LOAD": "9dc21cebbb15a399178f6e5c095a21c0beff8a67e5cf8b09625df2d48a0c901a"
+    "ADR": "6c353af2b93a75d947fde74460424363796de64f0ec92e0fa3a996fec7bd49c4",
+    "CLIENT": "fd7ceeeaa6c8235b140de0a4e6ba58b42ac508a1b2c121ea6254fc5926f24aba",
+    "CUT": "19f7a703b3b7520f572602890ce30bfa1cce0d70820c01d60e3daf46eaed22b0",
+    "HAND": "6fc783aed07faea675c34b1a34e1f65571f8dcb8b74cb329af7a9943a0fb2bde",
+    "HEALTH": "d84e30145bf99bfe7a5b46f5d8afede96c8ef742fb1b7de8be955a80071e6f45",
+    "LOAD": "75eaebf8f68e6b6ddb429344386c599906b9578a9c36ce0ed79941d1b55dcb77"
   },
   "entries": [
     {
@@ -240,25 +240,25 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-24",
-      "unit_sha256": "714d36cf8b836dae7cbc947322be4e38164950cc3036c4fd935be5ee5e48fef9",
-      "unit_text": "- 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를 초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다 (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2032-2090`).",
+      "unit_sha256": "fe4b27467b840f6183fa92061680d95622f4538668f990de2a0ad9f7f3137a26",
+      "unit_text": "- 현재 reconnect는 `2초 × attempt ±20%` jitter와 최대 5회 상한을 쓰며, 첫 frame에서 attempt를 초기화하지 않고 같은 channel이 30초 안정 구간을 버틴 뒤에만 초기화한다 (`ios/FXi/Utils/Constants.swift:270-277` · `ios/FXi/Services/WebSocketService.swift:2039-2097`).",
       "classification": "code_fact",
       "detail": "pinned iOS commit에서 reconnect jitter·5회 상한과 30초 안정 연결 뒤 attempt reset을 확인했다.",
       "provenance": [
-        "file:ios/FXi/Services/WebSocketService.swift:2032-2090",
+        "file:ios/FXi/Services/WebSocketService.swift:2039-2097",
         "file:ios/FXi/Utils/Constants.swift:270-277"
       ]
     },
     {
       "destination": "CLIENT",
       "rid": "R-CLI-24",
-      "unit_sha256": "7b8cd2fe3309ba8ac9292e173c8b0a500a624b8959b2c53fad45e0d40a1d7bf6",
-      "unit_text": "- 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의 subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와 중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1607-1628` · `ios/FXi/Services/WebSocketService.swift:1856-1875`).",
+      "unit_sha256": "05cad8363c6bcc23eb2e80b9bef2a7002c2506534096810ead7734b5c1283ea3",
+      "unit_text": "- 현재 자동 reconnect 뒤 복구 subscribe batch만 별도 `U(0, 2초)` jitter를 거친다. 최초 연결의 subscribe는 지연하지 않고, 연결 확인 시점에 있던 topic만 캡처해 그 뒤의 신규 subscribe와 중복되지 않게 한다(`ios/FXi/Services/WebSocketService.swift:1607-1628` · `ios/FXi/Services/WebSocketService.swift:1863-1882`).",
       "classification": "code_fact",
       "detail": "pinned iOS commit에서 자동 reconnect 복구 batch 전용 jitter와 최초 연결 무지연 경계를 확인했다.",
       "provenance": [
         "file:ios/FXi/Services/WebSocketService.swift:1607-1628",
-        "file:ios/FXi/Services/WebSocketService.swift:1856-1875"
+        "file:ios/FXi/Services/WebSocketService.swift:1863-1882"
       ]
     },
     {
@@ -821,8 +821,8 @@
     {
       "destination": "LOAD",
       "rid": "R-LOAD-3",
-      "unit_sha256": "cc34bab21a12bfda8abe647bfd064d10b999e2687c518d17bf51fc9fedd24056",
-      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1064-1076`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은 flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은 iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현**됐고, 아래 좌표는 **pinned** iOS `99316a9` 트리에서 재도출한 것이다 — 구현 시점 commit 과 pin 은 같지 않다 (`ios/FXi/Services/WebSocketService.swift:1415-1433` · `ios/FXi/Services/WebSocketService.swift:1528-1568` · `ios/FXi/Services/WebSocketService.swift:1607-1629` · `ios/FXi/Services/WebSocketService.swift:2032-2091`). 그리고 pinned 트리에는 이 네 좌표가 덮지 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는 \"재구독을 흩뜨린다\"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2` (`ios/FXi/Utils/Constants.swift:268-269`)를 `topicRevalidationDelayNanoseconds` (`ios/FXi/Services/WebSocketService.swift:946-951`)가 `U(0, 2초)`로 바꾸고, `revalidateSilencedTopic` 이 그만큼 기다린 **뒤에야** 재검증 subscribe 를 보낸다 (`ios/FXi/Services/WebSocketService.swift:1185-1218`). jitter seam 의 프로덕션 기본값은 `Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:94` · `ios/FXi/Services/WebSocketService.swift:160`), 이미 예약된 재검증이 있거나 channel 이 없거나 변환이 실패하면 **지연 없이 보내는 fallback 대신** degraded 로 접는다 (`ios/FXi/Services/WebSocketService.swift:1185-1207`). ⚠️ 이 축은 `45a8a12` 에는 **없었다**(그 트리의 `FXi/Utils/Constants.swift` 에 `topicRevalidationJitterMaxSeconds` 부재) — 그러니 \"`45a8a12` 에서 구현됐다\"를 pinned 트리의 클라 절반 **전체**로 읽으면 안 된다. 서버 기본 1초와 클라이언트 jitter를 사용한 45초 다중 클라이언트 LOAD-S4 리허설은 GO였지만 waiter 개수 hard cap과 영구 activation은 별도다. 따라서 리허설 통과를 메모리 상한이나 운영 활성화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
+      "unit_sha256": "3f4addeacee9965bced1829a0067509d8efc036b60534c3a0002f16d00a08a3d",
+      "unit_text": "근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2` (**최대 5**), 주석은 *\"RDS db.t4g.micro 메모리 절약\"*. `app/database.py:36-38` 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**). **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본 30초). 아래 \"그대로 쌓인다\" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤 `sqlalchemy.exc.TimeoutError` → 503 으로 접힌다. 흡수 장치의 필요성은 그대로다(접히는 것이 서비스되는 것은 아니다). **E2 [코드]** `app/topic_initial_snapshot.py:1064-1076`은 요청 topic을 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는 `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은 flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의 admission 점유는 기본 4다. 서버 실패 직후 같은 key 재진입은 짧게 비동기화됐지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 클라이언트 jitter·재시도 상한·exact-scope cooldown은 iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현**됐고, 아래 좌표는 **pinned** iOS `99316a9` 트리에서 재도출한 것이다 — 구현 시점 commit 과 pin 은 같지 않다 (`ios/FXi/Services/WebSocketService.swift:1415-1433` · `ios/FXi/Services/WebSocketService.swift:1528-1568` · `ios/FXi/Services/WebSocketService.swift:1607-1629` · `ios/FXi/Services/WebSocketService.swift:2039-2098`). 그리고 pinned 트리에는 이 네 좌표가 덮지 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는 \"재구독을 흩뜨린다\"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2` (`ios/FXi/Utils/Constants.swift:268-269`)를 `topicRevalidationDelayNanoseconds` (`ios/FXi/Services/WebSocketService.swift:946-951`)가 `U(0, 2초)`로 바꾸고, `revalidateSilencedTopic` 이 그만큼 기다린 **뒤에야** 재검증 subscribe 를 보낸다 (`ios/FXi/Services/WebSocketService.swift:1185-1218`). jitter seam 의 프로덕션 기본값은 `Double.random(in: 0...1)` 이고(`ios/FXi/Services/WebSocketService.swift:94` · `ios/FXi/Services/WebSocketService.swift:160`), 이미 예약된 재검증이 있거나 channel 이 없거나 변환이 실패하면 **지연 없이 보내는 fallback 대신** degraded 로 접는다 (`ios/FXi/Services/WebSocketService.swift:1185-1207`). ⚠️ 이 축은 `45a8a12` 에는 **없었다**(그 트리의 `FXi/Utils/Constants.swift` 에 `topicRevalidationJitterMaxSeconds` 부재) — 그러니 \"`45a8a12` 에서 구현됐다\"를 pinned 트리의 클라 절반 **전체**로 읽으면 안 된다. 서버 기본 1초와 클라이언트 jitter를 사용한 45초 다중 클라이언트 LOAD-S4 리허설은 GO였지만 waiter 개수 hard cap과 영구 activation은 별도다. 따라서 리허설 통과를 메모리 상한이나 운영 활성화 완료로 쓰지 않는다. 취소된 sync worker는 다음 협력 checkpoint까지 잠시 남을 수 있어 admission 4가 실제 executor thread 점유의 순간 상한은 아니다.",
       "classification": "code_fact",
       "detail": "고정 server commit에서 LOAD-S5/S6/S7 shared build·FIFO admission·transient failure cooldown과 S3/S2 예산 경계를 확인했다. pinned iOS 45a8a12의 jitter·retry cap과 45초 LOAD-S4 리허설은 완료됐지만 waiter queue 개수 hard cap과 영구 activation은 별도라 메모리 상한이나 운영 활성화 완료를 뜻하지 않는다.",
       "provenance": [
@@ -847,7 +847,7 @@
         "file:ios/FXi/Services/WebSocketService.swift:1528-1568",
         "file:ios/FXi/Services/WebSocketService.swift:160",
         "file:ios/FXi/Services/WebSocketService.swift:1607-1629",
-        "file:ios/FXi/Services/WebSocketService.swift:2032-2091",
+        "file:ios/FXi/Services/WebSocketService.swift:2039-2098",
         "file:ios/FXi/Services/WebSocketService.swift:94",
         "file:ios/FXi/Services/WebSocketService.swift:946-951",
         "file:ios/FXi/Utils/Constants.swift:268-269"

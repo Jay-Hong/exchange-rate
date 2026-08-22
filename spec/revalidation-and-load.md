@@ -4,9 +4,9 @@
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
 - server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `721b334b469c21fc1932d5f728f6e443d529ab2c`
+- iOS 기준 commit: `7cd5e45f4138c979cc409dd8086503cafb4858aa`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5c10b140caf3876293efd79dc1e0aa0807c29c06534a0ce33dc1c26904c0df2b`
+- manifest SHA: `5ea8854c939a60a0976fc62e824f3130cda3dab8a55b2ed904c47165dc26968a`
 - baseline SHA: `d457c5174d51ac549cac801920b0e271498d88416ceb8bf0c167cc1a6179a4d8`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -107,7 +107,7 @@ iOS `45a8a12`에서 [R-CLI-24](ios-topic-state-machine.md#r-cli-24)로 **구현*
 (`ios/FXi/Services/WebSocketService.swift:1415-1433` ·
 `ios/FXi/Services/WebSocketService.swift:1528-1568` ·
 `ios/FXi/Services/WebSocketService.swift:1607-1629` ·
-`ios/FXi/Services/WebSocketService.swift:2032-2091`). 그리고 pinned 트리에는 이 네 좌표가 덮지
+`ios/FXi/Services/WebSocketService.swift:2039-2098`). 그리고 pinned 트리에는 이 네 좌표가 덮지
 않는 축이 하나 더 있다 — **45초 무수신 재검증 경로 자체의 full jitter** 로, 이 문서가 요구하는
 "재구독을 흩뜨린다"의 재검증 쪽은 이것으로 **충족된다**: `topicRevalidationJitterMaxSeconds = 2`
 (`ios/FXi/Utils/Constants.swift:268-269`)를 `topicRevalidationDelayNanoseconds`

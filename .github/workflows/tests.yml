@@ -60,7 +60,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Jay-Hong/fxi-ios
-          ref: 721b334b469c21fc1932d5f728f6e443d529ab2c
+          ref: 7cd5e45f4138c979cc409dd8086503cafb4858aa
           path: ios
           # Ledger evidence may cite any pushed iOS commit and must inspect its real parent diff.
           fetch-depth: 0
