@@ -167,7 +167,7 @@
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
 | `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | E3 REST twin · 1C WS 인증 · iOS bootstrap 인증 · entitlement 503 · W=4 · canary · smoke | 🟢 **true** (2026-08-22 영구 ON, smoke 13/13) |
-| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
+| `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 · GraphV2 KRX series | GraphV2 인증 + 사용자별 `krx_visible` + superset 캐시(`120b948`) → 배포 → 3계정 매트릭스 | 🟢 **true** (2026-08-23 영구 ON, 운영 매트릭스 통과) |
 
 GraphV2(`/api/v2/graph/tab`·`/catalog`)는 Firebase+premium 인증 뒤
 `compute_krx_visible = premium ∧ G3 ∧ G2 ∧ G1`을 사용자별로 계산한다. 승인 없는 사용자는
@@ -192,7 +192,10 @@ GraphV2(`/api/v2/graph/tab`·`/catalog`)는 Firebase+premium 인증 뒤
   ⑤ iOS GraphV2 호출을 `AuthedRESTTransport`로 이관(Bearer + 401 safe-read replay)
 
   로컬 검증은 서버 전체 `5804 passed`·iOS 전체 `801 passed`·arming-on Release Archive PASS다.
-  운영 G2는 계속 OFF이며, 코드 배포와 승인/미승인/비구독 실서버 매트릭스 전에는 켜지 않는다.
+  이후 운영 배포(`8bbf987`) → **실계정 3종 매트릭스 통과** → G2 영구 ON(2026-08-23). 매트릭스 실측:
+  **승인 구독자**(premium ∧ G1) catalog/1w graph/KRX snapshot 모두 KRX 노출 · **미승인 구독자**는
+  200 이되 KRX 제거 + snapshot **404** · **비구독** 403 · **익명** 401. ⚠️ 순서까지 확인했다 —
+  미승인 요청이 **공용 캐시를 먼저 채운 뒤** 승인 요청이 같은 캐시에서 KRX 를 받는다(superset 계약).
 - **guard는 2중이다**: build/precompute는 KRX 포함 superset을 만들고, 3경로(장기 hit / 1d closed /
   1d in_progress)의 **공통 exit**에서 `strip_krx_if_not_allowed(payload, krx_visible=...)`가
   `series`와 `in_progress`를 copy-on-write로 필터한다. 개인화 결과는 공용 Redis에 쓰지 않는다.
