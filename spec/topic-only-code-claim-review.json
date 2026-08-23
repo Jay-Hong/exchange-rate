@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "79255fcec184761e80220bae3778621a5d7c19e76d10b15647abeb8f69231521",
+    "manifest_sha256": "ceaff4740d06074a439db4590b66691a340bc51d027b168fe7a51b865092778d",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "504b8bdd363c6a4148e5d97a0cab9a3d3078cf0bd8e3fc91a44f238d62c8c35e",
-    "server_commit": "a6121006beb4165e8418410c5617a05f01512c2b",
-    "ios_commit": "568af3e3d3e1b5e54bd4fff687092f402e9bfd43"
+    "lock_sha256": "3d233196c199a187861463722246cae34fadb7154f3998068e2f631dad0a4358",
+    "server_commit": "aafaea8dc9b9ef371dad13b38ac87583a2b7bf4c",
+    "ios_commit": "a05b138218f967e7d13e7b813eda17ce4da8a5cf"
   },
   "documents": {
-    "ADR": "3bceb23003d8716e57c5cb2bb145961ec5127892572cde96781f990b298f0bef",
-    "CLIENT": "f1f7ffee4a3b729e3f09d8453fc4ffaa8faba6ff45c84879e16bbfe580e11406",
-    "CUT": "92b31fa363864f58ed8a1cd72ddc3bea52ee96953c33fd8b9b541aa803b2f4b6",
-    "HAND": "81dadb48ddd1dd2a203b69cc504122fd02495f60901a25d309c36edec209c4f3",
-    "HEALTH": "aba40269c64c85a8fe086cdb95b885a88fea9c13a4c5401a4dae41bfc0b1ea4d",
-    "LOAD": "5c0bbc489c8aec2e2103787666d467ac2eb7ea6f602d59bbebb9e45621284364"
+    "ADR": "13921ce5cd78e90812ed0de47c0ca027c3660d566eff30a24475365657d94494",
+    "CLIENT": "4ee56c58d56bbe36ae3b3979acd11b96e620d0266d52ad67034a095a8282165b",
+    "CUT": "8993bf7430a02283b5057dfa748dba9118965915911d7ffae84e709bd3a59025",
+    "HAND": "8f496b6b8249d6779e9365c0071a617eb548e5050c5f30e31ac42b7890d14f89",
+    "HEALTH": "b4d500f198b2d4f9cbe50553dc7c4fa246050c5fe366358f8152a215bce72591",
+    "LOAD": "8037004f2ad69f951bb2315540488aa434e0a4b0544ba912ad48c8ba5993e31b"
   },
   "entries": [
     {
@@ -504,26 +504,26 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "3b1a93c5efcbb137355206346a888b5577e4ca860808c8b9380c764637862d4d",
-      "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:650`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:621`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |",
+      "unit_sha256": "25bea6c0312371bcde69cfa1e0eca9c47082d0ea17392f97f655eb6f9ef1d459",
+      "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:650`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:621`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3721` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |",
       "classification": "code_fact",
       "detail": "topics_disabled purge의 메모리·디스크·파생 상태 제거와 다음 연결 세대의 자동 복구를 실 transport 테스트까지 포함해 잠갔다는 현재 커버리지 단정이다.",
       "provenance": [
         "file:ios/FXiTests/TetherDataPathTests.swift:621",
         "file:ios/FXiTests/TetherDataPathTests.swift:650",
-        "file:ios/FXiTests/TopicMessageTests.swift:3748"
+        "file:ios/FXiTests/TopicMessageTests.swift:3721"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "f5f73c8c225e7cf9b4453128d22dfc09b13f06bcd06abe1dde9e230899253a25",
-      "unit_text": "| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5923`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6139`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |",
+      "unit_sha256": "4d14817ebd17c5ebe0ed625c38efe586427906fa8540a29e0cf8969884b88988",
+      "unit_text": "| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5896`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6112`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |",
       "classification": "code_fact",
       "detail": "같은 lease id의 만료 불연장과 같은 lease 세대에서 강제 reconnect 1회 불변식을 현재 행동 테스트가 잠근다는 커버리지 단정이다.",
       "provenance": [
-        "file:ios/FXiTests/TopicMessageTests.swift:5923",
-        "file:ios/FXiTests/TopicMessageTests.swift:6139"
+        "file:ios/FXiTests/TopicMessageTests.swift:5896",
+        "file:ios/FXiTests/TopicMessageTests.swift:6112"
       ]
     },
     {
