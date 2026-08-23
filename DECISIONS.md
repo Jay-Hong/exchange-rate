@@ -4034,7 +4034,7 @@ F-3 활성 직후, 5/19~5/26 close finalizer 데이터를 기준으로 `KRX_CLOS
 
 ### 맥락
 
-기존 legacy `/api/graph/{currency}` ([app/main.py:2521](app/main.py#L2521))는 다음 한계를 가진다:
+기존 legacy `/api/graph/{currency}` ([app/main.py:2545](app/main.py#L2545))는 다음 한계를 가진다:
 
 - 3 통화 only (USD/JPY/EUR) — 테더 탭 미지원
 - 1d는 KB + 하나 + investing + DXY, 1w+는 investing only — 은행 장기 그래프 미제공
@@ -6047,7 +6047,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 
 ### Decision 3 — 강제선의 현실 (per-user 한계 명시)
 
-`/ws`는 **익명**(main.py:1074 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
+`/ws`는 **익명**(main.py:1091 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
 (codex 지적, 코드 확인 2026-07-04). 1차 강제선:
 
 - **인증 있는 REST(알림 API) = G1+G2 서버 강제**: 김프알림 krx 조합 생성/수정 403,
@@ -6528,11 +6528,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `292a54b1b8f1784beb87ba60223e86cb7f4cec90`
+- server 기준 commit: `330fd657d94b59f37708d5926e20a58498708384`
 - iOS 기준 commit: `94b20fa981a45c42eb396115a3224100c567a54f`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `efbd66556991f505ce73eafc7d6e0de77918eb6d037f553e14269cda2c2145ee`
-- baseline SHA: `6d8a2bb22cd6a7f70dcfda186740c7888cdf9a60ce1e5aef94a577f0c7dc3cda`
+- manifest SHA: `e0fc094cd2db602c6d134ad094d35e2e948aafc0f034d40b6c0019bafd46d18f`
+- baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6596,7 +6596,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1220-1270` · `app/main.py:1074-1118`).
+(`app/main.py:1241-1290` · `app/main.py:1091-1135`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6643,7 +6643,7 @@ fallback 빌드가 아니며 출시할 수 없다.
 구현 근거: `app/config.py:741-784`(stage) · `app/topic_policy.py:78-85`(정책표) ·
 `app/topic_policy.py:237-275`(익명 planner) · `app/topic_policy.py:278-323`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:792-948`(배선·등록) ·
-`app/main.py:3227-3231`(REST twin).
+`app/main.py:3251-3255`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)

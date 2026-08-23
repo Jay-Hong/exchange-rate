@@ -29,7 +29,8 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1270` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1288-1294` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+  KRX·미등록 asset 은 **generic 404** 로 수렴한다(익명이 상품 존재·topic 이름을 열거할 수 없다, 2026-08-23).
 
 ## B. publish 의미론
 
@@ -76,8 +77,8 @@
 - **C2 [코드]** `app/topic_initial_snapshot.py:354` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3182` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3224` `verify_firebase_token(request)` → `app/main.py:3227`
+- **C3 [코드]** `exchange-rate/app/main.py:3206` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3248` `verify_firebase_token(request)` → `app/main.py:3251`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:78-85` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -135,7 +136,7 @@
   `app/topic_initial_snapshot.py:733-817`). 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서
   독립된 shared 예산으로 `asyncio.to_thread(..., _run_snapshot_worker, topic, request_budget)`를
   감싼다 — **REST twin도 같은 single-flight·worker 래퍼를 쓴다**
-  (`app/main.py:3247-3248`).
+  (`app/main.py:3271-3272`).
   **E2-inf [추론]** ⇒ 연결당 topic 순회는 **순차**지만, 같은 key의 요청은 shared task 하나에
   합류하고 새 shared task의 admission 점유는 기본 4다. 서버 transient 실패의 즉시 재진입은
   cooldown으로 억제되지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 기본 1초와

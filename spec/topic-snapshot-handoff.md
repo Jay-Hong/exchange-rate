@@ -3,11 +3,11 @@
 - 책임: 서버 build · ack · close 계약
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `292a54b1b8f1784beb87ba60223e86cb7f4cec90`
+- server 기준 commit: `330fd657d94b59f37708d5926e20a58498708384`
 - iOS 기준 commit: `94b20fa981a45c42eb396115a3224100c567a54f`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `efbd66556991f505ce73eafc7d6e0de77918eb6d037f553e14269cda2c2145ee`
-- baseline SHA: `6d8a2bb22cd6a7f70dcfda186740c7888cdf9a60ce1e5aef94a577f0c7dc3cda`
+- manifest SHA: `e0fc094cd2db602c6d134ad094d35e2e948aafc0f034d40b6c0019bafd46d18f`
+- baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 **서버가 subscribe 요청을 어떻게 종결하는가**만 소유한다 — initial snapshot build 결과의
@@ -41,7 +41,7 @@ Release arming 은 이 경로의 존재가 아니라 **최종 stage 활성화와
 `enforce_authenticated_premium` 에서 식별된 FX/USDT 는
 premium-only 로 분류되고(`app/topic_policy.py:278-323`) coordinator 가 premium 을 관측한다
 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다.
-REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3227-3231`, ADR-039 §8.1 E3).
+REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3251-3255`, ADR-039 §8.1 E3).
 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:237-275`).
 ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행
 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.
