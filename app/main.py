@@ -1053,7 +1053,24 @@ def _get_pool_status() -> Dict[str, Any]:
 
 
 
-app = FastAPI(lifespan=lifespan)
+def _fastapi_documentation_urls(environment: str) -> Dict[str, Optional[str]]:
+    """Expose framework documentation only in explicitly local/test environments."""
+    if (environment or "").strip().lower() in {"development", "test"}:
+        return {
+            "openapi_url": "/openapi.json",
+            "docs_url": "/docs",
+            "redoc_url": "/redoc",
+            "swagger_ui_oauth2_redirect_url": "/docs/oauth2-redirect",
+        }
+    return {
+        "openapi_url": None,
+        "docs_url": None,
+        "redoc_url": None,
+        "swagger_ui_oauth2_redirect_url": None,
+    }
+
+
+app = FastAPI(lifespan=lifespan, **_fastapi_documentation_urls(config.ENV))
 
 # 정적 파일 서비스 (은행 아이콘 이미지)
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -1173,6 +1190,8 @@ async def websocket_endpoint(websocket: WebSocket):
 @app.get("/api/investing/{pair}", response_model=schemas.BankExchangeRateResponse)
 def get_a_latest_investing_rate(pair: str, db: Session = Depends(get_db)):
     """인베스팅 특정 통화쌍 최신 환율 조회"""
+    if not legacy_policy.is_legacy_rate_asset(pair):
+        raise HTTPException(status_code=404, detail="Currency pair not found")
     result = crud.select_a_latest_investing_rate_from_db(db=db, pair=pair)
     if not result:
         raise HTTPException(status_code=404, detail=f"'{pair}' 통화쌍의 인베스팅 환율 데이터를 찾을 수 없습니다.")
@@ -1182,6 +1201,8 @@ def get_a_latest_investing_rate(pair: str, db: Session = Depends(get_db)):
 @app.get("/api/banks/{pair}", response_model=List[schemas.BankExchangeRateResponse])
 def get_a_pair_of_banks_rates(pair: str, db: Session = Depends(get_db)):
     """모든 은행의 특정 통화쌍 최신 환율 조회"""
+    if not legacy_policy.is_legacy_rate_asset(pair):
+        raise HTTPException(status_code=404, detail="Currency pair not found")
     result = crud.select_latest_bank_rates_from_db(db=db, pair=pair)
     if not result:
         raise HTTPException(status_code=404, detail=f"'{pair}' 통화쌍의 은행 환율 데이터를 찾을 수 없습니다.")
@@ -1264,14 +1285,16 @@ async def get_rates_for_mobile():
 def get_rates_by_currency(currency: str, db: Session = Depends(get_db)):
     """특정 통화쌍의 모든 환율 조회 (모바일 앱용).
 
-    Z-2d Step 4: topic-only 자산(usdt-krw, usd-krw-futures)은 410 Gone +
-    use_topic 안내 — 새 단말은 topic API로 마이그레이션. 정책 상수는
-    app.legacy_policy.LEGACY_REMOVED_RATE_TOPICS 단일 진실 소스.
+    Z-2d Step 4: 공개 migration 대상(usdt-krw)은 410 Gone + use_topic 안내.
+    KRX와 미등록 자산은 존재를 열거할 수 없도록 동일한 generic 404로 수렴한다.
     """
     # legacy에서 제거된 asset 분기 — DB 호출 전 fail-fast
     removed_detail = legacy_policy.build_legacy_removed_detail(currency)
     if removed_detail is not None:
         raise HTTPException(status_code=410, detail=removed_detail)
+
+    if not legacy_policy.is_legacy_rate_asset(currency):
+        raise HTTPException(status_code=404, detail="Currency pair not found")
 
     try:
         rates = crud.get_rates_by_currency(db=db, currency=currency)
@@ -1290,8 +1313,9 @@ def get_rates_by_currency(currency: str, db: Session = Depends(get_db)):
 
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"서버 오류: {str(e)}")
+    except Exception:
+        logger.exception("통화쌍 환율 조회 실패", extra={"currency": currency})
+        raise HTTPException(status_code=500, detail="Rates temporarily unavailable")
 
 
 # ===== HTML 웹페이지 =====
@@ -2319,9 +2343,9 @@ async def get_crawler_config():
     try:
         configs = crud.get_all_crawler_configs(db)
         return {"status": "success", "configs": configs}
-    except Exception as e:
+    except Exception:
         logger.error("크롤러 설정 조회 실패", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Crawler configuration unavailable")
     finally:
         db.close()
 
@@ -2360,9 +2384,9 @@ async def toggle_crawler(request: Request):
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+    except Exception:
         logger.error(f"크롤러 토글 실패: {crawler_name}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Crawler update failed")
 
 
 # ═════════════════════════════════════════════════════════════
@@ -2548,7 +2572,7 @@ async def get_graph_data(currency: str, range: str = "1d"):
 
     1w/3m/1y: Redis lazy 캐시 → DB 조회
     """
-    if currency not in ["usd-krw", "jpy-krw", "eur-krw"]:
+    if not legacy_policy.is_legacy_rate_asset(currency):
         raise HTTPException(status_code=400, detail="Invalid currency pair")
 
     if range not in ["1d", "1w", "3m", "1y"]:
@@ -3700,9 +3724,9 @@ async def register_device(
             device_id=device.id
         )
 
-    except Exception as e:
+    except Exception:
         logger.error("디바이스 등록 실패", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Device registration failed")
 
 
 @app.delete("/api/register-device")
@@ -3793,9 +3817,9 @@ async def create_notification_setting(
 
         return build_notification_setting_response(setting)
 
-    except Exception as e:
+    except Exception:
         logger.error("알림 설정 생성 실패", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Notification setting creation failed")
 
 
 @app.get("/api/notification-settings", response_model=schemas.NotificationSettingsListResponse)
@@ -4109,9 +4133,9 @@ async def create_source_notification_setting(
 
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.error("source 알림 설정 생성 실패", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Source notification setting creation failed")
 
 
 @app.get(
@@ -4481,9 +4505,9 @@ async def create_comparison_alert(
         return build_comparison_alert_response(alert)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         logger.error("비교 알림 생성 실패", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Comparison alert creation failed")
 
 
 @app.get("/api/comparison-alerts", response_model=schemas.ComparisonAlertsListResponse)

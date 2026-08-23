@@ -66,15 +66,18 @@ def should_include_source_in_legacy_rates(source: str, asset: str) -> bool:
     return source in _LEGACY_RATE_SOURCE_SET and asset in _LEGACY_RATE_ASSET_SET
 
 
+def is_legacy_rate_asset(asset: str) -> bool:
+    """Public legacy REST/graph endpoints may expose only registered FX assets."""
+    return asset in _LEGACY_RATE_ASSET_SET
+
+
 # ─── Z-2d Step 4: REST /api/rates/{currency} 410 Gone 정책 ────────────────────
 
-# Legacy `/api/rates/{currency}` endpoint에서 영구 제거된 asset → 안내할 topic.
-# 새 단말은 topic API로 마이그레이션. 같은 topic이라도 의미가 다르면 별도 key로 분리.
-# usd-krw-futures는 ADR-038 D2(2026-07-08)로 usdt:krw optional group에서 분리 —
-# 독립 topic krx:usd-krw-futures 안내 (app/krx_topic_publisher.KRX_TOPIC).
+# Legacy `/api/rates/{currency}` endpoint에서 영구 제거된 공개 asset → 안내할 topic.
+# KRX는 승인된 구독자에게만 존재가 보이는 표면이므로 여기에 등록하지 않는다. 미등록 asset과
+# 동일한 generic 404로 수렴해야 익명 caller가 topic 이름이나 상품 존재를 열거할 수 없다.
 LEGACY_REMOVED_RATE_TOPICS: Dict[str, str] = {
     "usdt-krw": "usdt:krw",
-    "usd-krw-futures": "krx:usd-krw-futures",
 }
 
 

@@ -17,6 +17,7 @@ from app.legacy_policy import (
     LEGACY_REMOVED_RATE_TOPICS,
     build_legacy_removed_detail,
     get_removed_legacy_rate_topic,
+    is_legacy_rate_asset,
     should_include_source_in_legacy_rates,
 )
 
@@ -111,25 +112,35 @@ class TestShouldIncludeSourceInLegacyRates(unittest.TestCase):
         self.assertEqual(banks_in_sources, BANK_DISPLAY_ORDER)
 
 
+class TestIsLegacyRateAsset(unittest.TestCase):
+
+    def test_registered_fx_assets_are_public(self):
+        for asset in LEGACY_RATE_ASSETS:
+            with self.subTest(asset=asset):
+                self.assertTrue(is_legacy_rate_asset(asset))
+
+    def test_topic_only_and_unknown_assets_are_hidden(self):
+        for asset in ("usdt-krw", "usd-krw-futures", "cny-krw", "some-typo"):
+            with self.subTest(asset=asset):
+                self.assertFalse(is_legacy_rate_asset(asset))
+
+
 # ---------------------------------------------------------------------------
 # Z-2d Step 4: LEGACY_REMOVED_RATE_TOPICS + helpers
 # ---------------------------------------------------------------------------
 
 class TestLegacyRemovedRateTopics(unittest.TestCase):
-    """REST /api/rates/{currency} 410 Gone 정책 — topic-only 자산은 use_topic 안내."""
+    """REST 410 is limited to public migration topics; gated KRX stays undiscoverable."""
 
     def test_mapping_exact(self):
         """LEGACY_REMOVED_RATE_TOPICS 정확 매핑 회귀 보호.
 
-        usdt-krw → usdt:krw / usd-krw-futures → krx:usd-krw-futures
-        (ADR-038 D2 — KRX 독립 topic 분리, 2026-07-08).
+        KRX is deliberately absent: anonymous callers must receive the same 404 as
+        any unknown asset rather than learning its topic name.
         """
         self.assertEqual(
             LEGACY_REMOVED_RATE_TOPICS,
-            {
-                "usdt-krw": "usdt:krw",
-                "usd-krw-futures": "krx:usd-krw-futures",
-            },
+            {"usdt-krw": "usdt:krw"},
         )
 
 
@@ -138,9 +149,8 @@ class TestGetRemovedLegacyRateTopic(unittest.TestCase):
     def test_usdt_krw_returns_topic(self):
         self.assertEqual(get_removed_legacy_rate_topic("usdt-krw"), "usdt:krw")
 
-    def test_usd_krw_futures_returns_topic(self):
-        self.assertEqual(
-            get_removed_legacy_rate_topic("usd-krw-futures"), "krx:usd-krw-futures")
+    def test_usd_krw_futures_is_hidden_like_unknown_asset(self):
+        self.assertIsNone(get_removed_legacy_rate_topic("usd-krw-futures"))
 
     def test_allowed_asset_returns_none(self):
         """LEGACY_RATE_ASSETS 통과 자산은 제거 대상 X — None 반환."""
@@ -167,16 +177,8 @@ class TestBuildLegacyRemovedDetail(unittest.TestCase):
             },
         )
 
-    def test_usd_krw_futures_detail_shape(self):
-        detail = build_legacy_removed_detail("usd-krw-futures")
-        self.assertEqual(
-            detail,
-            {
-                "error": "legacy_rate_removed",
-                "currency": "usd-krw-futures",
-                "use_topic": "krx:usd-krw-futures",
-            },
-        )
+    def test_usd_krw_futures_has_no_migration_detail(self):
+        self.assertIsNone(build_legacy_removed_detail("usd-krw-futures"))
 
     def test_allowed_asset_returns_none(self):
         """LEGACY_RATE_ASSETS는 제거 대상 X — None (정상 endpoint 처리 진행)."""

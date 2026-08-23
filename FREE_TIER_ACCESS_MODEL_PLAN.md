@@ -24,15 +24,15 @@
 | `/ws` legacy `type:rates` | iOS ✅ / Android ✅([WebSocketService.kt:177]) | B | 무인증 |
 | `/api/graph/{currency}` | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt:28]) | B | 무인증 |
 | `/api/v2/topics/snapshot` | iOS ✅ / **Android ❌** | **A** | ✅ **인증+premium+per-user KRX (E3, 2026-07-25)** |
-| `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | 🟡 **Firebase+premium+per-user KRX 및 iOS Bearer 구현·로컬 검증 완료(2026-08-23), 커밋·배포 전** |
+| `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | ✅ **Firebase+premium+per-user KRX + iOS Bearer 배포·운영 매트릭스 완료(2026-08-23)** |
 | topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | ✅ **인증 강제 + prod dispatcher ON**(1C 토큰·UID·KRX per-user·lease, 2026-08-22 활성화) |
 | `/api/news` | iOS·Android | §7 S2 | 무인증 |
 
 > ⚠️ **Android = 완전 legacy**(v2 grep 0건). 운영 v1.2.2 실사용은 §5 측정.
 > ⚠️ 라인 번호는 자주 어긋나 **제거**했다(구 `:2615`는 실제 `:2745`였다) — 심볼명으로 찾을 것.
-> ⚠️ **무인증 표면은 endpoint 목록이 전부가 아니다**: `/openapi.json` · `/docs` · `/redoc`이
-> prod에서 무인증 200이다(2026-07-25 실측 — 49 paths, `/admin/api/*` 라우트명 전부 + 핸들러
-> docstring + `EntitlementsResponse.krx_visible` 필드명 포함). §3.2 각주 참조.
+> ⚠️ **무인증 표면은 endpoint 목록이 전부가 아니다**: route audit 전 prod의 `/openapi.json` ·
+> `/docs` · `/redoc`은 무인증 200이었다. 2026-08-23 audit slice에서 production/unknown env는
+> 세 문서 URL과 OAuth redirect를 생성하지 않도록 fail-closed 수정했다(로컬 검증 완료, 운영 배포 전).
 
 ---
 
@@ -62,14 +62,10 @@
 | hourly 무료 스냅샷 | **Firebase 인증만 + KRX 항상 제외**(codex High — 무료엔 KRX 불포함, premium+entitled는 최신 경로 사용) |
 | 최신 Graph/topic/catalog (비-KRX) | Firebase + premium |
 | KRX WS·REST snapshot | Firebase + premium + KRX entitlement |
-| Graph catalog/tab의 KRX series | ⚠️ **미구현** — 아래 경고 참조 |
+| Graph catalog/tab의 KRX series | Firebase + premium + KRX entitlement, 공용 superset 캐시 뒤 serve-time 사용자 필터 |
 
-> 🔴 **graph v2 행은 "제외"까지만 참이고 per-user 판정은 아직 없다 (2026-07-26 현재).**
-> 구 상태: `_effective_tab_series`가 전역 게이트(G2∧G3)만 봐서 `KRX_CLIENT_DISTRIBUTION_ENABLED=true`
-> 한 줄로 **무인증 caller가 KRX 그래프를 받았다**(ADR-038 D3가 수용한 절충이나 §3.1과 모순).
-> 현 상태: 무인증 경로는 **어떤 flag로도 krx를 싣지 않는다**(`krx_visible: bool = False` 파라미터
-> + serve-time strip, §6.1). 남은 것은 **entitled 사용자에게 다시 보여주는 per-user 게이트** —
-> 그게 land해야 이 행이 완전히 참이 된다.
+> ✅ GraphV2 per-user 판정은 2026-08-23 배포·운영 매트릭스까지 완료했다. 익명 401, 비구독 403,
+> 미승인 구독자는 200 KRX 제거, 승인 구독자만 동일 공용 superset 캐시에서 KRX를 받는다(§6.1).
 
 - 판정 = 서버 단일 `krx_visible = G3 ∧ G2 ∧ G1 ∧ premium`. 클라 조합 금지.
 - **캐시 = 전역 게이트(G2∧G3) 후 저장 → serve-time per-user(G1∧premium) 필터**. 개인화 결과 공용 키 재캐시 금지.
@@ -89,15 +85,11 @@
 | 접근성(VoiceOver) 라벨 | KRX 미언급 |
 | 소스/은행 설정 화면 | 무료 경로에서 KRX 항목 미노출 |
 
-> ⚠️ **이 계약의 범위 = 런타임 응답 표면** (2026-07-25 명시). topic 이름 `krx:usd-krw-futures`
-> 자체는 (a) `REALTIME_V2_CLIENT_GUIDE.md` §0/§2.5에 공개 문서화돼 있고 (b) prod `/openapi.json`·
-> `/docs`가 무인증이라 핸들러 docstring·`EntitlementsResponse.krx_visible` 필드명으로 노출된다
-> (2026-07-25 curl 실측). 즉 §3.2가 실제로 보장하는 것은 **"제품 표면(응답 payload·UI·문구·알림)에
-> KRX가 나타나지 않는다"**이지 "이름을 절대 알 수 없다"가 아니다.
-> 이 한정을 적어두지 않으면 후속 검토가 OpenAPI 노출을 §3.2 위반 blocker로 과대평가한다
-> (실제로 한 번 그렇게 보고됐다). **더 엄격히 가려면** prod에서 `docs_url`/`openapi_url`/`redoc_url`을
-> 끄거나 `verify_admin` 뒤로 옮기는 별 슬라이스가 필요하다 — 무인증 API 맵이 `/admin/api/*`
-> 라우트명까지 담고 있어 KRX와 무관하게도 권장된다(미착수).
+> ⚠️ **이 계약의 범위 = 런타임 응답 표면**. topic 이름 자체는
+> `REALTIME_V2_CLIENT_GUIDE.md`에 공개 문서화돼 있지만 제품 응답은 존재를 열거하지 않는다.
+> 2026-08-23 route audit에서 (a) production OpenAPI/Swagger/ReDoc 비생성, (b) legacy KRX
+> `/api/rates/{currency}`의 `410 + use_topic` 제거, (c) 임의 investing/banks/rates pair DB 조회를
+> 중앙 FX allowlist 앞에서 generic 404로 차단했다. 이 slice는 로컬 검증 완료·운영 배포 전이다.
 
 - 구현 상태: 서버 3중(legacy allowlist + `exclude_krx` + `_assert_krx_free`) + iOS 3중(어댑터 series strip +
   buildRatesState 명시 제외 + prepared 기반 토글). **테더 N4 land 전 `_assert_krx_free` source/asset shape 확장 필수**
@@ -183,7 +175,7 @@ GraphV2(`/api/v2/graph/tab`·`/catalog`)는 Firebase+premium 인증 뒤
   Open 2 + D4, GRAPH_API_V2_CONTRACT §3/§4). 파라미터 default를 False로 두면 노출은 닫히고
   계약은 코드·테스트에 남는다.
 
-  **2026-08-23 구현(로컬 검증 완료, 아직 미커밋·미배포)**:
+  **2026-08-23 구현·커밋·배포 완료**:
   ① `/api/v2/graph/tab`·`/catalog` Firebase+premium 인증과 사용자별 G1 판정
   ② 새 namespace의 **KRX 포함 superset 캐시** + 응답 직전 사용자별 필터
      (개인화 결과를 공용 키에 재캐시하지 않음)
@@ -191,7 +183,7 @@ GraphV2(`/api/v2/graph/tab`·`/catalog`)는 Firebase+premium 인증 뒤
   ④ 정상적인 미승인 제거 로그를 WARNING에서 debug로 격하
   ⑤ iOS GraphV2 호출을 `AuthedRESTTransport`로 이관(Bearer + 401 safe-read replay)
 
-  로컬 검증은 서버 전체 `5804 passed`·iOS 전체 `801 passed`·arming-on Release Archive PASS다.
+  구현 당시 검증은 서버 전체 `5804 passed`·iOS 전체 `801 passed`·arming-on Release Archive PASS다.
   이후 운영 배포(`8bbf987`) → **실계정 3종 매트릭스 통과** → G2 영구 ON(2026-08-23). 매트릭스 실측:
   **승인 구독자**(premium ∧ G1) catalog/1w graph/KRX snapshot 모두 KRX 노출 · **미승인 구독자**는
   200 이되 KRX 제거 + snapshot **404** · **비구독** 403 · **익명** 401. ⚠️ 순서까지 확인했다 —
@@ -1339,12 +1331,16 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 
 ## 9. 구현 체크리스트
 
-- [ ] 전 라우트 auth 감사 — 누수 0.
+- [x] **전 라우트 auth 감사 — 누수 0** (2026-08-23 로컬 완료, 운영 배포 전): application surface
+      63개를 public/admin/Firebase/Firebase+premium/webhook/WS/static으로 exact 분류하고 개발 전용 docs
+      4개를 별도 고정. admin 28개 `verify_admin`, Firebase/premium, WS subscribe verifier, RevenueCat secret,
+      계정삭제 revoke, CRUD `user_id` 소유권을 회귀 테스트로 잠갔다. 발견·수정: prod docs/OpenAPI 비활성,
+      legacy 임의 pair fail-open + KRX topic 410 힌트 generic 404 수렴, HTTP 500 raw exception detail 제거.
 - [x] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2 land 2026-07-17: server `55ab1d8` / iOS `1b736f2` / Android `5f93409`. 데이터는 신규 앱 release 후 생성 — nginx deploy/reload + 실 로그 cp/cv/cb 확인 별도).
 - [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land + 배포 2026-07-17** (app/free_snapshot.py + GET /api/v2/free/snapshot, MVP=usd·1d/1w/3m/1y). workflow 설계+adversarial + **codex MCP 다라운드**: B1~B4/N5/N6/NB → **freshness 불변식(serve canonical-only, DB 재생성 제거)** → validator Pydantic 스키마. **2026-07-18 HH:30 basis 개정(§4.2)**: as_of=마지막 HH:30 + `timestamp <= as_of` cutoff 쿼리 불변식(fetch_rate_entries_until + build_tab_1d_payload now_kst 주입) + cron :30 — 구 :00 floor의 라벨↔데이터 mismatch(사용자 실측) 해소. **S6 결정=(a) 24h hard cutoff(2026-07-21) — 서버+iOS 구현 완료(dev-side)**: 구 비결정 혼합(process-local 무기한 + Redis 25h TTL)을 (now-as_of)>=24h 렌더 거부로 일관화. **서버**(d9e60ab: `is_snapshot_too_stale` per-candidate age, stale Redis가 fresh local 안 덮음). **iOS**(7050bd3: `LoadState.unavailable` + isTooStale age>=24h[future asOf는 clock-skew 허용] + current/displayData gated[sticky 포함] + **fetch-독립 expiryTask**로 SwiftUI 시간-미관찰 in-flight 만료 공백까지 폐쇄 + 뷰 전파. codex Blocker/High/Medium 0). 실사용자 노출은 App Store 배포 후. iOS USD reference slice land(987d161). **FX 3탭 확장(2026-07-21)**: `FREE_SNAPSHOT_TABS=("usd","jpy","eur")` — jpy/eur는 usd와 동일 코드 경로(bank/investing rate reader + source_daily/hourly canonical + 1d intraday) 재사용, `TAB_ASSET`만 차이(별도 reader 0). tether는 free reader가 source_rates(거래소 데이터) 미조회로 rate가 비어 N4(별도 reader) 전까지 제외. 프로덕션 read-only 실증(jpy/eur 4기간 non-empty·asset 정확·KRX-free) + 계약 테스트 +3 + **프로덕션 배포(acea749, 2026-07-21)**. **iOS 활성화 완료(step 4, 57f6648) — freeConfig switch(usd/jpy/eur)로 FX 3탭 실렌더 dev-side 활성(합성 시뮬 게이트 포함)**. **jpy/eur dev 기능 E2E PASS(사용자 dev 빌드 2026-07-21)**: 그래프 4기간/기본 토글 investing+hana/은행목록/알림 통화(jpy-krw·eur-krw)/KRX·DXY 미노출 + VM-hoist(News 왕복·인접 왕복 재요청 0, 3탭×4기간=12 GET 초기 warm만) 전부 확인. 실사용자 노출·트래픽 실측은 출시앱 배포(별도 GO) 이후.
 - [x] **테더 N4 (무료 테더 탭 백엔드 + iOS N4-4 + graph 하드닝)** — 무료 테더 rate는 grouped shape(`kind="source_grouped"`: `usdt_krw`[거래소 5] + `usd_krw_banks`[kb·hana] + `usd_krw_reference`[investing singleton], `primary_asset="usdt-krw"`)로 도입(FX는 flat `{asset,entries}` 그대로). **N4-1 land**(58b9d9c): `_assert_krx_free`가 FX shape(bank/currency)뿐 아니라 topic-native shape(source/asset)도 검사 → 테더 KRX(달러선물) 우회 차단. **N4-2a land**(grouped-aware validation 리팩터, codex Blocker/Medium 2라운드 반영): `_iter_rate_items`(shape 무관 순회 단일 진실소스)로 nonempty·within-as_of·precompute 카운트 통일 + rate.asset(grouped=primary_asset) grouped-aware + **3중 hybrid/KRX 방어** — (1) `_FreeRate`/`_FreeRateGrouped` `extra="forbid"`(반대 shape 컨테이너 키를 extra로 얹은 hybrid를 schema서 거부, 양방향) (2) `_assert_krx_free`가 `_iter_all_rate_dicts`로 entries+3그룹을 **kind 무관 동시 스캔**(hybrid가 반대 컨테이너에 KRX를 숨기는 우회 폐쇄, belt-and-suspenders) (3) `_GROUPED_RATE_TABS` **tab↔shape 결합**(grouped-USD/flat-tether 오염 canonical을 fail-closed 거부 → 구 FX client 깨진 200 회귀 차단). graph 절반은 코드 완료(tether series 정의 + `exclude_krx` 필터). **N4-2b land**(cutoff-aware grouped tether reader): 유료 토픽 grouper `build_tether_tab_payload`(정규화·정렬·investing singleton 무결성) 재사용 + cutoff fetcher만 신규 — `crud.get_source_rates_until`(source_rates cutoff 변형, `timestamp<=as_of`, rate_changed_at 미포함[정적 스냅샷]) + `free_snapshot.fetch_tether_grouped_rate_until`(거래소 5=source_rates / kb·hana·investing=usd-krw는 기존 FX cutoff reader 재사용 후 선별) → `build_free_snapshot_payload` tab 분기(tether=grouped / FX=flat). free↔paid shape 일치(iOS 단일 어댑터). dup-source/wrong-asset은 각 source explicit query라 자연 차단(entitlement 우회 아님, KRX는 조회 경로에 아예 없음 + `_assert_krx_free` belt-and-suspenders). codex 2라운드(N4-2a Blocker/Medium + N4-2b) 통과. **N4-3 land + 배포 + 프로덕션 verify**(08db271, 2026-07-22): `FREE_SNAPSHOT_TABS`에 tether 추가(precompute 순회 + endpoint 게이트 단일 진실소스 → 자동 활성) + build 분기 + serve tab↔shape 결합. codex 3라운드 통과. EC2 배포(build+force-recreate) 후 precompute 트리거 + Redis canonical 직접 검증 — **4기간(1d/1w/3m/1y) 전부 validate=True / kind=source_grouped / primary_asset=usdt-krw / as_of=HH:30 / stale=False / rate=거래소5(upbit·bithumb·coinone·korbit·gopax)+kb·hana+investing / KRX series·rate 0 / graph 실데이터 non-empty(1d 10/10 각 144pt · 장기 4/4)**. 서버 활성은 dormant(엔드포인트 auth-gated, 소비 client는 App Store 배포 후). 테스트 free_snapshot 72 passed / 전체 3604. **N4-4 land + dev E2E PASS(2026-07-22)**: iOS grouped adapter(FreeRate flat/grouped, kind-peek)/group-aware allowlist(KRX fail-closed)/코어 탭(source 바)/그래프(거래소 5토글·DXY↔선물 상호배타·구역 프리미엄 정합)/3 알림 preview(거래소 가격·김프·비교, no-persist + malformed-rate 크래시 가드)/라우팅(테더-first, 인증 게이트). **+ graph fail-closed 하드닝(codex 6라운드 Blocker 0)**: per-tab ID allowlist(4탭 카탈로그 1:1) + envelope 결합(assertEnvelope/decodeAndValidate behavioral) + content-level KRX guard(서버 `_assert_krx_free` graph + 클라 `hasKrxContaminatedPoint`, 4마커 대칭) — 서버 257a05d 배포·검증 / iOS 1cfa978·778d294·9c255eb. 실사용자 노출은 App Store 배포(TOPIC_V2 arming, 별도 GO) 후.
-- [x] §3.1 GraphV2 인증 + superset 캐시 + serve-time `premium ∧ G3 ∧ G2 ∧ G1` 구현·로컬 검증
-      (2026-08-23, 커밋·배포·실서버 권한 매트릭스는 별도).
+- [x] §3.1 GraphV2 인증 + superset 캐시 + serve-time `premium ∧ G3 ∧ G2 ∧ G1` 구현·배포·
+      실서버 권한 매트릭스 완료(2026-08-23, server `8bbf987` / iOS `444aae3`, G2 ON).
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. ~~잔여 = iOS bootstrap 3종 인증 이관~~
