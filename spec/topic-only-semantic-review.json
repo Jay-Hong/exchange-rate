@@ -126,7 +126,9 @@
           "**정정 근거 실측 + 게이트 실패 방향 확인** (iOS `94120d4`). 이 Mac 의 프로파일 8개를 전수로 읽어 확인했다 — 개발/Ad-hoc 5개는 `get-task-allow=true`, **App Store 3개는 전부 `false`(부재 아님)** 이고 그중 하나는 `aps-environment=production` 이다. 즉 내 기준은 실제 배포본을 거부했을 것이다. ⚠️ 이 세션의 다른 오류들과 **방향이 반대**라 특히 위험하다 — 지금까지는 \"아무것도 안 잡는 검사\"(거짓 음성)였는데 이건 **좋은 것을 잡는 검사**(거짓 양성)다. 게이트를 만들 때 통과 조건도 **실물로 한 번은 재봐야** 한다. 음성 대조로 현재 개발 서명 Archive 가 새 기준에서 REJECT 되는 것도 확인했다.",
           "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex",
           "**게이트 두 방향 오류의 대칭 확인** (iOS `568af3e`). 같은 `.ipa` 게이트에서 **거짓 양성**(내가 넣은 `get-task-allow` 부재 요구 — 정상 배포본을 거부)과 **거짓 음성**(Ad Hoc 통과)이 **연달아** 나왔다. 게이트는 거부 조건과 통과 조건을 **둘 다 실물로 재봐야** 한다는 게 이번 교훈이다. UI 수정도 코드로 검증했다 — purge 함수가 메모리(`tetherStore`/`fxStore`/`dxyLive`)와 디스크(`removeCachedTopicRates`/`removeCachedFxTopicRates`/`removeCachedDxyTopic`)를 모두 지우므로 `hasTopicLastKnown` 이 실제로 false 가 되어 전역 가드가 발화한다. 회귀도 **한 쌍**이라 공허하지 않다 — 부분 purge NotNil ⊥ 전체 purge Nil(앞이 없으면 \"그냥 다 지우기\" 로 퇴화한다). iOS 802 passed(+1).",
-          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex",
+          "**같은 커밋 안에서 산문과 시험이 서로를 반증했다** (epoch 0041 정정). 나는 커밋 메시지·산문에 \"전체 purge 에서만\" 이라 쓰면서 **바로 아래 문단에서** 그 반례 시험(부분 purge 로 마지막 topic 제거 → `lastUpdated` nil)을 자랑스럽게 인용했다. ⛔ 두 층 설계를 설명하려다 **scope(어느 topic 을 지우나)** 와 **결과(데이터가 남았나)** 를 뒤섞은 것이다 — 가드 조건은 `hasTopicLastKnown` 이지 `scope == .all` 이 아니다. 코드를 다시 읽고 확인했다. ⚠️ **그리고 이 정정문 안에서 또 틀렸다** — 처음엔 \"pin 이 안 바뀌는 문서 전용 C2 는 `run_c2` 가 `check_coordinates` 에서 막는다\" 고 적었는데, **실제로 돌려 보니 통과했다**(양 pin 이 그대로면 좌표 검사를 건너뛰고 refresh→seal→verify 로 진행, epoch 0042 봉인). 남의 보고를 검증 없이 옮긴 것이고, **\"막힐 것이다\" 는 실행 전 추측**이었다. 도구 공백은 없다.",
+          "semantic-input-binding/v1:0042:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:69fe40dbb031f129133fe239e2819107b403813c88d06383d8a8200cc8a6a339:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -236,7 +238,9 @@
           "**`.ipa` 판정 기준의 거짓 양성 교정** (iOS `94120d4`). Claude 가 통과 기준을 `get-task-allow` **부재**로 적었는데, App Store 프로파일은 `get-task-allow=false` 를 **명시**한다 — 부재만 요구하면 **정상 배포본을 실패로 오판**하는 게이트가 된다(좋은 빌드를 버리게 만든다). 기준을 `get-task-allow != true` 로 정정. 또 프로파일만 보면 부족하다 — 프로파일은 **허용된** 집합이고 런타임에 작동하는 건 **앱 코드서명에 실제로 박힌** entitlement 이므로 둘이 다를 수 있다. `security cms -D -i embedded.mobileprovision`(profile) 과 `codesign -d --entitlements :-`(실제 서명) 을 **각각** 확인하고 `codesign --verify --deep --strict` 를 앞에 두도록 명령을 교체했다.",
           "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code",
           "**purge 헤더 시각 잔재 수정 + .ipa 게이트에서 Ad Hoc/Enterprise 배제** (iOS `568af3e`). safety-stop smoke 에서 관측한 UI 잔재 — `topics_disabled` purge 로 값이 다 사라졌는데 헤더에 `업데이트: HH:mm` 이 남아 \"그 시각 기준 데이터\" 로 읽혔다. **두 층**으로 고쳤다: 전역(purge 뒤 `!hasTopicLastKnown` 이면 `lastUpdated = nil` — 메모리·디스크를 다 지운 전체 purge 에서만 발화) ⊥ 탭별(각 헤더가 자기 섹션 행 유무로 게이트 — KRX 만 남는 **부분 purge** 에서 비워진 탭만 숨기고 남은 탭은 유지). 그리고 `.ipa` 판정에 **`ProvisionedDevices` 부재**(Ad Hoc 은 등록 기기를 포함) · **`ProvisionsAllDevices != true`**(Enterprise) · **`Authority=Apple Distribution`** 을 추가했다 — `aps-environment=production` ∧ `get-task-allow != true` 만으로는 Ad Hoc 도 통과하기 때문이다. bundle id·버전·빌드도 함께 고정해 Organizer 가 바꾼 값이 조용히 통과하지 않게 했다.",
-          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code",
+          "**epoch 0041 산문의 발화 조건 정정 (append-only supersede)**. 0041 은 `lastUpdated` 전역 가드가 \"**전체 purge 에서만** 발화한다\" 고 적었다 — **거짓**이다. 가드는 `if !hasTopicLastKnown { lastUpdated = nil }` 이므로 **남은 topic 데이터가 없을 때** 발화하며, 여기엔 `.topics([...])` **부분 purge 가 마지막 하나를 지운 경우**가 포함된다. 반례는 같은 커밋이 추가한 시험 자체다 — `testTopicPurge_lastRemainingTopicClearsHeaderTimestamp` 는 `.all` 이 아니라 `.topics([\"usdt:krw\"])` 로 부분 purge 를 하고 `lastUpdated` 가 nil 이 되는 것을 단정한다. 정정: 전역 가드는 **scope 가 아니라 잔여 데이터 유무**로 발화한다.",
+          "semantic-input-binding/v1:0042:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:69fe40dbb031f129133fe239e2819107b403813c88d06383d8a8200cc8a6a339:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -353,7 +357,9 @@
           "**`.ipa` 판정 기준의 거짓 양성 교정** (iOS `94120d4`). Claude 가 통과 기준을 `get-task-allow` **부재**로 적었는데, App Store 프로파일은 `get-task-allow=false` 를 **명시**한다 — 부재만 요구하면 **정상 배포본을 실패로 오판**하는 게이트가 된다(좋은 빌드를 버리게 만든다). 기준을 `get-task-allow != true` 로 정정. 또 프로파일만 보면 부족하다 — 프로파일은 **허용된** 집합이고 런타임에 작동하는 건 **앱 코드서명에 실제로 박힌** entitlement 이므로 둘이 다를 수 있다. `security cms -D -i embedded.mobileprovision`(profile) 과 `codesign -d --entitlements :-`(실제 서명) 을 **각각** 확인하고 `codesign --verify --deep --strict` 를 앞에 두도록 명령을 교체했다.",
           "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code",
           "**purge 헤더 시각 잔재 수정 + .ipa 게이트에서 Ad Hoc/Enterprise 배제** (iOS `568af3e`). safety-stop smoke 에서 관측한 UI 잔재 — `topics_disabled` purge 로 값이 다 사라졌는데 헤더에 `업데이트: HH:mm` 이 남아 \"그 시각 기준 데이터\" 로 읽혔다. **두 층**으로 고쳤다: 전역(purge 뒤 `!hasTopicLastKnown` 이면 `lastUpdated = nil` — 메모리·디스크를 다 지운 전체 purge 에서만 발화) ⊥ 탭별(각 헤더가 자기 섹션 행 유무로 게이트 — KRX 만 남는 **부분 purge** 에서 비워진 탭만 숨기고 남은 탭은 유지). 그리고 `.ipa` 판정에 **`ProvisionedDevices` 부재**(Ad Hoc 은 등록 기기를 포함) · **`ProvisionsAllDevices != true`**(Enterprise) · **`Authority=Apple Distribution`** 을 추가했다 — `aps-environment=production` ∧ `get-task-allow != true` 만으로는 Ad Hoc 도 통과하기 때문이다. bundle id·버전·빌드도 함께 고정해 Organizer 가 바꾼 값이 조용히 통과하지 않게 했다.",
-          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code",
+          "**epoch 0041 산문의 발화 조건 정정 (append-only supersede)**. 0041 은 `lastUpdated` 전역 가드가 \"**전체 purge 에서만** 발화한다\" 고 적었다 — **거짓**이다. 가드는 `if !hasTopicLastKnown { lastUpdated = nil }` 이므로 **남은 topic 데이터가 없을 때** 발화하며, 여기엔 `.topics([...])` **부분 purge 가 마지막 하나를 지운 경우**가 포함된다. 반례는 같은 커밋이 추가한 시험 자체다 — `testTopicPurge_lastRemainingTopicClearsHeaderTimestamp` 는 `.all` 이 아니라 `.topics([\"usdt:krw\"])` 로 부분 purge 를 하고 `lastUpdated` 가 nil 이 되는 것을 단정한다. 정정: 전역 가드는 **scope 가 아니라 잔여 데이터 유무**로 발화한다.",
+          "semantic-input-binding/v1:0042:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:69fe40dbb031f129133fe239e2819107b403813c88d06383d8a8200cc8a6a339:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -471,7 +477,9 @@
           "**정정 근거 실측 + 게이트 실패 방향 확인** (iOS `94120d4`). 이 Mac 의 프로파일 8개를 전수로 읽어 확인했다 — 개발/Ad-hoc 5개는 `get-task-allow=true`, **App Store 3개는 전부 `false`(부재 아님)** 이고 그중 하나는 `aps-environment=production` 이다. 즉 내 기준은 실제 배포본을 거부했을 것이다. ⚠️ 이 세션의 다른 오류들과 **방향이 반대**라 특히 위험하다 — 지금까지는 \"아무것도 안 잡는 검사\"(거짓 음성)였는데 이건 **좋은 것을 잡는 검사**(거짓 양성)다. 게이트를 만들 때 통과 조건도 **실물로 한 번은 재봐야** 한다. 음성 대조로 현재 개발 서명 Archive 가 새 기준에서 REJECT 되는 것도 확인했다.",
           "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex",
           "**게이트 두 방향 오류의 대칭 확인** (iOS `568af3e`). 같은 `.ipa` 게이트에서 **거짓 양성**(내가 넣은 `get-task-allow` 부재 요구 — 정상 배포본을 거부)과 **거짓 음성**(Ad Hoc 통과)이 **연달아** 나왔다. 게이트는 거부 조건과 통과 조건을 **둘 다 실물로 재봐야** 한다는 게 이번 교훈이다. UI 수정도 코드로 검증했다 — purge 함수가 메모리(`tetherStore`/`fxStore`/`dxyLive`)와 디스크(`removeCachedTopicRates`/`removeCachedFxTopicRates`/`removeCachedDxyTopic`)를 모두 지우므로 `hasTopicLastKnown` 이 실제로 false 가 되어 전역 가드가 발화한다. 회귀도 **한 쌍**이라 공허하지 않다 — 부분 purge NotNil ⊥ 전체 purge Nil(앞이 없으면 \"그냥 다 지우기\" 로 퇴화한다). iOS 802 passed(+1).",
-          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex",
+          "**같은 커밋 안에서 산문과 시험이 서로를 반증했다** (epoch 0041 정정). 나는 커밋 메시지·산문에 \"전체 purge 에서만\" 이라 쓰면서 **바로 아래 문단에서** 그 반례 시험(부분 purge 로 마지막 topic 제거 → `lastUpdated` nil)을 자랑스럽게 인용했다. ⛔ 두 층 설계를 설명하려다 **scope(어느 topic 을 지우나)** 와 **결과(데이터가 남았나)** 를 뒤섞은 것이다 — 가드 조건은 `hasTopicLastKnown` 이지 `scope == .all` 이 아니다. 코드를 다시 읽고 확인했다. ⚠️ **그리고 이 정정문 안에서 또 틀렸다** — 처음엔 \"pin 이 안 바뀌는 문서 전용 C2 는 `run_c2` 가 `check_coordinates` 에서 막는다\" 고 적었는데, **실제로 돌려 보니 통과했다**(양 pin 이 그대로면 좌표 검사를 건너뛰고 refresh→seal→verify 로 진행, epoch 0042 봉인). 남의 보고를 검증 없이 옮긴 것이고, **\"막힐 것이다\" 는 실행 전 추측**이었다. 도구 공백은 없다.",
+          "semantic-input-binding/v1:0042:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:69fe40dbb031f129133fe239e2819107b403813c88d06383d8a8200cc8a6a339:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -595,7 +603,9 @@
           "**정정 근거 실측 + 게이트 실패 방향 확인** (iOS `94120d4`). 이 Mac 의 프로파일 8개를 전수로 읽어 확인했다 — 개발/Ad-hoc 5개는 `get-task-allow=true`, **App Store 3개는 전부 `false`(부재 아님)** 이고 그중 하나는 `aps-environment=production` 이다. 즉 내 기준은 실제 배포본을 거부했을 것이다. ⚠️ 이 세션의 다른 오류들과 **방향이 반대**라 특히 위험하다 — 지금까지는 \"아무것도 안 잡는 검사\"(거짓 음성)였는데 이건 **좋은 것을 잡는 검사**(거짓 양성)다. 게이트를 만들 때 통과 조건도 **실물로 한 번은 재봐야** 한다. 음성 대조로 현재 개발 서명 Archive 가 새 기준에서 REJECT 되는 것도 확인했다.",
           "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex",
           "**게이트 두 방향 오류의 대칭 확인** (iOS `568af3e`). 같은 `.ipa` 게이트에서 **거짓 양성**(내가 넣은 `get-task-allow` 부재 요구 — 정상 배포본을 거부)과 **거짓 음성**(Ad Hoc 통과)이 **연달아** 나왔다. 게이트는 거부 조건과 통과 조건을 **둘 다 실물로 재봐야** 한다는 게 이번 교훈이다. UI 수정도 코드로 검증했다 — purge 함수가 메모리(`tetherStore`/`fxStore`/`dxyLive`)와 디스크(`removeCachedTopicRates`/`removeCachedFxTopicRates`/`removeCachedDxyTopic`)를 모두 지우므로 `hasTopicLastKnown` 이 실제로 false 가 되어 전역 가드가 발화한다. 회귀도 **한 쌍**이라 공허하지 않다 — 부분 purge NotNil ⊥ 전체 purge Nil(앞이 없으면 \"그냥 다 지우기\" 로 퇴화한다). iOS 802 passed(+1).",
-          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex",
+          "**같은 커밋 안에서 산문과 시험이 서로를 반증했다** (epoch 0041 정정). 나는 커밋 메시지·산문에 \"전체 purge 에서만\" 이라 쓰면서 **바로 아래 문단에서** 그 반례 시험(부분 purge 로 마지막 topic 제거 → `lastUpdated` nil)을 자랑스럽게 인용했다. ⛔ 두 층 설계를 설명하려다 **scope(어느 topic 을 지우나)** 와 **결과(데이터가 남았나)** 를 뒤섞은 것이다 — 가드 조건은 `hasTopicLastKnown` 이지 `scope == .all` 이 아니다. 코드를 다시 읽고 확인했다. ⚠️ **그리고 이 정정문 안에서 또 틀렸다** — 처음엔 \"pin 이 안 바뀌는 문서 전용 C2 는 `run_c2` 가 `check_coordinates` 에서 막는다\" 고 적었는데, **실제로 돌려 보니 통과했다**(양 pin 이 그대로면 좌표 검사를 건너뛰고 refresh→seal→verify 로 진행, epoch 0042 봉인). 남의 보고를 검증 없이 옮긴 것이고, **\"막힐 것이다\" 는 실행 전 추측**이었다. 도구 공백은 없다.",
+          "semantic-input-binding/v1:0042:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:69fe40dbb031f129133fe239e2819107b403813c88d06383d8a8200cc8a6a339:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -710,7 +720,9 @@
           "**`.ipa` 판정 기준의 거짓 양성 교정** (iOS `94120d4`). Claude 가 통과 기준을 `get-task-allow` **부재**로 적었는데, App Store 프로파일은 `get-task-allow=false` 를 **명시**한다 — 부재만 요구하면 **정상 배포본을 실패로 오판**하는 게이트가 된다(좋은 빌드를 버리게 만든다). 기준을 `get-task-allow != true` 로 정정. 또 프로파일만 보면 부족하다 — 프로파일은 **허용된** 집합이고 런타임에 작동하는 건 **앱 코드서명에 실제로 박힌** entitlement 이므로 둘이 다를 수 있다. `security cms -D -i embedded.mobileprovision`(profile) 과 `codesign -d --entitlements :-`(실제 서명) 을 **각각** 확인하고 `codesign --verify --deep --strict` 를 앞에 두도록 명령을 교체했다.",
           "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code",
           "**purge 헤더 시각 잔재 수정 + .ipa 게이트에서 Ad Hoc/Enterprise 배제** (iOS `568af3e`). safety-stop smoke 에서 관측한 UI 잔재 — `topics_disabled` purge 로 값이 다 사라졌는데 헤더에 `업데이트: HH:mm` 이 남아 \"그 시각 기준 데이터\" 로 읽혔다. **두 층**으로 고쳤다: 전역(purge 뒤 `!hasTopicLastKnown` 이면 `lastUpdated = nil` — 메모리·디스크를 다 지운 전체 purge 에서만 발화) ⊥ 탭별(각 헤더가 자기 섹션 행 유무로 게이트 — KRX 만 남는 **부분 purge** 에서 비워진 탭만 숨기고 남은 탭은 유지). 그리고 `.ipa` 판정에 **`ProvisionedDevices` 부재**(Ad Hoc 은 등록 기기를 포함) · **`ProvisionsAllDevices != true`**(Enterprise) · **`Authority=Apple Distribution`** 을 추가했다 — `aps-environment=production` ∧ `get-task-allow != true` 만으로는 Ad Hoc 도 통과하기 때문이다. bundle id·버전·빌드도 함께 고정해 Organizer 가 바꾼 값이 조용히 통과하지 않게 했다.",
-          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code",
+          "**epoch 0041 산문의 발화 조건 정정 (append-only supersede)**. 0041 은 `lastUpdated` 전역 가드가 \"**전체 purge 에서만** 발화한다\" 고 적었다 — **거짓**이다. 가드는 `if !hasTopicLastKnown { lastUpdated = nil }` 이므로 **남은 topic 데이터가 없을 때** 발화하며, 여기엔 `.topics([...])` **부분 purge 가 마지막 하나를 지운 경우**가 포함된다. 반례는 같은 커밋이 추가한 시험 자체다 — `testTopicPurge_lastRemainingTopicClearsHeaderTimestamp` 는 `.all` 이 아니라 `.topics([\"usdt:krw\"])` 로 부분 purge 를 하고 `lastUpdated` 가 nil 이 되는 것을 단정한다. 정정: 전역 가드는 **scope 가 아니라 잔여 데이터 유무**로 발화한다.",
+          "semantic-input-binding/v1:0042:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:69fe40dbb031f129133fe239e2819107b403813c88d06383d8a8200cc8a6a339:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -724,21 +736,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "273545f39d225a36d98f88e58abf31d8cec171c535aaba3b8aa17e00259cae60",
+    "manifest_sha256": "79255fcec184761e80220bae3778621a5d7c19e76d10b15647abeb8f69231521",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "630b478a050e0608a2c995cbe3c8e8037c05d6104783756f71778077851b88c0",
-    "server_commit": "7382abd5569c8dadd70247f1be32e45f0878f739",
+    "lock_sha256": "504b8bdd363c6a4148e5d97a0cab9a3d3078cf0bd8e3fc91a44f238d62c8c35e",
+    "server_commit": "a6121006beb4165e8418410c5617a05f01512c2b",
     "ios_commit": "568af3e3d3e1b5e54bd4fff687092f402e9bfd43"
   },
   "documents": {
-    "ADR": "96a22d35200542478da1fcec95a93b62cbead15683e0f231c3ff6b93e893c0cc",
-    "CLIENT": "d29185918070c874f361f8df1c749f2a48c17f1da9b9cc0a14eb47c00298a8b2",
-    "CUT": "01afec93d515cc226eda0c319d68ce8706fa147b6ce7a4f381c5d20243d898bf",
-    "HAND": "60389a5c9915334191b8ecb65422cf5c9e77a27ab272e6716b4245646cbe7531",
-    "HEALTH": "24364d1bc29d4a947263d8a79808653251c856d77ce88ff98211413925b0faf4",
-    "LOAD": "227adae6663bad620baa29410fa8b9d542b65c69c14b1c27af755ff017ffd792"
+    "ADR": "3bceb23003d8716e57c5cb2bb145961ec5127892572cde96781f990b298f0bef",
+    "CLIENT": "f1f7ffee4a3b729e3f09d8453fc4ffaa8faba6ff45c84879e16bbfe580e11406",
+    "CUT": "92b31fa363864f58ed8a1cd72ddc3bea52ee96953c33fd8b9b541aa803b2f4b6",
+    "HAND": "81dadb48ddd1dd2a203b69cc504122fd02495f60901a25d309c36edec209c4f3",
+    "HEALTH": "aba40269c64c85a8fe086cdb95b885a88fea9c13a4c5401a4dae41bfc0b1ea4d",
+    "LOAD": "5c0bbc489c8aec2e2103787666d467ac2eb7ea6f602d59bbebb9e45621284364"
   },
-  "claim_ledger_sha256": "4a681e6c6cb2436b2eafa87f28a1fe0967db65971477b63913e21255072107f3",
+  "claim_ledger_sha256": "93f94142441df2286fbe7eb59cdddce5a25fc710455d87d3cd94f4eb2b819f01",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
