@@ -901,7 +901,9 @@ server {
     # ─────────────────────────────────────
     location /api/ {
         limit_req zone=api_limit burst=20 nodelay;
-        limit_conn conn_limit 10;
+        limit_req_status 429;
+        limit_conn conn_limit 20;
+        limit_conn_status 429;
 
         proxy_pass http://fastapi_backend;
         proxy_set_header Host $host;
@@ -953,6 +955,18 @@ server {
         root /usr/share/nginx/html;
     }
 }
+```
+
+> **Nginx 설정 배포:** `nginx/conf.d/default.conf`는 단일 파일 bind mount다. `git pull`이 파일을
+> 교체한 뒤 `docker compose restart nginx`만 하면 실행 중 컨테이너가 이전 inode의 내용을 계속 볼 수
+> 있으므로, `docker compose up -d --no-deps --force-recreate nginx`로 컨테이너를 재생성한다. 이어서
+> `nginx -t`와 host/runtime `sha256sum` 일치를 확인해야 배포 완료다.
+
+```bash
+docker compose up -d --no-deps --force-recreate nginx
+docker exec exchange-rate-nginx nginx -t
+sha256sum nginx/conf.d/default.conf
+docker exec exchange-rate-nginx sha256sum /etc/nginx/conf.d/default.conf
 ```
 
 ---

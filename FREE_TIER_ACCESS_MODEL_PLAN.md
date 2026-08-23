@@ -729,10 +729,15 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   GO 기록에 "구현" 또는 "위험 수용"으로 **명시**해야 하며,
   "활성화 후 최적화"로 조용히 내리면 이 절과 결론이 충돌한다. ✅ **`limit_req` 축은 C1 `463c880` 으로 닫혔다** — `/ws` 가 전용 zone
   `ws_handshake_limit`(10r/s, `default.conf:25`)로 `burst=20 nodelay` + `429` 를 건다
-  (`:89-90`). `/api/` 는 별개 zone 으로 지속 3r/s + conn 10 을 유지하되, C1 `5429d0f` 로 burst 6→20 +
-  429 로 바뀌었다(`:116-118`, zone key 는 `$binary_remote_addr`) — v2.0.0 cold-start 실측
-  12 req/s 가 구 burst 6 에서 topic bootstrap 4건을 잘랐기 때문이다. ⚠️ **`limit_conn` 은 유보 유지**(R-DEC-4 (3), 캐리어 NAT 오탐 위험) —
-  이 항목은 **부분 해소**이지 완결이 아니다. **배포는 호스트 config 변경이라 별도 승인이 필요하다.**
+  (`:89-90`). `/api/` 는 별개 zone 으로 지속 3r/s + burst 20 을 유지한다. 2026-08-23 실기기
+  cold-launch에서 HTTP/2 동시 요청 13건 중 정상 `/api/source-notification-settings`가 구 `conn 10`에
+  `lcs=REJECTED`/503으로 잘린 것을 확인해 `conn 20` + 초과 상태 429로 교정했다(`:116-119`). Nginx는
+  HTTP/2/3에서 동시 요청 각각을 `limit_conn`의 별도 연결로 센다. ⚠️ **`/ws`의 `limit_conn`은 유보 유지**(R-DEC-4 (3), 캐리어 NAT 오탐 위험) —
+  이 항목은 **부분 해소**이지 완결이 아니다. **배포는 호스트 config 변경이라 별도 승인이 필요하다.** 배포 후 합격선은
+  같은 실기기 cold-launch 3회에서 HTTP `429/503=0` **그리고** access log `lrs/lcs=REJECTED 0`이다.
+  ⛔ 이 ingress 완화가 원 startup 항목을 닫지는 않는다. 화면 필수 bootstrap·GraphV2와 후순위 알림 설정·
+  register-device가 한 cold-launch에 동시 13요청을 만드는 fan-out은 별도 미완료이며, 출시 후 carrier NAT
+  공유 IP의 동시성도 아직 미측정이다. 요청 우선순위/지연 시작으로 fan-out을 줄이는 후속을 유지한다.
   ⛔ **"토큰 flood 방어"로 일반화하지 말 것**(2026-08-03 정정). 실제 보호 범위는 좁다:
     · `limit_req` 는 **upgrade handshake** 만 제한한다 — WebSocket 연결은 HTTP 요청 **하나**다.
     · `limit_conn` 은 **동시 연결 수**만 제한하고, key 가 IP 라 **모바일 carrier NAT 사용자를 함께

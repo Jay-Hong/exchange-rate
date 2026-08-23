@@ -75,7 +75,7 @@ class TestNginxWebSocketLocation(unittest.TestCase):
 
 class TestNginxApiRateLimit(unittest.TestCase):
     def test_api_burst_absorbs_the_observed_v2_cold_start_fanout(self):
-        """Keep the sustained cap while allowing one normal app launch to complete."""
+        """Keep sustained guards without rejecting one normal HTTP/2 app launch."""
         text = NGINX_DEFAULT.read_text()
         self.assertRegex(
             text,
@@ -99,8 +99,9 @@ class TestNginxApiRateLimit(unittest.TestCase):
         self.assertRegex(block, re.compile(r"^\s*limit_req_status\s+429;$", re.M))
         self.assertRegex(
             block,
-            re.compile(r"^\s*limit_conn\s+conn_limit\s+10;$", re.M),
+            re.compile(r"^\s*limit_conn\s+conn_limit\s+20;$", re.M),
         )
+        self.assertRegex(block, re.compile(r"^\s*limit_conn_status\s+429;$", re.M))
 
 
 class TestNginxLogrotateConfig(unittest.TestCase):
