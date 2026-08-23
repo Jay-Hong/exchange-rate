@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "eabf95ac88d0c50d81bc39f7f4ff78a86b3bba514156725ffb694f608b3d32a9",
+    "manifest_sha256": "273545f39d225a36d98f88e58abf31d8cec171c535aaba3b8aa17e00259cae60",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "1107ba24e5270c0fd02431cc1b1dcca5c1eccecfde28e78e1db07850e4172d4b",
-    "server_commit": "e160981f38ac9ab6c7ffec3c3ed432b605c73f61",
-    "ios_commit": "94120d40adf1c36e61ee597b9d082be2cd113c16"
+    "lock_sha256": "630b478a050e0608a2c995cbe3c8e8037c05d6104783756f71778077851b88c0",
+    "server_commit": "7382abd5569c8dadd70247f1be32e45f0878f739",
+    "ios_commit": "568af3e3d3e1b5e54bd4fff687092f402e9bfd43"
   },
   "documents": {
-    "ADR": "062aea0d5bc3b435034273a61cccf43eec396d37462c828b5de54cb14f2615a9",
-    "CLIENT": "5882b06b996c26e18f9a30ec4fac00b87e0ed6d34abf549e1be275409cb3d8c9",
-    "CUT": "77263d8a47daef01d06447b7c88632527efbe1a45a2fe72fdfa6e330314488a9",
-    "HAND": "1e3ec87028d34396257b608bb6b7988c67f7e259212d0665bb196ab2321a992d",
-    "HEALTH": "9cb47ae0cb6da6c93ca39a35ce7ab31fa010e16dab0b8037d784ae6eef1e0398",
-    "LOAD": "9bc54350ad02a3fba033a62ea787df25387be7cbab224279677ba1470f51a49e"
+    "ADR": "96a22d35200542478da1fcec95a93b62cbead15683e0f231c3ff6b93e893c0cc",
+    "CLIENT": "d29185918070c874f361f8df1c749f2a48c17f1da9b9cc0a14eb47c00298a8b2",
+    "CUT": "01afec93d515cc226eda0c319d68ce8706fa147b6ce7a4f381c5d20243d898bf",
+    "HAND": "60389a5c9915334191b8ecb65422cf5c9e77a27ab272e6716b4245646cbe7531",
+    "HEALTH": "24364d1bc29d4a947263d8a79808653251c856d77ce88ff98211413925b0faf4",
+    "LOAD": "227adae6663bad620baa29410fa8b9d542b65c69c14b1c27af755ff017ffd792"
   },
   "entries": [
     {
@@ -459,12 +459,12 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "eb793c7bdd810e0f06b9b6539bd11d853617e20171082b7adfb8b655bf5d6ab7",
-      "unit_text": "| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:881-899`) · FX와 은행 알림(`:687-708`) · DXY(`:396-411`) cold-start 복원을 잠근다 |",
+      "unit_sha256": "a9219379eec2374f30f4c6acdd8016f5fb13235d61c32ac14548c2263248c140",
+      "unit_text": "| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:899-917`) · FX와 은행 알림(`:687-708`) · DXY(`:396-411`) cold-start 복원을 잠근다 |",
       "classification": "code_fact",
       "detail": "USDT·FX/은행 알림·DXY 각각의 disk last-known을 cold-start에서 복원하는 행동 테스트가 현재 존재한다는 테스트 범위 단정이다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:881-899"
+        "file:ios/FXiTests/TetherDataPathTests.swift:899-917"
       ]
     },
     {

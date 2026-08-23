@@ -124,7 +124,9 @@
           "**서명 자산 독립 확인 + 재서명 검증을 실행 가능한 형태로** (iOS `029d774`). 보고를 믿지 않고 이 Mac 을 직접 봤다 — 코드서명 identity 는 **Apple Development 하나뿐**(Apple Distribution 없음)이고 `com.Jay.FXi` 프로파일 2개는 **둘 다 development**(`aps=development` · `get-task-allow=true`)다. 배포 자산이 실제로 없다. ⚠️ 그리고 게이트에 **확인 방법**을 박았다 — 이 앱의 핵심 기능이 **FCM 가격 알림**이라 `aps-environment` 가 `development` 인 채 나가면 **푸시가 죽은 채 출시된다**. \"확인해야 한다\" 만 적으면 건너뛰므로 통과 기준(`aps-environment=production` ∧ `get-task-allow` 부재)과 `.ipa` 에서 뽑아 보는 명령을 함께 적었다. 부수: 앞선 내 matcher 검증이 `docker exec` 에 **`-i` 가 없어 실행조차 안 됐고**(빈 출력을 다른 증거로 넘겼다), \"iOS clean\" 도 HEAD==origin 과 worktree clean 을 혼동한 표현이었다 — 둘 다 정정.",
           "semantic-input-binding/v1:0039:721480512f070fc668e87d3bdc61f0541364eb1df352e6d765e1a1028586b738:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:author=Claude Code:reviewer=OpenAI Codex",
           "**정정 근거 실측 + 게이트 실패 방향 확인** (iOS `94120d4`). 이 Mac 의 프로파일 8개를 전수로 읽어 확인했다 — 개발/Ad-hoc 5개는 `get-task-allow=true`, **App Store 3개는 전부 `false`(부재 아님)** 이고 그중 하나는 `aps-environment=production` 이다. 즉 내 기준은 실제 배포본을 거부했을 것이다. ⚠️ 이 세션의 다른 오류들과 **방향이 반대**라 특히 위험하다 — 지금까지는 \"아무것도 안 잡는 검사\"(거짓 음성)였는데 이건 **좋은 것을 잡는 검사**(거짓 양성)다. 게이트를 만들 때 통과 조건도 **실물로 한 번은 재봐야** 한다. 음성 대조로 현재 개발 서명 Archive 가 새 기준에서 REJECT 되는 것도 확인했다.",
-          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex",
+          "**게이트 두 방향 오류의 대칭 확인** (iOS `568af3e`). 같은 `.ipa` 게이트에서 **거짓 양성**(내가 넣은 `get-task-allow` 부재 요구 — 정상 배포본을 거부)과 **거짓 음성**(Ad Hoc 통과)이 **연달아** 나왔다. 게이트는 거부 조건과 통과 조건을 **둘 다 실물로 재봐야** 한다는 게 이번 교훈이다. UI 수정도 코드로 검증했다 — purge 함수가 메모리(`tetherStore`/`fxStore`/`dxyLive`)와 디스크(`removeCachedTopicRates`/`removeCachedFxTopicRates`/`removeCachedDxyTopic`)를 모두 지우므로 `hasTopicLastKnown` 이 실제로 false 가 되어 전역 가드가 발화한다. 회귀도 **한 쌍**이라 공허하지 않다 — 부분 purge NotNil ⊥ 전체 purge Nil(앞이 없으면 \"그냥 다 지우기\" 로 퇴화한다). iOS 802 passed(+1).",
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -232,7 +234,9 @@
           "**\"업로드만 남았다\" 반증 — 배포 자산 미비 실측** (iOS `029d774`). 계정 변경 없이 `app-store-connect` export 를 실행해 `No profiles for 'com.Jay.FXi' were found` 실패를 재현했다. 업로드 후보 `.xcarchive` 는 **Apple Development** 서명(`get-task-allow=true` · `aps-environment=development`)이라 Organizer **입력물**이지 App Store 배포 서명 완료본이 아니다. 런북의 출시 게이트 절도 여전히 \"전역 G2는 계속 OFF\" 라 거짓이었다 — G2 영구 ON · 실서버 권한 매트릭스 통과로 현재화하고, **동적 전이 smoke**(`krx_futures` grant/revoke · 구독 해지/복구)를 정적 3계정 매트릭스와 **분리**해 업로드 후 TestFlight 게이트로 남겼다(소스·Archive blocker 아님). Organizer Validate/Distribute · 배포 서명 · production push entitlement · 처리 완료를 남은 경계로 명시했다.",
           "semantic-input-binding/v1:0039:721480512f070fc668e87d3bdc61f0541364eb1df352e6d765e1a1028586b738:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:author=OpenAI Codex:reviewer=Claude Code",
           "**`.ipa` 판정 기준의 거짓 양성 교정** (iOS `94120d4`). Claude 가 통과 기준을 `get-task-allow` **부재**로 적었는데, App Store 프로파일은 `get-task-allow=false` 를 **명시**한다 — 부재만 요구하면 **정상 배포본을 실패로 오판**하는 게이트가 된다(좋은 빌드를 버리게 만든다). 기준을 `get-task-allow != true` 로 정정. 또 프로파일만 보면 부족하다 — 프로파일은 **허용된** 집합이고 런타임에 작동하는 건 **앱 코드서명에 실제로 박힌** entitlement 이므로 둘이 다를 수 있다. `security cms -D -i embedded.mobileprovision`(profile) 과 `codesign -d --entitlements :-`(실제 서명) 을 **각각** 확인하고 `codesign --verify --deep --strict` 를 앞에 두도록 명령을 교체했다.",
-          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code",
+          "**purge 헤더 시각 잔재 수정 + .ipa 게이트에서 Ad Hoc/Enterprise 배제** (iOS `568af3e`). safety-stop smoke 에서 관측한 UI 잔재 — `topics_disabled` purge 로 값이 다 사라졌는데 헤더에 `업데이트: HH:mm` 이 남아 \"그 시각 기준 데이터\" 로 읽혔다. **두 층**으로 고쳤다: 전역(purge 뒤 `!hasTopicLastKnown` 이면 `lastUpdated = nil` — 메모리·디스크를 다 지운 전체 purge 에서만 발화) ⊥ 탭별(각 헤더가 자기 섹션 행 유무로 게이트 — KRX 만 남는 **부분 purge** 에서 비워진 탭만 숨기고 남은 탭은 유지). 그리고 `.ipa` 판정에 **`ProvisionedDevices` 부재**(Ad Hoc 은 등록 기기를 포함) · **`ProvisionsAllDevices != true`**(Enterprise) · **`Authority=Apple Distribution`** 을 추가했다 — `aps-environment=production` ∧ `get-task-allow != true` 만으로는 Ad Hoc 도 통과하기 때문이다. bundle id·버전·빌드도 함께 고정해 Organizer 가 바꾼 값이 조용히 통과하지 않게 했다.",
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -347,7 +351,9 @@
           "**\"업로드만 남았다\" 반증 — 배포 자산 미비 실측** (iOS `029d774`). 계정 변경 없이 `app-store-connect` export 를 실행해 `No profiles for 'com.Jay.FXi' were found` 실패를 재현했다. 업로드 후보 `.xcarchive` 는 **Apple Development** 서명(`get-task-allow=true` · `aps-environment=development`)이라 Organizer **입력물**이지 App Store 배포 서명 완료본이 아니다. 런북의 출시 게이트 절도 여전히 \"전역 G2는 계속 OFF\" 라 거짓이었다 — G2 영구 ON · 실서버 권한 매트릭스 통과로 현재화하고, **동적 전이 smoke**(`krx_futures` grant/revoke · 구독 해지/복구)를 정적 3계정 매트릭스와 **분리**해 업로드 후 TestFlight 게이트로 남겼다(소스·Archive blocker 아님). Organizer Validate/Distribute · 배포 서명 · production push entitlement · 처리 완료를 남은 경계로 명시했다.",
           "semantic-input-binding/v1:0039:721480512f070fc668e87d3bdc61f0541364eb1df352e6d765e1a1028586b738:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:author=OpenAI Codex:reviewer=Claude Code",
           "**`.ipa` 판정 기준의 거짓 양성 교정** (iOS `94120d4`). Claude 가 통과 기준을 `get-task-allow` **부재**로 적었는데, App Store 프로파일은 `get-task-allow=false` 를 **명시**한다 — 부재만 요구하면 **정상 배포본을 실패로 오판**하는 게이트가 된다(좋은 빌드를 버리게 만든다). 기준을 `get-task-allow != true` 로 정정. 또 프로파일만 보면 부족하다 — 프로파일은 **허용된** 집합이고 런타임에 작동하는 건 **앱 코드서명에 실제로 박힌** entitlement 이므로 둘이 다를 수 있다. `security cms -D -i embedded.mobileprovision`(profile) 과 `codesign -d --entitlements :-`(실제 서명) 을 **각각** 확인하고 `codesign --verify --deep --strict` 를 앞에 두도록 명령을 교체했다.",
-          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code",
+          "**purge 헤더 시각 잔재 수정 + .ipa 게이트에서 Ad Hoc/Enterprise 배제** (iOS `568af3e`). safety-stop smoke 에서 관측한 UI 잔재 — `topics_disabled` purge 로 값이 다 사라졌는데 헤더에 `업데이트: HH:mm` 이 남아 \"그 시각 기준 데이터\" 로 읽혔다. **두 층**으로 고쳤다: 전역(purge 뒤 `!hasTopicLastKnown` 이면 `lastUpdated = nil` — 메모리·디스크를 다 지운 전체 purge 에서만 발화) ⊥ 탭별(각 헤더가 자기 섹션 행 유무로 게이트 — KRX 만 남는 **부분 purge** 에서 비워진 탭만 숨기고 남은 탭은 유지). 그리고 `.ipa` 판정에 **`ProvisionedDevices` 부재**(Ad Hoc 은 등록 기기를 포함) · **`ProvisionsAllDevices != true`**(Enterprise) · **`Authority=Apple Distribution`** 을 추가했다 — `aps-environment=production` ∧ `get-task-allow != true` 만으로는 Ad Hoc 도 통과하기 때문이다. bundle id·버전·빌드도 함께 고정해 Organizer 가 바꾼 값이 조용히 통과하지 않게 했다.",
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -463,7 +469,9 @@
           "**서명 자산 독립 확인 + 재서명 검증을 실행 가능한 형태로** (iOS `029d774`). 보고를 믿지 않고 이 Mac 을 직접 봤다 — 코드서명 identity 는 **Apple Development 하나뿐**(Apple Distribution 없음)이고 `com.Jay.FXi` 프로파일 2개는 **둘 다 development**(`aps=development` · `get-task-allow=true`)다. 배포 자산이 실제로 없다. ⚠️ 그리고 게이트에 **확인 방법**을 박았다 — 이 앱의 핵심 기능이 **FCM 가격 알림**이라 `aps-environment` 가 `development` 인 채 나가면 **푸시가 죽은 채 출시된다**. \"확인해야 한다\" 만 적으면 건너뛰므로 통과 기준(`aps-environment=production` ∧ `get-task-allow` 부재)과 `.ipa` 에서 뽑아 보는 명령을 함께 적었다. 부수: 앞선 내 matcher 검증이 `docker exec` 에 **`-i` 가 없어 실행조차 안 됐고**(빈 출력을 다른 증거로 넘겼다), \"iOS clean\" 도 HEAD==origin 과 worktree clean 을 혼동한 표현이었다 — 둘 다 정정.",
           "semantic-input-binding/v1:0039:721480512f070fc668e87d3bdc61f0541364eb1df352e6d765e1a1028586b738:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:author=Claude Code:reviewer=OpenAI Codex",
           "**정정 근거 실측 + 게이트 실패 방향 확인** (iOS `94120d4`). 이 Mac 의 프로파일 8개를 전수로 읽어 확인했다 — 개발/Ad-hoc 5개는 `get-task-allow=true`, **App Store 3개는 전부 `false`(부재 아님)** 이고 그중 하나는 `aps-environment=production` 이다. 즉 내 기준은 실제 배포본을 거부했을 것이다. ⚠️ 이 세션의 다른 오류들과 **방향이 반대**라 특히 위험하다 — 지금까지는 \"아무것도 안 잡는 검사\"(거짓 음성)였는데 이건 **좋은 것을 잡는 검사**(거짓 양성)다. 게이트를 만들 때 통과 조건도 **실물로 한 번은 재봐야** 한다. 음성 대조로 현재 개발 서명 Archive 가 새 기준에서 REJECT 되는 것도 확인했다.",
-          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex",
+          "**게이트 두 방향 오류의 대칭 확인** (iOS `568af3e`). 같은 `.ipa` 게이트에서 **거짓 양성**(내가 넣은 `get-task-allow` 부재 요구 — 정상 배포본을 거부)과 **거짓 음성**(Ad Hoc 통과)이 **연달아** 나왔다. 게이트는 거부 조건과 통과 조건을 **둘 다 실물로 재봐야** 한다는 게 이번 교훈이다. UI 수정도 코드로 검증했다 — purge 함수가 메모리(`tetherStore`/`fxStore`/`dxyLive`)와 디스크(`removeCachedTopicRates`/`removeCachedFxTopicRates`/`removeCachedDxyTopic`)를 모두 지우므로 `hasTopicLastKnown` 이 실제로 false 가 되어 전역 가드가 발화한다. 회귀도 **한 쌍**이라 공허하지 않다 — 부분 purge NotNil ⊥ 전체 purge Nil(앞이 없으면 \"그냥 다 지우기\" 로 퇴화한다). iOS 802 passed(+1).",
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -585,7 +593,9 @@
           "**서명 자산 독립 확인 + 재서명 검증을 실행 가능한 형태로** (iOS `029d774`). 보고를 믿지 않고 이 Mac 을 직접 봤다 — 코드서명 identity 는 **Apple Development 하나뿐**(Apple Distribution 없음)이고 `com.Jay.FXi` 프로파일 2개는 **둘 다 development**(`aps=development` · `get-task-allow=true`)다. 배포 자산이 실제로 없다. ⚠️ 그리고 게이트에 **확인 방법**을 박았다 — 이 앱의 핵심 기능이 **FCM 가격 알림**이라 `aps-environment` 가 `development` 인 채 나가면 **푸시가 죽은 채 출시된다**. \"확인해야 한다\" 만 적으면 건너뛰므로 통과 기준(`aps-environment=production` ∧ `get-task-allow` 부재)과 `.ipa` 에서 뽑아 보는 명령을 함께 적었다. 부수: 앞선 내 matcher 검증이 `docker exec` 에 **`-i` 가 없어 실행조차 안 됐고**(빈 출력을 다른 증거로 넘겼다), \"iOS clean\" 도 HEAD==origin 과 worktree clean 을 혼동한 표현이었다 — 둘 다 정정.",
           "semantic-input-binding/v1:0039:721480512f070fc668e87d3bdc61f0541364eb1df352e6d765e1a1028586b738:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:author=Claude Code:reviewer=OpenAI Codex",
           "**정정 근거 실측 + 게이트 실패 방향 확인** (iOS `94120d4`). 이 Mac 의 프로파일 8개를 전수로 읽어 확인했다 — 개발/Ad-hoc 5개는 `get-task-allow=true`, **App Store 3개는 전부 `false`(부재 아님)** 이고 그중 하나는 `aps-environment=production` 이다. 즉 내 기준은 실제 배포본을 거부했을 것이다. ⚠️ 이 세션의 다른 오류들과 **방향이 반대**라 특히 위험하다 — 지금까지는 \"아무것도 안 잡는 검사\"(거짓 음성)였는데 이건 **좋은 것을 잡는 검사**(거짓 양성)다. 게이트를 만들 때 통과 조건도 **실물로 한 번은 재봐야** 한다. 음성 대조로 현재 개발 서명 Archive 가 새 기준에서 REJECT 되는 것도 확인했다.",
-          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=Claude Code:reviewer=OpenAI Codex",
+          "**게이트 두 방향 오류의 대칭 확인** (iOS `568af3e`). 같은 `.ipa` 게이트에서 **거짓 양성**(내가 넣은 `get-task-allow` 부재 요구 — 정상 배포본을 거부)과 **거짓 음성**(Ad Hoc 통과)이 **연달아** 나왔다. 게이트는 거부 조건과 통과 조건을 **둘 다 실물로 재봐야** 한다는 게 이번 교훈이다. UI 수정도 코드로 검증했다 — purge 함수가 메모리(`tetherStore`/`fxStore`/`dxyLive`)와 디스크(`removeCachedTopicRates`/`removeCachedFxTopicRates`/`removeCachedDxyTopic`)를 모두 지우므로 `hasTopicLastKnown` 이 실제로 false 가 되어 전역 가드가 발화한다. 회귀도 **한 쌍**이라 공허하지 않다 — 부분 purge NotNil ⊥ 전체 purge Nil(앞이 없으면 \"그냥 다 지우기\" 로 퇴화한다). iOS 802 passed(+1).",
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -698,7 +708,9 @@
           "**\"업로드만 남았다\" 반증 — 배포 자산 미비 실측** (iOS `029d774`). 계정 변경 없이 `app-store-connect` export 를 실행해 `No profiles for 'com.Jay.FXi' were found` 실패를 재현했다. 업로드 후보 `.xcarchive` 는 **Apple Development** 서명(`get-task-allow=true` · `aps-environment=development`)이라 Organizer **입력물**이지 App Store 배포 서명 완료본이 아니다. 런북의 출시 게이트 절도 여전히 \"전역 G2는 계속 OFF\" 라 거짓이었다 — G2 영구 ON · 실서버 권한 매트릭스 통과로 현재화하고, **동적 전이 smoke**(`krx_futures` grant/revoke · 구독 해지/복구)를 정적 3계정 매트릭스와 **분리**해 업로드 후 TestFlight 게이트로 남겼다(소스·Archive blocker 아님). Organizer Validate/Distribute · 배포 서명 · production push entitlement · 처리 완료를 남은 경계로 명시했다.",
           "semantic-input-binding/v1:0039:721480512f070fc668e87d3bdc61f0541364eb1df352e6d765e1a1028586b738:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:author=OpenAI Codex:reviewer=Claude Code",
           "**`.ipa` 판정 기준의 거짓 양성 교정** (iOS `94120d4`). Claude 가 통과 기준을 `get-task-allow` **부재**로 적었는데, App Store 프로파일은 `get-task-allow=false` 를 **명시**한다 — 부재만 요구하면 **정상 배포본을 실패로 오판**하는 게이트가 된다(좋은 빌드를 버리게 만든다). 기준을 `get-task-allow != true` 로 정정. 또 프로파일만 보면 부족하다 — 프로파일은 **허용된** 집합이고 런타임에 작동하는 건 **앱 코드서명에 실제로 박힌** entitlement 이므로 둘이 다를 수 있다. `security cms -D -i embedded.mobileprovision`(profile) 과 `codesign -d --entitlements :-`(실제 서명) 을 **각각** 확인하고 `codesign --verify --deep --strict` 를 앞에 두도록 명령을 교체했다.",
-          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0040:b41156d36fafe718fffee0727d491288cec5381f330c0e09e7bdc8a7c187beb6:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:author=OpenAI Codex:reviewer=Claude Code",
+          "**purge 헤더 시각 잔재 수정 + .ipa 게이트에서 Ad Hoc/Enterprise 배제** (iOS `568af3e`). safety-stop smoke 에서 관측한 UI 잔재 — `topics_disabled` purge 로 값이 다 사라졌는데 헤더에 `업데이트: HH:mm` 이 남아 \"그 시각 기준 데이터\" 로 읽혔다. **두 층**으로 고쳤다: 전역(purge 뒤 `!hasTopicLastKnown` 이면 `lastUpdated = nil` — 메모리·디스크를 다 지운 전체 purge 에서만 발화) ⊥ 탭별(각 헤더가 자기 섹션 행 유무로 게이트 — KRX 만 남는 **부분 purge** 에서 비워진 탭만 숨기고 남은 탭은 유지). 그리고 `.ipa` 판정에 **`ProvisionedDevices` 부재**(Ad Hoc 은 등록 기기를 포함) · **`ProvisionsAllDevices != true`**(Enterprise) · **`Authority=Apple Distribution`** 을 추가했다 — `aps-environment=production` ∧ `get-task-allow != true` 만으로는 Ad Hoc 도 통과하기 때문이다. bundle id·버전·빌드도 함께 고정해 Organizer 가 바꾼 값이 조용히 통과하지 않게 했다.",
+          "semantic-input-binding/v1:0041:68a4cab710385246a79ae5ec5fb04a0586f52a52770a8f30b30a8e935a975cd8:1b7b913db33c8aa8b416d8aed48e57e464d572788c6f74aa94f95d5b43c7b089:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -712,21 +724,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "eabf95ac88d0c50d81bc39f7f4ff78a86b3bba514156725ffb694f608b3d32a9",
+    "manifest_sha256": "273545f39d225a36d98f88e58abf31d8cec171c535aaba3b8aa17e00259cae60",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "1107ba24e5270c0fd02431cc1b1dcca5c1eccecfde28e78e1db07850e4172d4b",
-    "server_commit": "e160981f38ac9ab6c7ffec3c3ed432b605c73f61",
-    "ios_commit": "94120d40adf1c36e61ee597b9d082be2cd113c16"
+    "lock_sha256": "630b478a050e0608a2c995cbe3c8e8037c05d6104783756f71778077851b88c0",
+    "server_commit": "7382abd5569c8dadd70247f1be32e45f0878f739",
+    "ios_commit": "568af3e3d3e1b5e54bd4fff687092f402e9bfd43"
   },
   "documents": {
-    "ADR": "062aea0d5bc3b435034273a61cccf43eec396d37462c828b5de54cb14f2615a9",
-    "CLIENT": "5882b06b996c26e18f9a30ec4fac00b87e0ed6d34abf549e1be275409cb3d8c9",
-    "CUT": "77263d8a47daef01d06447b7c88632527efbe1a45a2fe72fdfa6e330314488a9",
-    "HAND": "1e3ec87028d34396257b608bb6b7988c67f7e259212d0665bb196ab2321a992d",
-    "HEALTH": "9cb47ae0cb6da6c93ca39a35ce7ab31fa010e16dab0b8037d784ae6eef1e0398",
-    "LOAD": "9bc54350ad02a3fba033a62ea787df25387be7cbab224279677ba1470f51a49e"
+    "ADR": "96a22d35200542478da1fcec95a93b62cbead15683e0f231c3ff6b93e893c0cc",
+    "CLIENT": "d29185918070c874f361f8df1c749f2a48c17f1da9b9cc0a14eb47c00298a8b2",
+    "CUT": "01afec93d515cc226eda0c319d68ce8706fa147b6ce7a4f381c5d20243d898bf",
+    "HAND": "60389a5c9915334191b8ecb65422cf5c9e77a27ab272e6716b4245646cbe7531",
+    "HEALTH": "24364d1bc29d4a947263d8a79808653251c856d77ce88ff98211413925b0faf4",
+    "LOAD": "227adae6663bad620baa29410fa8b9d542b65c69c14b1c27af755ff017ffd792"
   },
-  "claim_ledger_sha256": "1170299e24e37b9374c95fb5a0e63ab61669560e20e47c98a1b7e2a2691b5658",
+  "claim_ledger_sha256": "4a681e6c6cb2436b2eafa87f28a1fe0967db65971477b63913e21255072107f3",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
