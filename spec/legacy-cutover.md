@@ -3,11 +3,11 @@
 - 책임: 삭제 범위 · 문서 정정 · 테스트 · 순서
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `dfbe2e89d4ebb9df7855cf4fd1de12871c0f1723`
+- server 기준 commit: `120b948744ae2ce52a4fcaffd5e2e5c2c75e9003`
+- iOS 기준 commit: `444aae36eba7f186cac764b889eb4f10368bd751`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4aa0089513c3d56be31d61cf4c575ea37f3b07e0b76670bf78acb9fd5ab5f0bc`
-- baseline SHA: `f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc`
+- manifest SHA: `b2cb6660bf008b2a5b92e80b2e4e0e7289e5d366481cc5c9d5e444e33e242d25`
+- baseline SHA: `6d8a2bb22cd6a7f70dcfda186740c7888cdf9a60ce1e5aef94a577f0c7dc3cda`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 문서는 신규 앱이 legacy 소비를 걷어낼 때 **무엇을 지우고 · 무엇을 먼저 고쳐 쓰고 ·
@@ -51,7 +51,7 @@ topic 표면이므로 unarmed artifact를 출시할 수 없다. 따라서 코드
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A1 | **`AppState` lifecycle 재설계** | `.connected/.offline/.refreshingCached`의 legacy 배열 payload와 `AppState.rates`를 제거했다(`ios/FXi/Models/AppState.swift:11-18`). topic last-known 존재 여부와 transport 상태를 `applyConnectionState`가 결합하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:258-287`), 최상위 라우팅은 payload 없는 lifecycle만 본다(`ios/FXi/ContentView.swift:121-133`). tether-only last-known과 재연결 어포던스 회귀도 행동 시험으로 잠겼다(`ios/FXiTests/TetherDataPathTests.swift:3166-3287`) |
+| A1 | **`AppState` lifecycle 재설계** | `.connected/.offline/.refreshingCached`의 legacy 배열 payload와 `AppState.rates`를 제거했다(`ios/FXi/Models/AppState.swift:11-18`). topic last-known 존재 여부와 transport 상태를 `applyConnectionState`가 결합하고(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:258-287`), 최상위 라우팅은 payload 없는 lifecycle만 본다(`ios/FXi/ContentView.swift:121-133`). tether-only last-known과 재연결 어포던스 회귀도 행동 시험으로 잠겼다(`ios/FXiTests/TetherDataPathTests.swift:3168-3289`) |
 
 <!-- /rid: R-CUT-2 -->
 
@@ -62,7 +62,7 @@ topic 표면이므로 unarmed artifact를 출시할 수 없다. 따라서 코드
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A2 | **은행 가격알림 시트** | `AlertAddSheet.rate(for:)`는 `rateViewModel.rates(for:)`를 쓰고(`ios/FXi/Views/Components/AlertAddSheet.swift:90-103`), 그 조회는 탭과 같은 `baseRates(for:)`의 FX topic live/last-known으로 수렴한다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625`). cold-start 캐시 기반 현재가도 행동 시험이 잠근다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |
+| A2 | **은행 가격알림 시트** | `AlertAddSheet.rate(for:)`는 `rateViewModel.rates(for:)`를 쓰고(`ios/FXi/Views/Components/AlertAddSheet.swift:90-103`), 그 조회는 탭과 같은 `baseRates(for:)`의 FX topic live/last-known으로 수렴한다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625`). cold-start 캐시 기반 현재가도 행동 시험이 잠근다(`ios/FXiTests/TetherDataPathTests.swift:687-708`) |
 
 <!-- /rid: R-CUT-3 -->
 
@@ -84,7 +84,7 @@ topic 표면이므로 unarmed artifact를 출시할 수 없다. 따라서 코드
 
 | # | 지점 | 왜 어려운가 |
 |---|---|---|
-| A4 | `usdtDisplayState` fallback 단순화 | topic gate가 꺼지면 빈 상태, 켜지면 live `tetherTopicRates` 또는 disk `cachedTopicRates`만 쓴다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`). 빈 snapshot과 legacy cache를 다시 노출하지 않는 행동 시험이 있다(`ios/FXiTests/TetherDataPathTests.swift:467-485` · `:604-615`) |
+| A4 | `usdtDisplayState` fallback 단순화 | topic gate가 꺼지면 빈 상태, 켜지면 live `tetherTopicRates` 또는 disk `cachedTopicRates`만 쓴다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`). 빈 snapshot과 legacy cache를 다시 노출하지 않는 행동 시험이 있다(`ios/FXiTests/TetherDataPathTests.swift:469-487` · `:606-617`) |
 
 <!-- /rid: R-CUT-5 -->
 
@@ -217,14 +217,14 @@ architecture test가 callback 소유권과 파일 복원을 함께 감시한다
 
 | # | 보존할 행위 | 지금 쓸 수 있나 |
 |---|---|---|
-| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ legacy cache를 seed해도 FX 미수신 표면이 비어 있고(`ios/FXiTests/TetherDataPathTests.swift:467-485`), 빈 tether snapshot도 legacy로 채우지 않는다(`:604-615`) |
-| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:879-897`) · FX와 은행 알림(`:685-706`) · DXY(`:394-409`) cold-start 복원을 잠근다 |
-| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:394-409`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |
+| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ legacy cache를 seed해도 FX 미수신 표면이 비어 있고(`ios/FXiTests/TetherDataPathTests.swift:469-487`), 빈 tether snapshot도 legacy로 채우지 않는다(`:606-617`) |
+| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:881-899`) · FX와 은행 알림(`:687-708`) · DXY(`:396-411`) cold-start 복원을 잠근다 |
+| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:396-411`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |
 | B4 | 무료 티어가 `ExchangeRate` **타입**으로 계속 디코드된다 | ✅ 무료 스냅샷의 `rate.entries`를 `ExchangeRate`로 디코드한다(`ios/FXiTests/TopicMessageTests.swift:494-520`) |
 | B5 | 45초 무수신 → **조용한 재구독** → 실패 확정 시에만 배너 | ✅ **구현·잠금 완료** — 실패 확정이 degraded 로 수렴하는 것을 재검증 경로(`ios/FXiTests/TopicMessageTests.swift:3816` · `ios/FXiTests/TopicMessageTests.swift:6073`)와 최초 인도 경로(`ios/FXiTests/TopicMessageTests.swift:6113`)에서 각각 잠근다 |
-| B6 | **DXY topic 이 live tip 을 공급**한다 | ✅ wire decode(`ios/FXiTests/TopicMessageTests.swift:342-353`) · REST bootstrap(`ios/FXiTests/TetherDataPathTests.swift:355-368`) · WS routing/거절 후 늦은 frame 차단(`ios/FXiTests/TopicMessageTests.swift:3807`)을 잠근다 |
-| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |
-| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:648`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:619`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |
+| B6 | **DXY topic 이 live tip 을 공급**한다 | ✅ wire decode(`ios/FXiTests/TopicMessageTests.swift:342-353`) · REST bootstrap(`ios/FXiTests/TetherDataPathTests.swift:357-370`) · WS routing/거절 후 늦은 frame 차단(`ios/FXiTests/TopicMessageTests.swift:3807`)을 잠근다 |
+| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:687-708`) |
+| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:650`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:621`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |
 | B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:5923`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6139`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |
 
 <!-- relation: references target=R-CLI-10 -->

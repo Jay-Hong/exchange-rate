@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `dfbe2e89d4ebb9df7855cf4fd1de12871c0f1723`
+- server 기준 commit: `120b948744ae2ce52a4fcaffd5e2e5c2c75e9003`
+- iOS 기준 commit: `444aae36eba7f186cac764b889eb4f10368bd751`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4aa0089513c3d56be31d61cf4c575ea37f3b07e0b76670bf78acb9fd5ab5f0bc`
-- baseline SHA: `f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc`
+- manifest SHA: `b2cb6660bf008b2a5b92e80b2e4e0e7289e5d366481cc5c9d5e444e33e242d25`
+- baseline SHA: `6d8a2bb22cd6a7f70dcfda186740c7888cdf9a60ce1e5aef94a577f0c7dc3cda`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.

@@ -13,11 +13,13 @@
 epoch 번호는 이력에서 도출하지, 사람이 옮겨 적지 않는다.
 
 사용:
-    python3 scripts/topic_c2.py coords --ios-from <sha>      # 좌표 이동 여부만
-    python3 scripts/topic_c2.py pin --ios <sha> [--dry-run]
+    python3 scripts/topic_c2.py coords --ios-from <sha>      # iOS 좌표 이동 여부만
+    python3 scripts/topic_c2.py coords-server --server-from <sha>  # server 좌표 이동 여부만
+    python3 scripts/topic_c2.py pin (--ios|--server) <sha> [--dry-run]
     python3 scripts/topic_c2.py refresh [--dry-run]
     python3 scripts/topic_c2.py seal --author <A> --reviewer <B> [--dry-run]
-    python3 scripts/topic_c2.py c2 --ios <sha> --author <A> --reviewer <B>  # atomic + full gates
+    python3 scripts/topic_c2.py c2 --ios <sha> [--server <sha>] --author <A> --reviewer <B>
+                                                                    # atomic + full gates
     python3 scripts/topic_c2.py verify                        # 고정점 + C2 문서/원장 gates
 """
 
@@ -49,6 +51,8 @@ HISTORY_FILE = REPO / "tests" / "test_topic_only_semantic_review.py"
 PIN_ROOTS = ("spec", "DECISIONS.md", ".github/workflows")
 
 DOC_HEADER_RE = re.compile(r"(- manifest SHA: `)[0-9a-f]{64}(`)")
+BASELINE_HEADER_RE = re.compile(r"(- baseline SHA: `)[0-9a-f]{64}(`)")
+BASELINE = REPO / "spec" / "topic-only-baseline-facts.md"
 # 문서는 정확히 6개(ADR·HAND·CLIENT·CUT·LOAD·HEALTH). 이 수가 틀리면 **탐색이 깨진 것**이다.
 EXPECTED_DOC_HEADER_FILES = 6
 
@@ -100,12 +104,22 @@ def _test_module(name: str, *required: str):
 
 # ---------------------------------------------------------------- pin
 
-def current_ios_pin() -> str:
+def current_pin(target: str) -> str:
+    if target not in {"server", "ios"}:
+        raise C2Error(f"알 수 없는 pin target: {target!r}")
     data = json.loads(LOCK.read_text())
-    pin = data.get("pinned_commit", {}).get("ios")
+    pin = data.get("pinned_commit", {}).get(target)
     if not isinstance(pin, str) or not SHA40.match(pin):
-        raise C2Error(f"lock 의 pinned_commit.ios 가 40자리 sha 가 아니다: {pin!r}")
+        raise C2Error(f"lock 의 pinned_commit.{target} 가 40자리 sha 가 아니다: {pin!r}")
     return pin
+
+
+def current_ios_pin() -> str:
+    return current_pin("ios")
+
+
+def current_server_pin() -> str:
+    return current_pin("server")
 
 
 def _pin_files(old: str) -> list[pathlib.Path]:
@@ -147,15 +161,16 @@ def replace_pin_in_lines(lines: list[str], old: str, new: str) -> tuple[list[str
     return out, replaced, preserved
 
 
-def advance_pin(new: str, *, dry_run: bool = False) -> dict:
+def _advance_pin(target: str, new: str, *, dry_run: bool = False) -> dict:
+    root = IOS_ROOT if target == "ios" else REPO
     if not SHA40.match(new):
-        raise C2Error(f"iOS pin 은 40자리 full sha 여야 한다: {new!r}")
-    resolved = _run(["git", "-C", str(IOS_ROOT), "rev-parse", new]).strip()
+        raise C2Error(f"{target} pin 은 40자리 full sha 여야 한다: {new!r}")
+    resolved = _run(["git", "-C", str(root), "rev-parse", new]).strip()
     if resolved != new:
-        raise C2Error(f"{new} 가 iOS 리포에서 {resolved} 로 풀린다 — full sha 를 넘겨라")
-    old = current_ios_pin()
+        raise C2Error(f"{new} 가 {target} 리포에서 {resolved} 로 풀린다 — full sha 를 넘겨라")
+    old = current_ios_pin() if target == "ios" else current_server_pin()
     if old == new:
-        _say("PIN", f"이미 {new[:7]} — 변경 없음")
+        _say("PIN", f"{target} 이미 {new[:7]} — 변경 없음")
         return {"old": old, "new": new, "replaced": 0, "evidence_preserved": 0, "files": []}
 
     files = _pin_files(old)
@@ -187,9 +202,22 @@ def advance_pin(new: str, *, dry_run: bool = False) -> dict:
         ]
         if left:
             raise C2Error(f"치환 후에도 구 pin 이 남았다: {left}")
-    _say("PIN", f"{old[:7]} → {new[:7]} / 치환 {replaced}곳 · evidence 보존 {preserved}곳 · 파일 {len(touched)}")
+    _say(
+        "PIN",
+        f"{target} {old[:7]} → {new[:7]} / 치환 {replaced}곳 · "
+        f"evidence 보존 {preserved}곳 · 파일 {len(touched)}",
+    )
     return {"old": old, "new": new, "replaced": replaced,
             "evidence_preserved": preserved, "files": touched}
+
+
+def advance_pin(new: str, *, dry_run: bool = False) -> dict:
+    """Backward-compatible iOS pin entry point."""
+    return _advance_pin("ios", new, dry_run=dry_run)
+
+
+def advance_server_pin(new: str, *, dry_run: bool = False) -> dict:
+    return _advance_pin("server", new, dry_run=dry_run)
 
 
 # ---------------------------------------------------------------- refresh
@@ -215,6 +243,33 @@ def refresh_chain(*, dry_run: bool = False) -> list[str]:
     changes: list[str] = []
     for iteration in range(FIXPOINT_LIMIT):
         changed = False
+
+        # baseline 이 **먼저**다 — lock·manifest·문서 헤더·두 원장이 전부 이 값을 먹는다.
+        # (baseline-facts.md 자체가 바뀌는 C2 에서만 움직인다. 2026-08-23 첫 실측.)
+        baseline_sha = hashlib.sha256(BASELINE.read_bytes()).hexdigest()
+        lock = json.loads(LOCK.read_text())
+        if lock.get("baseline", {}).get("sha256") != baseline_sha:
+            changed = True
+            changes.append("lock: baseline.sha256")
+            lock["baseline"]["sha256"] = baseline_sha
+            if not dry_run:
+                LOCK.write_text(json.dumps(lock, ensure_ascii=False, indent=2) + "\n")
+        manifest = json.loads(MANIFEST.read_text())
+        if manifest.get("baseline_sha") != baseline_sha:
+            changed = True
+            changes.append("manifest: baseline_sha")
+            manifest["baseline_sha"] = baseline_sha
+            if not dry_run:
+                MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        for path in _doc_header_files():
+            text = path.read_text()
+            updated = BASELINE_HEADER_RE.sub(rf"\g<1>{baseline_sha}\g<2>", text)
+            if updated != text:
+                changed = True
+                changes.append(f"{path.relative_to(REPO)}: baseline SHA 헤더")
+                if not dry_run:
+                    path.write_text(updated)
+
         manifest_sha = hashlib.sha256(MANIFEST.read_bytes()).hexdigest()
 
         for path in _doc_header_files():
@@ -608,45 +663,68 @@ def coordinate_findings(cited_lines: set[int],
     return shifted, touched
 
 
-def check_coordinates(ios_from: str, ios_to: str = "HEAD") -> list[str]:
+def _check_coordinates(
+    root: pathlib.Path,
+    revision_from: str,
+    revision_to: str,
+    *,
+    target: str,
+) -> list[str]:
     """**pin 전진은 좌표 재도출이 아니다.** 인용 위쪽에 줄이 끼면 아래 인용이 조용히 밀린다.
 
     citation 게이트는 "그 행이 파일 안에 있는가" 만 보므로 **CI 는 통과한다**(실측 12건).
     """
     cited = _cited_lines()
-    changed = _run(["git", "-C", str(IOS_ROOT), "diff", "--name-only", f"{ios_from}..{ios_to}"]).split()
+    revision_range = f"{revision_from}..{revision_to}"
+    changed = _run(["git", "-C", str(root), "diff", "--name-only", revision_range]).split()
     if not changed:
-        raise C2Error(f"{ios_from}..{ios_to} 사이 변경 파일이 0 — 범위를 확인하라")
+        raise C2Error(f"{target} {revision_range} 사이 변경 파일이 0 — 범위를 확인하라")
     warnings: list[str] = []
     for name in changed:
         base = name.split("/")[-1]
         if base not in cited:
-            _say("COORD", f"{name}: 인용 없음")
+            _say("COORD", f"{target}:{name}: 인용 없음")
             continue
-        diff = _run(["git", "-C", str(IOS_ROOT), "diff", "-U0", f"{ios_from}..{ios_to}", "--", name])
+        diff = _run(["git", "-C", str(root), "diff", "-U0", revision_range, "--", name])
         hunks = parse_hunks(diff)
         if not hunks:
             continue
         shifted, touched = coordinate_findings(cited[base], hunks)
         if shifted:
-            warnings.append(f"{name}: 인용 위에서 줄 수가 바뀌었다 — 좌표를 주장문으로 **다시 찾아라**")
+            warnings.append(
+                f"{target}:{name}: 인용 위에서 줄 수가 바뀌었다 — "
+                "좌표를 주장문으로 **다시 찾아라**"
+            )
             _say("COORD", f"⚠️ {warnings[-1]}")
         if touched:
-            warnings.append(f"{name}: 인용된 줄의 **내용**이 바뀌었다 — 그 주장이 아직 참인지 확인하라")
+            warnings.append(
+                f"{target}:{name}: 인용된 줄의 **내용**이 바뀌었다 — "
+                "그 주장이 아직 참인지 확인하라"
+            )
             _say("COORD", f"⚠️ {warnings[-1]}")
         if not shifted and not touched:
-            _say("COORD", f"✅ {name}: 인용 밀림 없음 · 인용 줄 내용 불변")
+            _say("COORD", f"✅ {target}:{name}: 인용 밀림 없음 · 인용 줄 내용 불변")
     return warnings
+
+
+def check_coordinates(ios_from: str, ios_to: str = "HEAD") -> list[str]:
+    return _check_coordinates(IOS_ROOT, ios_from, ios_to, target="ios")
+
+
+def check_server_coordinates(server_from: str, server_to: str = "HEAD") -> list[str]:
+    return _check_coordinates(REPO, server_from, server_to, target="server")
 
 
 # ---------------------------------------------------------------- composite safety
 
-def _c2_mutation_paths(old_pin: str) -> list[pathlib.Path]:
+def _c2_mutation_paths(*old_pins: str) -> list[pathlib.Path]:
     """Return every tracked file that pin/refresh/seal may mutate."""
-    pin_files = _pin_files(old_pin)
-    if not pin_files:
-        raise C2Error(f"구 pin {old_pin[:7]} 을 어느 tracked 파일에서도 못 찾았다")
-    paths = set(pin_files)
+    paths: set[pathlib.Path] = set()
+    for old_pin in old_pins:
+        pin_files = _pin_files(old_pin)
+        if not pin_files:
+            raise C2Error(f"구 pin {old_pin[:7]} 을 어느 tracked 파일에서도 못 찾았다")
+        paths.update(pin_files)
     paths.update(_doc_header_files())
     paths.update((IMPL_LEDGER, CLAIM_LEDGER, SEMANTIC, HISTORY_FILE, LOCK, MANIFEST))
     missing = [path for path in paths if not path.is_file()]
@@ -689,15 +767,50 @@ def verify_gates() -> None:
     _say("VERIFY", "체인 고정점 · preflight · 문서/원장/semantic tests · 양 리포 diff-check 통과")
 
 
-def run_c2(ios: str, author: str, reviewer: str, *, allow_reseal: bool = False) -> None:
-    old_pin = current_ios_pin()
-    warnings = check_coordinates(old_pin, ios)
+def run_c2(
+    ios: str,
+    author: str,
+    reviewer: str,
+    *,
+    server: str | None = None,
+    allow_reseal: bool = False,
+    coords_rederived: bool = False,
+) -> None:
+    old_ios_pin = current_ios_pin()
+    old_server_pin = current_server_pin()
+    new_server_pin = server or old_server_pin
+
+    warnings: list[str] = []
+    if new_server_pin != old_server_pin:
+        warnings.extend(check_server_coordinates(old_server_pin, new_server_pin))
+    if ios != old_ios_pin:
+        warnings.extend(check_coordinates(old_ios_pin, ios))
+    if new_server_pin == old_server_pin and ios == old_ios_pin:
+        raise C2Error("server/iOS pin 이 모두 현재값이다 — 전진할 commit 을 확인하라")
     if warnings:
         rendered = " / ".join(warnings)
-        raise C2Error(f"좌표 재도출 경고가 있어 쓰기 전에 중단한다: {rendered}")
+        if not coords_rederived:
+            raise C2Error(f"좌표 재도출 경고가 있어 쓰기 전에 중단한다: {rendered}")
+        # ⛔ 이 플래그는 검사를 끄는 게 아니라 **사람의 선언**을 요구한다.
+        #
+        # 한때 "인용이 pin 시점과 같은 내용을 가리키는가" 로 자동 판정하려 했는데 **공허했다**:
+        # 재도출이 균일 shift 라 stale 좌표(`L`)도 재도출 좌표(`L+shift`)도 둘 다
+        # `head[L] == pin[L-shift]` 를 만족한다 — 어떤 번호를 넣어도 통과한다(변이로 실측).
+        # 게이트는 "무언가 움직였다" 까지만 알 수 있고, **그 범위가 주장을 증명하는가**는
+        # 주장문을 읽어야 안다. 그래서 자동 통과 대신 명시 선언으로 남긴다.
+        _say("COORD", "⚠️ --coords-rederived: 주장문 기준 재도출을 **선언**하고 진행한다")
+        for item in warnings:
+            _say("COORD", f"   선언된 경고: {item}")
+    elif coords_rederived:
+        raise C2Error("--coords-rederived 를 지정했지만 좌표 경고가 0건이다 — 불필요한 우회를 제거하라")
 
-    snapshot = _snapshot_files(_c2_mutation_paths(old_pin))
+    mutation_pins = [old_ios_pin]
+    if new_server_pin != old_server_pin:
+        mutation_pins.append(old_server_pin)
+    snapshot = _snapshot_files(_c2_mutation_paths(*mutation_pins))
     try:
+        if new_server_pin != old_server_pin:
+            advance_server_pin(new_server_pin)
         advance_pin(ios)
         refresh_chain()
         seal_epoch(author, reviewer, allow_reseal=allow_reseal)
@@ -719,8 +832,14 @@ def main(argv: list[str] | None = None) -> int:
     coords.add_argument("--ios-from", required=True)
     coords.add_argument("--ios-to", default="HEAD")
 
-    pin = sub.add_parser("pin", help="iOS pin 전진 (evidence sha 보존)")
-    pin.add_argument("--ios", required=True)
+    server_coords = sub.add_parser("coords-server", help="server pin 전진 전 좌표 이동 여부")
+    server_coords.add_argument("--server-from", required=True)
+    server_coords.add_argument("--server-to", default="HEAD")
+
+    pin = sub.add_parser("pin", help="server 또는 iOS pin 전진 (evidence sha 보존)")
+    pin_target = pin.add_mutually_exclusive_group(required=True)
+    pin_target.add_argument("--ios")
+    pin_target.add_argument("--server")
     pin.add_argument("--dry-run", action="store_true")
 
     refresh = sub.add_parser("refresh", help="해시 체인 고정점 갱신")
@@ -732,11 +851,14 @@ def main(argv: list[str] | None = None) -> int:
     seal.add_argument("--dry-run", action="store_true")
     seal.add_argument("--allow-reseal", action="store_true")
 
-    whole = sub.add_parser("c2", help="pin → refresh → seal")
+    whole = sub.add_parser("c2", help="coords → pin → refresh → seal → verify 원자 실행")
     whole.add_argument("--ios", required=True)
+    whole.add_argument("--server")
     whole.add_argument("--author", required=True)
     whole.add_argument("--reviewer", required=True)
     whole.add_argument("--allow-reseal", action="store_true")
+    whole.add_argument("--coords-rederived", action="store_true",
+                       help="좌표를 주장문 기준으로 재도출했음을 **선언**한다(검사를 끄지 않는다)")
 
     sub.add_parser("verify", help="고정점·preflight·문서/원장 tests·diff-check 전체 검증")
 
@@ -744,8 +866,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "coords":
             return 1 if check_coordinates(args.ios_from, args.ios_to) else 0
+        if args.command == "coords-server":
+            return 1 if check_server_coordinates(args.server_from, args.server_to) else 0
         if args.command == "pin":
-            advance_pin(args.ios, dry_run=args.dry_run)
+            if args.ios:
+                advance_pin(args.ios, dry_run=args.dry_run)
+            else:
+                advance_server_pin(args.server, dry_run=args.dry_run)
             return 0
         if args.command == "refresh":
             refresh_chain(dry_run=args.dry_run)
@@ -757,7 +884,8 @@ def main(argv: list[str] | None = None) -> int:
             verify_gates()
             return 0
         if args.command == "c2":
-            run_c2(args.ios, args.author, args.reviewer, allow_reseal=args.allow_reseal)
+            run_c2(args.ios, args.author, args.reviewer, allow_reseal=args.allow_reseal,
+                   server=args.server, coords_rederived=args.coords_rederived)
             return 0
     except C2Error as error:
         print(f"ERROR: {error}")

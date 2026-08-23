@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "4aa0089513c3d56be31d61cf4c575ea37f3b07e0b76670bf78acb9fd5ab5f0bc",
-    "baseline_sha256": "f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc",
-    "lock_sha256": "3c6d9c8166ade7e71dcb2ad39b027f5977735281c1ecc7ee2a434b669e2cd1d8",
-    "server_commit": "b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96",
-    "ios_commit": "dfbe2e89d4ebb9df7855cf4fd1de12871c0f1723"
+    "manifest_sha256": "b2cb6660bf008b2a5b92e80b2e4e0e7289e5d366481cc5c9d5e444e33e242d25",
+    "baseline_sha256": "6d8a2bb22cd6a7f70dcfda186740c7888cdf9a60ce1e5aef94a577f0c7dc3cda",
+    "lock_sha256": "3addeff05a876d4027aaaf879ae3c215af3c75fd98014837ce207c9d0472a094",
+    "server_commit": "120b948744ae2ce52a4fcaffd5e2e5c2c75e9003",
+    "ios_commit": "444aae36eba7f186cac764b889eb4f10368bd751"
   },
   "documents": {
-    "ADR": "c398a54bf20a3b24b2d6c2ba73c96800b327301d87be15fea6e995aae91c46cc",
-    "CLIENT": "67974127847c933a2449955a19b11923f8d41042a42517db6c62ee8cdb0a912a",
-    "CUT": "2b43591c7d368998f545c01f44ab27185b8ae0ec0f9a8f26a7e5d3f919f81394",
-    "HAND": "7c4fc477f05142c69e77b35c83c9684bdfc102a17ab437849addab8d8a0eaf3b",
-    "HEALTH": "6ac37990efb9771236ba8c31955b0dbcaf9abf08a7ff7bfc07bebce2113e628e",
-    "LOAD": "36dcb9c59d63db2fdf6551b788bcc61bfe8cf25bb1ab7a8f0455fafd8e106853"
+    "ADR": "3b7aad757d5ea2a3f11e24906364eca37b261c27ac9e48602cd4c0d9aea07a00",
+    "CLIENT": "f5869fe76ad56d4743e18ef0d2f158aff8e1b0f2d206f29b5ff6331f76d30438",
+    "CUT": "c18b95a79d410e24c68291088160ed135a4ebdf9a3a464a3445fb648e855032b",
+    "HAND": "6dfcaefc925e03a31daab53cf44c6a1a273ff0722fc798412527d001fc4a7411",
+    "HEALTH": "18c851d1849bd877b7564532508e4532a130b0138c3ddc9053ed5fe6ad5b2add",
+    "LOAD": "8e64e215470d286c9045c5bb318d605426d0eb7214896fe68ee053e552269064"
   },
   "entries": [
     {
@@ -36,13 +36,13 @@
     {
       "destination": "ADR",
       "rid": "R-DEC-1",
-      "unit_sha256": "96e51d5fb5a353545daa67a40ab4dbd738c31f20fe35f6a22b64186b2f107a54",
-      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1402-1412` · `app/main.py:942-965`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:243`.",
+      "unit_sha256": "71c37f475c7b56b4ebfc55717cb6fdb2c04ec8163e7f60c52304a09b6dc7c304",
+      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1402-1412` · `app/main.py:947-970`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:243`.",
       "classification": "code_fact",
       "detail": "baseline B1은 두 publisher 모듈 내부만의 부정 사실이다. 외부 scheduler가 broadcast_rates_once를 매초 깨우지만 publisher 호출은 is_changed 분기 안임을 추가 확인해, 무조건 주기 재발행 계약 부재로 범위를 좁혔다.",
       "provenance": [
         "baseline:B1",
-        "file:app/main.py:942-965",
+        "file:app/main.py:947-970",
         "file:app/scheduler.py:1402-1412",
         "file:ios/FXi/Utils/Constants.swift:243"
       ]
@@ -86,13 +86,13 @@
     {
       "destination": "ADR",
       "rid": "R-INV-1",
-      "unit_sha256": "118170e1bfc2f6b09a7adf679ce599a570c4555613b241f37b30e0e512571647",
-      "unit_text": "**근거 ① 인가** — `FREE_TIER_ACCESS_MODEL_PLAN.md` **D4 \"신규 앱 legacy _anon_ fallback 금지(양 플랫폼)\"**. legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회. 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다 (`app/main.py:1215-1265` · `app/main.py:1069-1113`). ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 — 같은 슬라이스에서 정정한다.",
+      "unit_sha256": "5ed2d34d3d33e09f03c1e0e9327a1c2be7964b40b2c86ca57c97c358aeddfdb6",
+      "unit_text": "**근거 ① 인가** — `FREE_TIER_ACCESS_MODEL_PLAN.md` **D4 \"신규 앱 legacy _anon_ fallback 금지(양 플랫폼)\"**. legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회. 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다 (`app/main.py:1220-1270` · `app/main.py:1074-1118`). ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 — 같은 슬라이스에서 정정한다.",
       "classification": "code_fact",
       "detail": "고정 server commit의 legacy REST handler와 /ws 초기 연결 경로에 Firebase/premium 검사가 없음을 직접 확인했다. 무인증 legacy fallback이 페이월을 우회한다는 인가 근거다.",
       "provenance": [
-        "file:app/main.py:1069-1113",
-        "file:app/main.py:1215-1265"
+        "file:app/main.py:1074-1118",
+        "file:app/main.py:1220-1270"
       ]
     },
     {
@@ -203,12 +203,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-15",
-      "unit_sha256": "f764150d7c2aa4e01bb9663e9c53bc9b9d65c350c76b82a2856cbc754d27bdd7",
-      "unit_text": "- 그냥 제거하면 **주말 FX 종가나 장마감 KRX 값을 현재 시점의 live tail 로 ingest** 하게 된다. bridge 는 source timestamp 를 검사한 뒤 rate 만 `ingestLive` 에 넘기므로 (`ios/FXi/Views/Components/GraphV2Section.swift:1446-1468`), `ingestLive` 는 그 rate 를 `Date()` 시각으로 누적한다(`ios/FXi/ViewModels/GraphV2ViewModel.swift:195-201`). 검사를 빼면 오래된 값이 지금 값으로 그려진다.",
+      "unit_sha256": "321cf04e0e82662ee7c0d209a83aea7b32277d77d2307761fb7363b630b5a835",
+      "unit_text": "- 그냥 제거하면 **주말 FX 종가나 장마감 KRX 값을 현재 시점의 live tail 로 ingest** 하게 된다. bridge 는 source timestamp 를 검사한 뒤 rate 만 `ingestLive` 에 넘기므로 (`ios/FXi/Views/Components/GraphV2Section.swift:1446-1468`), `ingestLive` 는 그 rate 를 `Date()` 시각으로 누적한다(`ios/FXi/ViewModels/GraphV2ViewModel.swift:200-206`). 검사를 빼면 오래된 값이 지금 값으로 그려진다.",
       "classification": "code_fact",
       "detail": "bridge가 timestamp freshness를 통과한 rate만 넘기고 GraphV2ViewModel.ingestLive가 Date()로 누적함을 함께 확인했다. 두 파일을 묶어야 오래된 값이 현재 tail로 들어간다는 주장이 닫힌다.",
       "provenance": [
-        "file:ios/FXi/ViewModels/GraphV2ViewModel.swift:195-201",
+        "file:ios/FXi/ViewModels/GraphV2ViewModel.swift:200-206",
         "file:ios/FXi/Views/Components/GraphV2Section.swift:1446-1468"
       ]
     },
@@ -299,12 +299,12 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-6",
-      "unit_sha256": "ffbafbf64d4e9706c61e8bac98f212a9f7296cf9385e00fd023a1d1bc790b168",
-      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3269-3277`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
+      "unit_sha256": "499b23ddb26521108d6fb40af21251702e2707e05878713f76c1f94e126f99aa",
+      "unit_text": "⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의 `invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3320-3328`) 클라는 셋을 구별할 수 없다. 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.",
       "classification": "code_fact",
       "detail": "서버가 만료(InvalidIdTokenError 하위 Expired/Revoked)와 UserDisabledError 를 모두 같은 invalid_token 코드로 반환한다는 현재 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3269-3277"
+        "file:app/main.py:3320-3328"
       ]
     },
     {
@@ -437,45 +437,45 @@
     {
       "destination": "CLIENT",
       "rid": "R-CLI-9",
-      "unit_sha256": "29f35491f00d3d5aaacd1cad0d04874c75fc4b79ea55d0210cf17149dc962db3",
-      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3269-3277`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
+      "unit_sha256": "05870b77512f77fa0baba97e5dc41a51b797529a57d431757a5216b5ecf1c421",
+      "unit_text": "⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) · `app/main.py:3320-3328`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야 표의 두 행이 구현된다.",
       "classification": "code_fact",
       "detail": "invalid_token 의 두 갈래(만료 refresh 가능 / 확정 실패)가 같은 wire reason 문자열로 나간다는 현재 서버 코드 동작 단정이다.",
       "provenance": [
-        "file:app/main.py:3269-3277"
+        "file:app/main.py:3320-3328"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "a9ddb0bcb89dc8b7caac379672cf77b7458b3a27f6afb4494a2de3cf0957c70d",
-      "unit_text": "| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ legacy cache를 seed해도 FX 미수신 표면이 비어 있고(`ios/FXiTests/TetherDataPathTests.swift:467-485`), 빈 tether snapshot도 legacy로 채우지 않는다(`:604-615`) |",
+      "unit_sha256": "ece9f03e31d83fc49122355bc7845af852964dd67a471ca2b553a049bb479dc3",
+      "unit_text": "| B1 | topic cold-start 에서 **불필요한 blank/reflow 가 없다** | ✅ legacy cache를 seed해도 FX 미수신 표면이 비어 있고(`ios/FXiTests/TetherDataPathTests.swift:469-487`), 빈 tether snapshot도 legacy로 채우지 않는다(`:606-617`) |",
       "classification": "code_fact",
       "detail": "cold-start 빈 결과 회귀 테스트가 이미 존재한다는 현재 테스트 상태를 단정한다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:467-485"
+        "file:ios/FXiTests/TetherDataPathTests.swift:469-487"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "4bb484970879267f36f21986c0dd04297121f2a6dc1e45ea98a08d1ef5ed1420",
-      "unit_text": "| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:879-897`) · FX와 은행 알림(`:685-706`) · DXY(`:394-409`) cold-start 복원을 잠근다 |",
+      "unit_sha256": "eb793c7bdd810e0f06b9b6539bd11d853617e20171082b7adfb8b655bf5d6ab7",
+      "unit_text": "| B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:881-899`) · FX와 은행 알림(`:687-708`) · DXY(`:396-411`) cold-start 복원을 잠근다 |",
       "classification": "code_fact",
       "detail": "USDT·FX/은행 알림·DXY 각각의 disk last-known을 cold-start에서 복원하는 행동 테스트가 현재 존재한다는 테스트 범위 단정이다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:879-897"
+        "file:ios/FXiTests/TetherDataPathTests.swift:881-899"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "0e1d658371801f3e8213e6becdcca01c9ee07235608832d1f3c02413c4f03b6b",
-      "unit_text": "| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:394-409`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |",
+      "unit_sha256": "2efa44fb2c48cfe3b66bc425c61ed41252625089a8530653c8eab0f06908fa8c",
+      "unit_text": "| B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:396-411`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |",
       "classification": "code_fact",
       "detail": "legacy rates/indices 프레임을 주입해도 DXY topic owner와 transport lifecycle이 유지되고, architecture test가 legacy handler 복원을 거부한다는 현재 행동 테스트 사실이다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:394-409",
+        "file:ios/FXiTests/TetherDataPathTests.swift:396-411",
         "file:ios/FXiTests/TopicMessageTests.swift:386-428"
       ]
     },
@@ -493,24 +493,24 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "e8754acbb44c2a817a01c6bd5ceb53c9f7f3ab2229966c9e11c56aa7dace1061",
-      "unit_text": "| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |",
+      "unit_sha256": "c0474d1505eb83cbef382c529dba6eba0834ae905a5bf4913263ba0ab1f0574c",
+      "unit_text": "| B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:687-708`) |",
       "classification": "code_fact",
       "detail": "FX topic disk last-known 복원 뒤 rates(for:)가 은행 알림 현재가를 제공한다는 현재 행동 테스트 사실이다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:685-706"
+        "file:ios/FXiTests/TetherDataPathTests.swift:687-708"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-13",
-      "unit_sha256": "cc4b8239735f32dfe94aa3a0004641da59840308812950a9fd9f3126aedfc010",
-      "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:648`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:619`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |",
+      "unit_sha256": "3b1a93c5efcbb137355206346a888b5577e4ca860808c8b9380c764637862d4d",
+      "unit_text": "| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:650`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:621`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3748` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |",
       "classification": "code_fact",
       "detail": "topics_disabled purge의 메모리·디스크·파생 상태 제거와 다음 연결 세대의 자동 복구를 실 transport 테스트까지 포함해 잠갔다는 현재 커버리지 단정이다.",
       "provenance": [
-        "file:ios/FXiTests/TetherDataPathTests.swift:619",
-        "file:ios/FXiTests/TetherDataPathTests.swift:648",
+        "file:ios/FXiTests/TetherDataPathTests.swift:621",
+        "file:ios/FXiTests/TetherDataPathTests.swift:650",
         "file:ios/FXiTests/TopicMessageTests.swift:3748"
       ]
     },
@@ -529,26 +529,26 @@
     {
       "destination": "CUT",
       "rid": "R-CUT-3",
-      "unit_sha256": "b2a614b168f6f2fadbcf3a3b6545c75565028efb50f3c94775f09cd84c28fd6e",
-      "unit_text": "| A2 | **은행 가격알림 시트** | `AlertAddSheet.rate(for:)`는 `rateViewModel.rates(for:)`를 쓰고(`ios/FXi/Views/Components/AlertAddSheet.swift:90-103`), 그 조회는 탭과 같은 `baseRates(for:)`의 FX topic live/last-known으로 수렴한다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625`). cold-start 캐시 기반 현재가도 행동 시험이 잠근다(`ios/FXiTests/TetherDataPathTests.swift:685-706`) |",
+      "unit_sha256": "43421b4e8c247586d7e89f7b66c0448642c3a5bb260ad08c149c156aca49f317",
+      "unit_text": "| A2 | **은행 가격알림 시트** | `AlertAddSheet.rate(for:)`는 `rateViewModel.rates(for:)`를 쓰고(`ios/FXi/Views/Components/AlertAddSheet.swift:90-103`), 그 조회는 탭과 같은 `baseRates(for:)`의 FX topic live/last-known으로 수렴한다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625`). cold-start 캐시 기반 현재가도 행동 시험이 잠근다(`ios/FXiTests/TetherDataPathTests.swift:687-708`) |",
       "classification": "code_fact",
       "detail": "AlertAddSheet가 rateViewModel.rates(for:)를 통해 탭과 같은 FX topic live/last-known 경로로 수렴하고, cold-start 현재가도 행동 테스트가 잠근다는 현재 배선 사실이다.",
       "provenance": [
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:580-625",
         "file:ios/FXi/Views/Components/AlertAddSheet.swift:90-103",
-        "file:ios/FXiTests/TetherDataPathTests.swift:685-706"
+        "file:ios/FXiTests/TetherDataPathTests.swift:687-708"
       ]
     },
     {
       "destination": "CUT",
       "rid": "R-CUT-5",
-      "unit_sha256": "9adb79c3c8c6e86dc2d7d28fba8f9e0fff6fc41311eb653d42c4c42695940a31",
-      "unit_text": "| A4 | `usdtDisplayState` fallback 단순화 | topic gate가 꺼지면 빈 상태, 켜지면 live `tetherTopicRates` 또는 disk `cachedTopicRates`만 쓴다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`). 빈 snapshot과 legacy cache를 다시 노출하지 않는 행동 시험이 있다(`ios/FXiTests/TetherDataPathTests.swift:467-485` · `:604-615`) |",
+      "unit_sha256": "7c24a6a5655c8c1812d36e75e39b54ce45791c490acd1ffb997c3c592e85fc98",
+      "unit_text": "| A4 | `usdtDisplayState` fallback 단순화 | topic gate가 꺼지면 빈 상태, 켜지면 live `tetherTopicRates` 또는 disk `cachedTopicRates`만 쓴다(`ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714`). 빈 snapshot과 legacy cache를 다시 노출하지 않는 행동 시험이 있다(`ios/FXiTests/TetherDataPathTests.swift:469-487` · `:606-617`) |",
       "classification": "code_fact",
       "detail": "현재 usdtDisplayState는 gate OFF에서 빈 상태, ON에서 live tether 또는 disk topic cache만 사용하며 legacy cache를 다시 노출하지 않는다는 코드·행동 테스트 사실이다.",
       "provenance": [
         "file:ios/FXi/ViewModels/ExchangeRateViewModel.swift:691-714",
-        "file:ios/FXiTests/TetherDataPathTests.swift:467-485"
+        "file:ios/FXiTests/TetherDataPathTests.swift:469-487"
       ]
     },
     {
@@ -640,12 +640,12 @@
     {
       "destination": "HAND",
       "rid": "R-HAND-11",
-      "unit_sha256": "d4e4495be983aabed39dbbd2ceafc3302ff056c25509ca437cb9065595defaa5",
-      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:278-323`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3176-3180`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:237-275`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
+      "unit_sha256": "35338dc970f36a418692690b4131a8c903025b7b062589d9cfddabbf3b785a4d",
+      "unit_text": "격차의 현재 상태는 [R-INV-2](../DECISIONS.md#r-inv-2) 가 기록한다. 최종 stage `enforce_authenticated_premium` 에서 식별된 FX/USDT 는 premium-only 로 분류되고(`app/topic_policy.py:278-323`) coordinator 가 premium 을 관측한다 (`app/topic_authorization.py:372-402`). 기본값 `compatibility` 에서는 종전대로 identity-only 다. REST twin 은 stage 와 무관하게 premium 을 강제한다(`app/main.py:3227-3231`, ADR-039 §8.1 E3). 익명 요청은 같은 최종 stage 에서 전부 조용히 제외된다(`app/topic_policy.py:237-275`). ⛔ production 의 현재 stage 와 활성화 이력은 이 코드 근거로 확정하지 않는다. arming 직전에 실행 중인 컨테이너와 env 를 직접 측정하고, cache-free RevenueCat 결합을 수용한 별도 GO가 필요하다.",
       "classification": "code_fact",
       "detail": "고정 C1은 최종 stage의 식별·익명 partition, coordinator의 premium 관측, REST twin의 premium 강제를 증명한다. 코드 기본값과 production의 실제 stage를 분리하고 운영 상태는 직접 측정 대상으로 남겼다.",
       "provenance": [
-        "file:app/main.py:3176-3180",
+        "file:app/main.py:3227-3231",
         "file:app/topic_authorization.py:372-402",
         "file:app/topic_policy.py:237-275",
         "file:app/topic_policy.py:278-323"
@@ -719,28 +719,28 @@
     {
       "destination": "HEALTH",
       "rid": "R-HLT-1",
-      "unit_sha256": "a53a5c6bb19a8298aabf47e5b334b943f61e878fec214f1cc46447b4caab6c56",
-      "unit_text": "**서버 — 정상 initial snapshot _이후_ 의 publisher 사망은 클라가 판별할 수 없다** (⛔ 파생 숫자 숨김 정책([R-DEC-2](../DECISIONS.md#r-dec-2), `[제안·결정 대기]`)을 수용할 경우 이것은 **arming 선행조건**이며 **후속이 아니다**) ([R-DEC-1](../DECISIONS.md#r-dec-1) — 45초는 데이터의 나이가 아니므로 **정상 침묵과 구분 불가**). **서버 publisher health/SLO/알람**으로 덮는다. 이건 클라 계약이 아니라 **운영 계약**이다. 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다 (`app/scheduler.py:1402-1412` · `app/main.py:942-965`).",
+      "unit_sha256": "ada355a23cc9f30478e32fa8de0079c868bb8b296e9b91faa1887fc9062306c8",
+      "unit_text": "**서버 — 정상 initial snapshot _이후_ 의 publisher 사망은 클라가 판별할 수 없다** (⛔ 파생 숫자 숨김 정책([R-DEC-2](../DECISIONS.md#r-dec-2), `[제안·결정 대기]`)을 수용할 경우 이것은 **arming 선행조건**이며 **후속이 아니다**) ([R-DEC-1](../DECISIONS.md#r-dec-1) — 45초는 데이터의 나이가 아니므로 **정상 침묵과 구분 불가**). **서버 publisher health/SLO/알람**으로 덮는다. 이건 클라 계약이 아니라 **운영 계약**이다. 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다 (`app/scheduler.py:1402-1412` · `app/main.py:947-970`).",
       "classification": "code_fact",
       "detail": "B1/B2의 범위를 publisher 내부 timer와 coalesce 의미로 한정하고, 외부 broadcast caller도 payload 변경 시에만 publish함을 확인했다. initial snapshot 실패 close와 별개로 정상 snapshot 이후 publisher 침묵을 클라이언트가 구분할 신호는 없다.",
       "provenance": [
         "baseline:B1",
         "baseline:B2",
-        "file:app/main.py:942-965",
+        "file:app/main.py:947-970",
         "file:app/scheduler.py:1402-1412"
       ]
     },
     {
       "destination": "HEALTH",
       "rid": "R-HLT-1",
-      "unit_sha256": "a7078c3e8167a971be3db7535a2a141aec84c9ae9072d9c06b34900d6cac7941",
-      "unit_text": "**구멍이 어디서 생기는가.** LOAD-S3 구현으로 initial snapshot의 deadline·transient/fatal build 실패는 1013/1011 close로 바뀌어 더는 조용하지 않다(baseline D3). 다만 builder가 `None`을 반환하는 경로는 연결을 유지한 채 skip하므로([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)), **연결·pong·ack· lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**는 아직 표현된다. 그 뒤 **정상 발행되던 publisher가 죽는 경우**도 침묵으로만 관측된다 — publisher 모듈에는 timer가 없고(baseline B1), 외부 caller도 변경이 있을 때만 publish한다(`app/main.py:942-965`). transport ping/pong은 **연결 생존만** 증명하지 특정 topic publisher의 생존을 증명하지 않는다.",
+      "unit_sha256": "453666a9fa00c1359bbe22c01d467d00ad48e0ba1b369eda9562696e7ccddbef",
+      "unit_text": "**구멍이 어디서 생기는가.** LOAD-S3 구현으로 initial snapshot의 deadline·transient/fatal build 실패는 1013/1011 close로 바뀌어 더는 조용하지 않다(baseline D3). 다만 builder가 `None`을 반환하는 경로는 연결을 유지한 채 skip하므로([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)), **연결·pong·ack· lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**는 아직 표현된다. 그 뒤 **정상 발행되던 publisher가 죽는 경우**도 침묵으로만 관측된다 — publisher 모듈에는 timer가 없고(baseline B1), 외부 caller도 변경이 있을 때만 publish한다(`app/main.py:947-970`). transport ping/pong은 **연결 생존만** 증명하지 특정 topic publisher의 생존을 증명하지 않는다.",
       "classification": "code_fact",
       "detail": "pinned C1에서 build 실패는 1013/1011로 관측 가능해졌지만 None snapshot skip과 정상 발행 이후 publisher 사망은 여전히 transport 상태만으로 구분되지 않는다. B1과 main caller의 is_changed 분기를 함께 근거로 삼았다.",
       "provenance": [
         "baseline:B1",
         "baseline:D3",
-        "file:app/main.py:942-965"
+        "file:app/main.py:947-970"
       ]
     },
     {
@@ -755,14 +755,14 @@
     {
       "destination": "HEALTH",
       "rid": "R-HLT-3",
-      "unit_sha256": "ead50e62dd2c051fa2db414426342aaabbe34f48241bb227ea8497385542a9f1",
-      "unit_text": "[R-HAND-1](topic-snapshot-handoff.md#r-hand-1)의 남은 `None` 침묵과 [R-HLT-1](#r-hlt-1)의 publisher 사망은 클라가 판별할 수 없다 — 서버가 이 계약으로 덮는다. 이 계약은 **확정**이며, [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택 여부와 **무관하다**. 판별 불가의 코드 근거: baseline **D3**(`None` snapshot을 연결 유지 상태로 skip) · **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:942-965`(외부 caller 도 변경 시에만 publish).",
+      "unit_sha256": "484eb4f954812a8cb6b6f16278aec4f0e221312682464fd839c6281e82282402",
+      "unit_text": "[R-HAND-1](topic-snapshot-handoff.md#r-hand-1)의 남은 `None` 침묵과 [R-HLT-1](#r-hlt-1)의 publisher 사망은 클라가 판별할 수 없다 — 서버가 이 계약으로 덮는다. 이 계약은 **확정**이며, [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택 여부와 **무관하다**. 판별 불가의 코드 근거: baseline **D3**(`None` snapshot을 연결 유지 상태로 skip) · **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:947-970`(외부 caller 도 변경 시에만 publish).",
       "classification": "code_fact",
       "detail": "LOAD-S3가 build 실패의 조용한 격리를 닫았으므로, pinned C1에서 남는 initial-snapshot 침묵은 None skip뿐이다. 변경 시에만 publish하는 외부 caller와 함께 확인했으며 B1을 서버 전체 timer 부재로 과장하지 않는다.",
       "provenance": [
         "baseline:B1",
         "baseline:D3",
-        "file:app/main.py:942-965"
+        "file:app/main.py:947-970"
       ]
     },
     {

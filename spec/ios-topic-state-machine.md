@@ -3,11 +3,11 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `b1d1fc4d0a3490fd78aae84577c8f6fb2f69ab96`
-- iOS 기준 commit: `dfbe2e89d4ebb9df7855cf4fd1de12871c0f1723`
+- server 기준 commit: `120b948744ae2ce52a4fcaffd5e2e5c2c75e9003`
+- iOS 기준 commit: `444aae36eba7f186cac764b889eb4f10368bd751`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `4aa0089513c3d56be31d61cf4c575ea37f3b07e0b76670bf78acb9fd5ab5f0bc`
-- baseline SHA: `f31e1a689dd4464992924329e1e0313880a058c6b89a28e0c2e53fe8dc9c9fcc`
+- manifest SHA: `b2cb6660bf008b2a5b92e80b2e4e0e7289e5d366481cc5c9d5e444e33e242d25`
+- baseline SHA: `6d8a2bb22cd6a7f70dcfda186740c7888cdf9a60ce1e5aef94a577f0c7dc3cda`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서는 `TOPIC_ONLY_DELIVERY_CONTRACT.archive.md` 에서 **클라이언트 상태기계 · 재시도 · 재검증**
@@ -242,7 +242,7 @@ ack 전후 무관하게 **전부 인정**한다. 기한 내 0건이면 재구독
 | `request_too_large` | 위 1009 행 참조 | — | — | 실제 운영 경로는 **frame 이 아니라 close** |
 
 ⚠️ **`invalid_token` 을 한 줄로 두면 [R-CLI-5](#r-cli-5) 의 원칙 자체를 위반한다** — 서버의
-`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3269-3277`)
+`invalid_token` 에는 만료뿐 아니라 **revoked / disabled user** 가 포함되고(`app/main.py:3320-3328`)
 클라는 셋을 구별할 수 없다.
 확정 실패에 last-known 을 유지하면 **인증이 끝난 뒤에도 과거 premium/KRX 값을 무기한 표시**하게 된다.
 
@@ -447,7 +447,7 @@ enum TopicRejection {
 **이 축 하나를 공유**해 판정이 갈리지 않게 한다.
 
 ⚠️ **`invalid_token` 의 두 갈래는 wire reason 이 같다**([R-CLI-6](#r-cli-6) ·
-`app/main.py:3269-3277`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
+`app/main.py:3320-3328`) — `rejectionReason` 만으로 구분되지 않는다. **auth resolution 상태**(refresh 진행 중 / 확정 실패)를 별도로 둬야
 표의 두 행이 구현된다.
 
 ⛔ **`unknown_topic` 에서 `desired` 를 지우면 안 된다.** 버전 스큐나 순차 배포가 끝나도 **자동 복구할
@@ -676,7 +676,7 @@ live-tail 을 **버린다**. 그 함수 주석이 스스로 실토한다 —
 - 그냥 제거하면 **주말 FX 종가나 장마감 KRX 값을 현재 시점의 live tail 로 ingest** 하게 된다.
   bridge 는 source timestamp 를 검사한 뒤 rate 만 `ingestLive` 에 넘기므로
   (`ios/FXi/Views/Components/GraphV2Section.swift:1446-1468`), `ingestLive` 는 그 rate 를
-  `Date()` 시각으로 누적한다(`ios/FXi/ViewModels/GraphV2ViewModel.swift:195-201`). 검사를 빼면
+  `Date()` 시각으로 누적한다(`ios/FXi/ViewModels/GraphV2ViewModel.swift:200-206`). 검사를 빼면
   오래된 값이 지금 값으로 그려진다.
 - "전달 상태 기준으로 교체"도 안 된다 — 정상 휴장 중에는 연결·lease 가 **healthy** 라 오래된 값을
   현재 tail 로 연장하는 문제가 그대로 남는다.

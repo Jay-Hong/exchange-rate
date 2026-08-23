@@ -89,6 +89,10 @@ def test_current_ios_pin_is_a_full_sha():
     assert topic_c2.SHA40.match(topic_c2.current_ios_pin())
 
 
+def test_current_server_pin_is_a_full_sha():
+    assert topic_c2.SHA40.match(topic_c2.current_server_pin())
+
+
 def test_pin_files_returns_empty_for_a_normal_no_match(monkeypatch):
     """git grep exit 1은 오류가 아니라 0건이다 — 치환 후에는 이 상태가 성공 조건이다."""
     completed = subprocess.CompletedProcess(["git", "grep"], 1, stdout="", stderr="")
@@ -109,6 +113,27 @@ def test_advance_pin_accepts_zero_old_matches_after_replacement(monkeypatch, tmp
     result = topic_c2.advance_pin(NEW)
     assert result["replaced"] == 1
     assert target.read_text() == f'{{"ios": "{NEW}"}}\n'
+
+
+def test_advance_server_pin_uses_the_server_repository(monkeypatch, tmp_path):
+    target = tmp_path / "pin.json"
+    target.write_text(f'{{"server": "{OLD}"}}\n')
+    searches = iter(([target], []))
+    commands: list[list[str]] = []
+
+    def run(args, *_a, **_k):
+        commands.append(args)
+        return NEW + "\n"
+
+    monkeypatch.setattr(topic_c2, "REPO", tmp_path)
+    monkeypatch.setattr(topic_c2, "_run", run)
+    monkeypatch.setattr(topic_c2, "current_pin", lambda target_name: OLD)
+    monkeypatch.setattr(topic_c2, "_pin_files", lambda _old: list(next(searches)))
+
+    result = topic_c2.advance_server_pin(NEW)
+    assert result["replaced"] == 1
+    assert commands[0][:4] == ["git", "-C", str(tmp_path), "rev-parse"]
+    assert target.read_text() == f'{{"server": "{NEW}"}}\n'
 
 
 # --------------------------------------------------------- 체인
@@ -412,10 +437,57 @@ def test_cited_ranges_expand_to_every_line_inside():
     assert {341, 350, 362}.issubset(runbook), "341-362 범위 안쪽이 비어 있다"
 
 
+def test_c2_still_writes_when_rederivation_is_declared(monkeypatch, tmp_path):
+    """`--coords-rederived` 는 검사를 끄는 게 아니라 **사람의 선언**이다 — 경고는 그대로 찍힌다.
+
+    ⛔ 자동 판정을 시도했다가 철회한 자리다. "인용이 pin 과 같은 내용을 가리키는가" 는 재도출이
+    균일 shift 라 **stale 좌표도 통과**해서 공허했다(변이로 실측). 게이트는 "움직였다" 까지만
+    알 수 있고, 그 범위가 주장을 증명하는지는 주장문을 읽어야 안다.
+    """
+    target = tmp_path / "tracked"
+    target.write_text("before")
+    events: list[str] = []
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: ["좌표 이동"])
+    monkeypatch.setattr(topic_c2, "_c2_mutation_paths", lambda _old: [target])
+    monkeypatch.setattr(topic_c2, "advance_pin", lambda _new: events.append("pin"))
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda: events.append("refresh"))
+    monkeypatch.setattr(topic_c2, "seal_epoch", lambda *_a, **_k: events.append("seal"))
+    monkeypatch.setattr(topic_c2, "verify_gates", lambda: events.append("verify"))
+
+    topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex", coords_rederived=True)
+    assert events == ["pin", "refresh", "seal", "verify"]
+
+
+def test_c2_without_the_declaration_still_stops(monkeypatch, tmp_path):
+    """앞 시험이 게이트를 무력화하지 않음을 보인다 — 선언이 없으면 여전히 쓰기 전 중단."""
+    called: list[str] = []
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: ["좌표 이동"])
+    monkeypatch.setattr(topic_c2, "_c2_mutation_paths", lambda _old: called.append("paths"))
+    with pytest.raises(topic_c2.C2Error, match="쓰기 전에 중단"):
+        topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex")
+    assert called == []
+
+
 def test_coordinate_check_rejects_an_empty_range(monkeypatch):
     monkeypatch.setattr(topic_c2, "_run", lambda *a, **k: "")
     with pytest.raises(topic_c2.C2Error, match="변경 파일이 0"):
         topic_c2.check_coordinates("HEAD")
+
+
+def test_server_coordinate_check_uses_the_server_repository(monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(topic_c2, "_cited_lines", lambda: {"main.py": {9999}})
+
+    def run(args, **_kwargs):
+        calls.append(args)
+        return "app/main.py\n" if "--name-only" in args else "@@ -10,0 +11,3 @@\n"
+
+    monkeypatch.setattr(topic_c2, "_run", run)
+    warnings = topic_c2.check_server_coordinates(OLD, NEW)
+    assert warnings and warnings[0].startswith("server:app/main.py:")
+    assert all(args[2] == str(topic_c2.REPO) for args in calls)
 
 
 # --------------------------------------------------------- 복합 C2 안전 경계
@@ -450,6 +522,34 @@ def test_c2_runs_all_steps_and_post_write_verification(monkeypatch, tmp_path):
 
     topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex")
     assert events == ["pin", "refresh", "seal", "verify"]
+
+
+def test_c2_advances_server_and_ios_in_one_rollback_boundary(monkeypatch, tmp_path):
+    target = tmp_path / "tracked"
+    target.write_text("before")
+    server_new = "c" * 40
+    events: list[str] = []
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "current_server_pin", lambda: "d" * 40)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: [])
+    monkeypatch.setattr(topic_c2, "check_server_coordinates", lambda *_a, **_k: [])
+    monkeypatch.setattr(topic_c2, "_c2_mutation_paths", lambda *_old: [target])
+    monkeypatch.setattr(topic_c2, "advance_server_pin", lambda _new: events.append("server-pin"))
+    monkeypatch.setattr(topic_c2, "advance_pin", lambda _new: events.append("ios-pin"))
+    monkeypatch.setattr(topic_c2, "refresh_chain", lambda: events.append("refresh"))
+    monkeypatch.setattr(topic_c2, "seal_epoch", lambda *_a, **_k: events.append("seal"))
+    monkeypatch.setattr(topic_c2, "verify_gates", lambda: events.append("verify"))
+
+    topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex", server=server_new)
+    assert events == ["server-pin", "ios-pin", "refresh", "seal", "verify"]
+
+
+def test_coords_rederived_is_rejected_without_a_coordinate_warning(monkeypatch):
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "current_server_pin", lambda: "d" * 40)
+    monkeypatch.setattr(topic_c2, "check_coordinates", lambda *_a, **_k: [])
+    with pytest.raises(topic_c2.C2Error, match="좌표 경고가 0건"):
+        topic_c2.run_c2(NEW, "Claude Code", "OpenAI Codex", coords_rederived=True)
 
 
 def test_c2_restores_original_bytes_when_post_write_verification_fails(monkeypatch, tmp_path):

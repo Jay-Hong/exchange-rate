@@ -47,6 +47,15 @@ def clones(tmp_path):
     server, ios = tmp_path / "server", tmp_path / "ios"
     for source, destination in ((REPO, server), (topic_c2.IOS_ROOT, ios)):
         _git("clone", "-q", "--no-hardlinks", str(source), str(destination), cwd=tmp_path)
+    # Runtime commits can legitimately be ahead of the last C2 epoch while this test runs. Start from
+    # the commit that authored the current lock, then place iOS at that lock's pin so the sentinel is
+    # the only code-range change under test.
+    canonical_head = _git(
+        "log", "-1", "--format=%H", "--", "spec/topic-only.lock.json", cwd=server,
+    ).strip()
+    _git("checkout", "-q", canonical_head, cwd=server)
+    pinned = json.loads((server / "spec/topic-only.lock.json").read_text())["pinned_commit"]
+    _git("checkout", "-q", pinned["ios"], cwd=ios)
     # 작업트리의 **현재** 도구를 복제본에 들여온다 — 커밋된 판이 아니라 지금 판을 시험한다.
     for relative in ("scripts/topic_c2.py", "tests/test_topic_c2.py"):
         (server / relative).write_bytes((REPO / relative).read_bytes())
@@ -71,6 +80,15 @@ def _new_ios_commit_above_citations(ios: pathlib.Path) -> str:
     _git("add", "-A", cwd=ios)
     _git(*GIT_IDENTITY, "commit", "-q", "-m", "test: C2 coordinate shift", cwd=ios)
     return _git("rev-parse", "HEAD", cwd=ios).strip()
+
+
+def _new_server_commit_without_citations(server: pathlib.Path) -> str:
+    """Create a server pin target without changing any cited path."""
+    sentinel = server / "tests" / "c2_server_pin_sentinel.txt"
+    sentinel.write_text("server pin integration sentinel\n")
+    _git("add", str(sentinel.relative_to(server)), cwd=server)
+    _git(*GIT_IDENTITY, "commit", "-q", "-m", "test: server pin integration sentinel", cwd=server)
+    return _git("rev-parse", "HEAD", cwd=server).strip()
 
 
 def _append_prose(server: pathlib.Path) -> None:
@@ -137,6 +155,23 @@ def test_real_composite_c2_moves_the_whole_chain(clones):
         (server / "tests/test_topic_only_semantic_review.py").read_text(), source="clone history",
     )
     assert history[-1][0] == sequence and history[-1][2] == markers[0].split(":")[3]
+
+
+def test_real_composite_c2_advances_server_and_ios_together(clones):
+    """Server runtime changes must be pinned inside the same atomic C2 transaction."""
+    server, ios = clones
+    new_server_pin = _new_server_commit_without_citations(server)
+    new_ios_pin = _new_ios_commit_below_citations(ios)
+    _append_prose(server)
+
+    result = _cli(
+        server, ios, "c2", "--server", new_server_pin, "--ios", new_ios_pin,
+        "--author", "Claude Code", "--reviewer", "OpenAI Codex",
+    )
+    assert result.returncode == 0, f"server+iOS 복합 C2 실패:\n{result.stdout}{result.stderr}"
+    for name in ("topic-only.lock.json", "topic-only-migration-manifest.json"):
+        pinned = json.loads((server / "spec" / name).read_text())["pinned_commit"]
+        assert pinned == {"server": new_server_pin, "ios": new_ios_pin}
 
 
 def test_real_composite_c2_aborts_before_writes_on_coordinate_warning(clones):
