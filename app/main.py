@@ -622,18 +622,23 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(refresh_write_mode_cache)
         await warmup_latest_rates()
 
-    # ADR-038 — KRX 게이트(G2/G3) flip 시 구 그래프 payload(krx 포함/미포함) 잔존 방지:
-    # 테더 탭 graph v2 캐시를 startup에서 무조건 DEL (env 변경 = force-recreate 전제라
-    # 이 지점이 flip 직후 유일한 훅. 방향 무관 안전 + rebuild 저렴[다음 요청/cron ≤22 SELECT]).
+    # GraphV2 캐시는 KRX 포함 superset만 저장하고 사용자별 결과는 응답 직전에 필터한다. 구 subset
+    # 네임스페이스와 새 superset 키를 함께 지워 배포/flag flip 뒤 캐시 선점 순서 영향을 없앤다.
     try:
+        from app.graph_v2_intraday import cache_key, cache_key_1d_in_progress
+
         await redis_cache.delete(
             "graph_v2:tab:tether:1d", "graph_v2:tab:tether:1d:in_progress",
             "graph_v2:tab:tether:1w", "graph_v2:tab:tether:3m", "graph_v2:tab:tether:1y",
-            # ADR-038 D4 ② — usd 탭도 krx 시리즈 편입: gate flip/시리즈 구성 변경 잔존 방어
             "graph_v2:tab:usd:1d", "graph_v2:tab:usd:1d:in_progress",
             "graph_v2:tab:usd:1w", "graph_v2:tab:usd:3m", "graph_v2:tab:usd:1y",
+            *(
+                [cache_key(tab, period) for tab in ("tether", "usd")
+                 for period in ("1d", "1w", "3m", "1y")]
+                + [cache_key_1d_in_progress(tab) for tab in ("tether", "usd")]
+            ),
         )
-        logger.info("🧹 테더/달러 graph v2 캐시 초기화 (ADR-038 KRX gate 정합)")
+        logger.info("🧹 테더/달러 GraphV2 subset/superset 캐시 초기화")
     except Exception as cache_e:  # 캐시 DEL 실패는 비치명 (TTL 자연 만료로 수렴)
         logger.warning(f"테더 graph 캐시 초기화 실패 (비치명): {cache_e}")
 
@@ -2817,11 +2822,52 @@ async def _get_period_graph_data(currency: str, period: str):
 #   v1 /api/graph/{currency}는 변경 0 (legacy 공존, GRAPH §12). cache(§11)는 후속 optional.
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def _resolve_graph_v2_krx_visible(request: Request) -> bool:
+    """GraphV2 접근 판정: Firebase + premium, KRX는 G3 ∧ G2 ∧ G1까지 추가."""
+    try:
+        user_id = await verify_firebase_token(request)
+        premium_active = await require_premium(user_id, allow_empty=False)
+    except HTTPException as exc:
+        headers = dict(exc.headers or {})
+        headers["Cache-Control"] = "private, no-store"
+        exc.headers = headers
+        raise
+
+    # 전역 KRX 게이트가 닫혀 있으면 DB entitlement 조회가 결과를 바꿀 수 없다.
+    if not entitlements.krx_gates_open():
+        return False
+
+    def _compute() -> bool:
+        db = SessionLocal()
+        try:
+            return entitlements.compute_krx_visible(db, user_id, premium_active)
+        finally:
+            db.close()
+
+    try:
+        return await asyncio.to_thread(_compute)
+    except TRANSIENT_DB_ERRORS as exc:
+        if not is_transient_db_error(exc):
+            raise
+        logger.exception(
+            "graph_v2 KRX entitlement DB 순단 — 503",
+            extra={"event": "graph_v2_entitlement_db_unavailable"},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Entitlement status temporarily unavailable",
+            headers={"Cache-Control": "private, no-store"},
+        ) from exc
+
+
 @app.get("/api/v2/graph/catalog")
-async def get_v2_graph_catalog():
-    """전체 catalog (tab × period × series). MVP = 3m/1y subset. DB 불필요 (정적 상수)."""
+async def get_v2_graph_catalog(request: Request, response: Response):
+    """인증된 premium 사용자의 catalog. KRX 존재 여부도 사용자별로 결정한다."""
     from app.graph_v2 import build_catalog
-    return build_catalog()
+
+    response.headers["Cache-Control"] = "private, no-store"
+    krx_visible = await _resolve_graph_v2_krx_visible(request)
+    return build_catalog(krx_visible=krx_visible)
 
 
 # v2 graph tab read-through 캐시 TTL(초) — 데이터 변경주기(1w 시간/3m·1y 하루)보다 짧게(보수적 시작).
@@ -2898,7 +2944,7 @@ async def _get_intraday_1d_closed(tab: str) -> dict:
                     return payload
             except (ValueError, TypeError):
                 pass
-        payload = await asyncio.to_thread(build_tab_1d_payload, tab)
+        payload = await asyncio.to_thread(build_tab_1d_payload, tab, krx_visible=True)
         await redis_cache.set(cache_key, json.dumps(payload), ex=CACHE_TTL_SECONDS)
         return payload
 
@@ -2921,7 +2967,7 @@ async def _get_intraday_1d_in_progress(tab: str) -> dict:
             cached = await redis_cache.get(cache_key)
             if cached is not None:
                 return json.loads(cached)
-            seed = await asyncio.to_thread(build_tab_1d_in_progress, tab)
+            seed = await asyncio.to_thread(build_tab_1d_in_progress, tab, krx_visible=True)
             await redis_cache.set(cache_key, json.dumps(seed), ex=IN_PROGRESS_TTL_SECONDS)
             return seed
     except Exception:
@@ -2930,7 +2976,7 @@ async def _get_intraday_1d_in_progress(tab: str) -> dict:
 
 
 @app.get("/api/v2/graph/tab")
-async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
+async def get_v2_graph_tab(request: Request, response: Response, tab: str, period: str = "3m"):
     """탭×기간 모든 series 데이터. period∈{3m,1y,1w} = source_daily/hourly_rates read-through.
     period=1d = intraday 탭(테더+usd/jpy/eur) 10min closed-bucket precompute(graph_v2_intraday)."""
     from app.graph_v2 import (
@@ -2948,10 +2994,11 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
     # URLCache가 cache 헤더 없는 200 GET을 휴리스틱 캐싱해 cold-launch에 직전 세션 그래프를 ~2-3분
     # 내주던 문제(닫힌 봉+seed 둘 다 지연) 대응. 속도는 서버 Redis 캐시가 담당(클라 캐시 불필요).
     # 성공(dict) 응답에만 적용(에러 JSONResponse는 자체 반환이라 미적용, 무해).
-    response.headers["Cache-Control"] = "no-store"
+    response.headers["Cache-Control"] = "private, no-store"
+    krx_visible = await _resolve_graph_v2_krx_visible(request)
 
     if tab not in known_tabs():
-        return JSONResponse(status_code=404, content={
+        return JSONResponse(status_code=404, headers={"Cache-Control": "private, no-store"}, content={
             "error": "unknown_tab",
             "detail": f"tab '{tab}' not found",
             "known_tabs": known_tabs(),
@@ -2965,7 +3012,7 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
         from app.graph_v2_intraday import INTRADAY_TABS
 
         if tab not in INTRADAY_TABS:
-            return JSONResponse(status_code=400, content={
+            return JSONResponse(status_code=400, headers={"Cache-Control": "private, no-store"}, content={
                 "error": "unsupported_period",
                 "detail": f"period '1d' is not supported for tab '{tab}' in Graph API v2",
                 "supported_periods": list(MVP_PERIODS),
@@ -2976,12 +3023,14 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             })
         payload = await _serve_intraday_1d_cached(tab)
     elif is_supported_period(period):
-        # read-through Redis cache (graph_v2:tab:{tab}:{period}) — 동일 tab×period는 사용자 공통 +
+        # read-through Redis superset cache — 동일 tab×period는 사용자 공통 +
         # daily/hourly 저빈도 변경이라 캐시 효율 높음. Redis 장애/circuit-open 시 get None → miss →
         # DB build로 자동 fallback (cache.py Circuit Breaker). live-tail은 client-side(topic)라 캐시가
         # stale해도 그래프 끝 현재값엔 영향 없음. TTL-only(cron 무효화 없음). 404/400은 위에서 bypass.
         # ⚠️ Redis에 굽는 건 domain 없는 원본만(캐시 date-less이라 자정 넘어 hit해도 stale domain 방지) — domain은 아래 serve-time attach.
-        cache_key = f"graph_v2:tab:{tab}:{period}"
+        from app.graph_v2_intraday import cache_key as graph_v2_cache_key
+
+        cache_key = graph_v2_cache_key(tab, period)
         cached = await redis_cache.get(cache_key)
         payload = None
         if cached is not None:
@@ -3004,7 +3053,9 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
                     # **같은 anchor 날짜**로 고정. 미전달 시 build_tab이 자체 datetime.now()를 재호출 → 요청이
                     # KST 자정을 가로지르면 domain frameStart와 data start가 1일 어긋나 carry_in seed가 backdated
                     # (codex blocker). 캐시-hit-stale 경우는 client `first.ts > frameStart` 가드가 seed 스킵해 안전.
-                    return build_tab(db, tab, period, today_kst=anchor.date())
+                    return build_tab(
+                        db, tab, period, today_kst=anchor.date(), krx_visible=True
+                    )
                 finally:
                     db.close()
 
@@ -3014,7 +3065,7 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
             )
     else:
         # MVP 범위 밖 — insufficient_history 아님, 명시적 미지원 + v1 fallback hint
-        return JSONResponse(status_code=400, content={
+        return JSONResponse(status_code=400, headers={"Cache-Control": "private, no-store"}, content={
             "error": "unsupported_period",
             "detail": f"period '{period}' is not in Graph API v2 MVP scope",
             "supported_periods": list(MVP_PERIODS),
@@ -3026,7 +3077,7 @@ async def get_v2_graph_tab(tab: str, response: Response, period: str = "3m"):
 
     # serve-time KRX fail-closed — 캐시 hit은 build 필터를 안 거치므로 여기서 한 번 더 (ADR-039 §6.1).
     # 이 지점이 1d/캐시-hit/캐시-miss 3경로 공통 exit이라 우회 경로가 없다.
-    payload = strip_krx_if_not_allowed(payload)
+    payload = strip_krx_if_not_allowed(payload, krx_visible=krx_visible)
     # serve-time domain 부착(metadata) — 캐시 원본 불변(위 set은 원본만), copy에만. 1d/캐시-hit/캐시-miss 3경로 공통.
     return attach_graph_v2_domain(payload, period_domain(period, anchor))
 

@@ -588,9 +588,19 @@ def coordinate_findings(cited_lines: set[int],
     """
     if not cited_lines:
         return False, False
-    top = max(cited_lines)
-    shifted = any(old_len != new_len and old_start <= top
-                  for old_start, old_len, _new_start, new_len in hunks)
+    # **인용별 누적 delta** 로 판정한다. "줄 수가 바뀐 hunk 가 최대 인용행 위에 하나라도 있으면 밀림"
+    # 은 과잉이다 — 위쪽에서 -1 과 +1 이 상쇄되면 아래 인용은 **한 줄도 안 움직인다**(실측 false
+    # positive 2번째 형태. 첫 번째는 1:1 치환이었다).
+    # hunk 가 인용 L 보다 **완전히 위**일 때만 L 을 민다: old_start + max(old_len,1) <= L.
+    # (순수 삽입 `@@ -10,0 +11,3 @@` 은 옛 10행 **뒤**라 11행부터 민다 → max(old_len,1)=1 로 맞는다.)
+    def shift_at(line: int) -> int:
+        return sum(
+            new_len - old_len
+            for old_start, old_len, _new_start, new_len in hunks
+            if old_start + max(old_len, 1) <= line
+        )
+
+    shifted = any(shift_at(line) != 0 for line in cited_lines)
     touched = any(
         old_len > 0 and any(old_start <= line < old_start + old_len for line in cited_lines)
         for old_start, old_len, _new_start, _new_len in hunks

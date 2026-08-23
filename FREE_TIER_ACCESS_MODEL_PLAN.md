@@ -24,8 +24,8 @@
 | `/ws` legacy `type:rates` | iOS ✅ / Android ✅([WebSocketService.kt:177]) | B | 무인증 |
 | `/api/graph/{currency}` | iOS ❌(dead-runtime) / Android ✅([FXiApiService.kt:28]) | B | 무인증 |
 | `/api/v2/topics/snapshot` | iOS ✅ / **Android ❌** | **A** | ✅ **인증+premium+per-user KRX (E3, 2026-07-25)** |
-| `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | 🔴 **무인증 잔여** — §3.1 아래 경고 |
-| topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | 🟡 **서버 인증 land**(1C `4a45173` — 토큰 검증 + UID 결속 + KRX per-user + lease publish gate). prod flag OFF, 활성화 GO 대기 |
+| `/api/v2/graph/tab` · `/api/v2/graph/catalog` | iOS ✅ / **Android ❌** | **A** | 🟡 **Firebase+premium+per-user KRX 및 iOS Bearer 구현·로컬 검증 완료(2026-08-23), 커밋·배포 전** |
+| topic WS (`/ws` subscribe) | iOS ✅ / **Android ❌** | **A** | ✅ **인증 강제 + prod dispatcher ON**(1C 토큰·UID·KRX per-user·lease, 2026-08-22 활성화) |
 | `/api/news` | iOS·Android | §7 S2 | 무인증 |
 
 > ⚠️ **Android = 완전 legacy**(v2 grep 0건). 운영 v1.2.2 실사용은 §5 측정.
@@ -162,17 +162,17 @@
 6. **TestFlight/내부 테스트**(양 플랫폼): 로그인·무료·구독·재연결·토큰 만료·KRX entitlement grant/revoke.
 7. **Stage A enforcement ON** + 재검증 후 출시.
 
-### 6.1 KRX 관련 flag는 **둘**이고, 무인증 graph의 KRX는 **flag가 아니라 파라미터**다 (2026-07-26 확정)
+### 6.1 KRX 관련 flag는 **둘**이고, GraphV2의 KRX는 **flag가 아니라 사용자별 판정**이다
 
 | flag | 여는 표면 | 선행 조건 | 상태 |
 |---|---|---|---|
-| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | ① **E3 REST twin 게이트** ✅ land(2026-07-25) ② **1C WS 인증** ✅ land(서버 `4a45173` + 클라 lease 소비·request timeout·구매 복구, 2026-08-02~03) ③ **iOS bootstrap 3종 인증 이관** ✅ land(2026-07-26 `4cb050f`) ④ **entitlement 조회 실패 503** ✅ land(2026-07-26) → **기능 선행조건 4/4 충족.** ⛔ 그러나 **여기서 끝이 아니다** — §자원 상한의 **열린 항목 1건**(**nginx 관측·상한 결정**)이 남아 있고 (~~`W` 확정~~ **✅ 2026-08-05 W=4 확정**, executor 구현은 그 전에 land), 그 뒤에도 **활성화 실행 절차**(서버 flag → prod smoke → `TOPIC_V2_RELEASE_ON` Release arming → phased rollout)가 남는다 | 🔴 false |
+| `TOPIC_DISPATCHER_ENABLED` | topic WS subscribe + `/api/v2/topics/snapshot` | E3 REST twin · 1C WS 인증 · iOS bootstrap 인증 · entitlement 503 · W=4 · canary · smoke | 🟢 **true** (2026-08-22 영구 ON, smoke 13/13) |
 | `KRX_CLIENT_DISTRIBUTION_ENABLED`<br>(= G2, `KRX_FUTURES_ENABLED`와 AND) | KRX topic 발행/snapshot, KRX 알림 게이트 | 없음(topic 쪽은 E3+1C가 담당) | 🔴 false |
 
-**무인증 graph v2(`/api/v2/graph/tab`·`/catalog`)의 krx.\* series는 어떤 flag로도 열리지 않는다.**
-`_effective_tab_series` / `tab_1d_specs` / `build_catalog` / `build_tab` 등이 **호출자가 넘기는
-`krx_visible: bool = False`**로 결정한다. 이 endpoint들엔 인증이 없어 넘길 사용자가 없으므로
-실제 호출자는 항상 default(False)를 쓴다.
+GraphV2(`/api/v2/graph/tab`·`/catalog`)는 Firebase+premium 인증 뒤
+`compute_krx_visible = premium ∧ G3 ∧ G2 ∧ G1`을 사용자별로 계산한다. 승인 없는 사용자는
+`krx.*` series 자체가 없는 catalog/tab을 받는다(잠금 UI가 아니라 **존재 숨김**). 직접 호출의
+`krx_visible` 기본값은 계속 `False`라 endpoint 밖에서도 fail-closed다.
 
 - **왜 env flag가 아닌가** (2026-07-26, codex 2R 수렴): 초안은 `KRX_GRAPH_ALLOW_UNAUTHENTICATED_EXPOSURE`
   라는 default-false 승인 flag였다. 그러나 그 flag의 **유일한 용도가 §3.2 위반 상태를 켜는 것**이라,
@@ -183,30 +183,21 @@
   Open 2 + D4, GRAPH_API_V2_CONTRACT §3/§4). 파라미터 default를 False로 두면 노출은 닫히고
   계약은 코드·테스트에 남는다.
 
-  ⚠️ **"판정만 넘기면 끝"은 아니다** (2026-07-26 정정, codex): graph 응답은 **사용자 공통 Redis 키**
-  (`graph_v2:tab:{tab}:{period}`)를 쓰고 1d precompute도 `krx_visible` 기본값으로 굽는다. 판정만
-  endpoint에 흘리면 **캐시 내용이 "누가 먼저 요청했는가"에 좌우된다** — 비인가 요청이 먼저 캐시를
-  만들면 entitled 사용자도 KRX를 못 받고(1d precompute는 아예 KRX 없이 구워져 필터를 풀어도 복원 안 됨),
-  반대 순서면 비인가 응답은 serve-time strip으로 안전하지만 캐시가 최초 요청에 의존한다.
+  **2026-08-23 구현(로컬 검증 완료, 아직 미커밋·미배포)**:
+  ① `/api/v2/graph/tab`·`/catalog` Firebase+premium 인증과 사용자별 G1 판정
+  ② 새 namespace의 **KRX 포함 superset 캐시** + 응답 직전 사용자별 필터
+     (개인화 결과를 공용 키에 재캐시하지 않음)
+  ③ 1d closed/in-progress cron·miss rebuild도 `krx_visible=True` superset으로 생성
+  ④ 정상적인 미승인 제거 로그를 WARNING에서 debug로 격하
+  ⑤ iOS GraphV2 호출을 `AuthedRESTTransport`로 이관(Bearer + 401 safe-read replay)
 
-  **per-user 게이트 slice가 실제로 해야 할 일**:
-  ① `/api/v2/graph/tab`·`/catalog`에 **인증 추가**(현재 무인증이라 넘길 사용자 자체가 없다)
-  ② **캐시 전략** — §3.1이 이미 처방한 대로 **superset 캐시(krx 포함) + serve-time per-user 필터**
-     (개인화 결과를 공용 키에 재캐시 금지). 대안인 visibility별 캐시 키 분리는 키·precompute가 2배.
-  ③ 1d **precompute도 superset**으로 굽기(현재 default False)
-  ④ WARNING(`graph_v2_krx_stripped`) → debug 격하 (superset에선 제거가 정상 동작)
-  ⑤ catalog는 서버 Redis 캐시가 없어 ①만 하면 되지만, 무인증인 한 per-user가 불가능한 건 동일
-
-  **현재 subset 캐시는 §3.1 처방과 의도적으로 다르다**(더 엄격한 쪽): 오늘은 graph KRX를 볼
-  legitimate 소비자가 0이라 **캐시에 KRX를 아예 넣지 않는 쪽**이 fail-closed다. superset은
-  serve-time 필터를 load-bearing으로 만들므로, 그 전환은 위 slice에서 필터가 실증된 뒤에 한다.
-- **guard는 2중이다**: build 경로(series accessor)만 막으면 **캐시 hit이 우회한다**
-  (`/api/v2/graph/tab`은 Redis read-through라 hit 시 build를 안 거치고, 과거에 krx가 포함된 채
-  구워진 payload가 TTL[최대 30분] 살아 있으며 startup DEL은 예외를 비치명으로 흡수한다 —
-  codex Major, 실제 probe로 재현). → 3경로(장기 hit / 1d closed / 1d in_progress) **공통 exit**에
-  serve-time `strip_krx_if_not_allowed(payload, krx_visible=False)`: `series` 리스트 +
-  `in_progress` seed 두 shape를 copy-on-write로 훑고, 제거가 실제로 일어나면
-  WARNING(`graph_v2_krx_stripped`)으로 캐시 잔존을 관측 가능하게 한다.
+  로컬 검증은 서버 전체 `5804 passed`·iOS 전체 `801 passed`·arming-on Release Archive PASS다.
+  운영 G2는 계속 OFF이며, 코드 배포와 승인/미승인/비구독 실서버 매트릭스 전에는 켜지 않는다.
+- **guard는 2중이다**: build/precompute는 KRX 포함 superset을 만들고, 3경로(장기 hit / 1d closed /
+  1d in_progress)의 **공통 exit**에서 `strip_krx_if_not_allowed(payload, krx_visible=...)`가
+  `series`와 `in_progress`를 copy-on-write로 필터한다. 개인화 결과는 공용 Redis에 쓰지 않는다.
+  미승인 제거는 정상 동작이라 `graph_v2_krx_stripped`는 debug이고, startup은 구 subset과 새 superset
+  namespace를 함께 지워 배포 전환 시 잔존 캐시를 제거한다.
 - **startup fail-fast는 기각**: CLAUDE.md "KRX optional source — baseline은 KRX 없이 항상 정상 동작"
   위반이고, 단일 인스턴스라 KRX **설정** 하나로 전면 장애가 된다. 노출되는 건 선물 가격 시계열
   (개인정보 아님)이라 서비스 중단과 균형이 맞지 않는다. → 해당 표면만 serve-time fail-closed.
@@ -682,7 +673,7 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
   | ③ **W 확정** | 측정 결과로 `W` 와 조정·rollback **숫자 기준**을 기록. | OFF | ✅ `W=4` 확정 |
   | ④ **Release GO(결정)** | 세 잔여 위험(IP별 `limit_conn` 미구현 · 만료 lease 의 stale registry 비용 · 연결 내부 `subscribe` 남용)을 명시 수용. 런북 §2-d 에 기록. | OFF | ✅ 2026-08-21 |
   | ⑤ **인증 bounded E2E canary** | 런북 §2-e — **dispatcher 만** 유계 ON 후 자동 OFF 수렴. 익명 침묵 · 비구독 `premium_required` · 구독자 snapshot 을 실제 wire 로 증명. | OFF (계속 OFF) | ✅ 2026-08-22 (`6a1ec65`, watchdog `DONE`·최종 `OFF`) |
-  | ⑥ **활성화** | 서버 영구 flag ON(런북 3) → **smoke 통과**(런북 4) → arming → phased release. ⚠️ flag ON 구간에도 arming 은 계속 OFF 다. | OFF → ON (smoke 통과 후) | 🟡 서버 ON·자동 재활성화 통과 (나머지 smoke 진행 중) |
+  | ⑥ **활성화** | 서버 영구 flag ON(런북 3) → **smoke 통과**(런북 4) → arming → phased release. | OFF → ON | ✅ 서버 ON · smoke 13/13 · arming ON (phased release 전) |
 
   ⚠️ **부하 공급원을 반드시 정한다** — Release 앱이 OFF 인 동안에는 **자연 인증 트래픽이 거의 없다**.
   DEBUG 기기 몇 대인지, 별도 부하 도구인지, 몇 연결 × 몇 초인지 정하지 않으면 canary 는 아무것도
@@ -1344,7 +1335,8 @@ timeout 두 축을 넣으면서 **자원 상한**을 판정했는데, 그때 두
 - [x] iOS·Android 공통 client-version metadata + nginx 로깅 (step 2 land 2026-07-17: server `55ab1d8` / iOS `1b736f2` / Android `5f93409`. 데이터는 신규 앱 release 후 생성 — nginx deploy/reload + 실 로그 cp/cv/cb 확인 별도).
 - [x] hourly endpoint(인증만, **KRX 제외**, self-describing) + 매시간 계약(§4.2) — **step 3 land + 배포 2026-07-17** (app/free_snapshot.py + GET /api/v2/free/snapshot, MVP=usd·1d/1w/3m/1y). workflow 설계+adversarial + **codex MCP 다라운드**: B1~B4/N5/N6/NB → **freshness 불변식(serve canonical-only, DB 재생성 제거)** → validator Pydantic 스키마. **2026-07-18 HH:30 basis 개정(§4.2)**: as_of=마지막 HH:30 + `timestamp <= as_of` cutoff 쿼리 불변식(fetch_rate_entries_until + build_tab_1d_payload now_kst 주입) + cron :30 — 구 :00 floor의 라벨↔데이터 mismatch(사용자 실측) 해소. **S6 결정=(a) 24h hard cutoff(2026-07-21) — 서버+iOS 구현 완료(dev-side)**: 구 비결정 혼합(process-local 무기한 + Redis 25h TTL)을 (now-as_of)>=24h 렌더 거부로 일관화. **서버**(d9e60ab: `is_snapshot_too_stale` per-candidate age, stale Redis가 fresh local 안 덮음). **iOS**(7050bd3: `LoadState.unavailable` + isTooStale age>=24h[future asOf는 clock-skew 허용] + current/displayData gated[sticky 포함] + **fetch-독립 expiryTask**로 SwiftUI 시간-미관찰 in-flight 만료 공백까지 폐쇄 + 뷰 전파. codex Blocker/High/Medium 0). 실사용자 노출은 App Store 배포 후. iOS USD reference slice land(987d161). **FX 3탭 확장(2026-07-21)**: `FREE_SNAPSHOT_TABS=("usd","jpy","eur")` — jpy/eur는 usd와 동일 코드 경로(bank/investing rate reader + source_daily/hourly canonical + 1d intraday) 재사용, `TAB_ASSET`만 차이(별도 reader 0). tether는 free reader가 source_rates(거래소 데이터) 미조회로 rate가 비어 N4(별도 reader) 전까지 제외. 프로덕션 read-only 실증(jpy/eur 4기간 non-empty·asset 정확·KRX-free) + 계약 테스트 +3 + **프로덕션 배포(acea749, 2026-07-21)**. **iOS 활성화 완료(step 4, 57f6648) — freeConfig switch(usd/jpy/eur)로 FX 3탭 실렌더 dev-side 활성(합성 시뮬 게이트 포함)**. **jpy/eur dev 기능 E2E PASS(사용자 dev 빌드 2026-07-21)**: 그래프 4기간/기본 토글 investing+hana/은행목록/알림 통화(jpy-krw·eur-krw)/KRX·DXY 미노출 + VM-hoist(News 왕복·인접 왕복 재요청 0, 3탭×4기간=12 GET 초기 warm만) 전부 확인. 실사용자 노출·트래픽 실측은 출시앱 배포(별도 GO) 이후.
 - [x] **테더 N4 (무료 테더 탭 백엔드 + iOS N4-4 + graph 하드닝)** — 무료 테더 rate는 grouped shape(`kind="source_grouped"`: `usdt_krw`[거래소 5] + `usd_krw_banks`[kb·hana] + `usd_krw_reference`[investing singleton], `primary_asset="usdt-krw"`)로 도입(FX는 flat `{asset,entries}` 그대로). **N4-1 land**(58b9d9c): `_assert_krx_free`가 FX shape(bank/currency)뿐 아니라 topic-native shape(source/asset)도 검사 → 테더 KRX(달러선물) 우회 차단. **N4-2a land**(grouped-aware validation 리팩터, codex Blocker/Medium 2라운드 반영): `_iter_rate_items`(shape 무관 순회 단일 진실소스)로 nonempty·within-as_of·precompute 카운트 통일 + rate.asset(grouped=primary_asset) grouped-aware + **3중 hybrid/KRX 방어** — (1) `_FreeRate`/`_FreeRateGrouped` `extra="forbid"`(반대 shape 컨테이너 키를 extra로 얹은 hybrid를 schema서 거부, 양방향) (2) `_assert_krx_free`가 `_iter_all_rate_dicts`로 entries+3그룹을 **kind 무관 동시 스캔**(hybrid가 반대 컨테이너에 KRX를 숨기는 우회 폐쇄, belt-and-suspenders) (3) `_GROUPED_RATE_TABS` **tab↔shape 결합**(grouped-USD/flat-tether 오염 canonical을 fail-closed 거부 → 구 FX client 깨진 200 회귀 차단). graph 절반은 코드 완료(tether series 정의 + `exclude_krx` 필터). **N4-2b land**(cutoff-aware grouped tether reader): 유료 토픽 grouper `build_tether_tab_payload`(정규화·정렬·investing singleton 무결성) 재사용 + cutoff fetcher만 신규 — `crud.get_source_rates_until`(source_rates cutoff 변형, `timestamp<=as_of`, rate_changed_at 미포함[정적 스냅샷]) + `free_snapshot.fetch_tether_grouped_rate_until`(거래소 5=source_rates / kb·hana·investing=usd-krw는 기존 FX cutoff reader 재사용 후 선별) → `build_free_snapshot_payload` tab 분기(tether=grouped / FX=flat). free↔paid shape 일치(iOS 단일 어댑터). dup-source/wrong-asset은 각 source explicit query라 자연 차단(entitlement 우회 아님, KRX는 조회 경로에 아예 없음 + `_assert_krx_free` belt-and-suspenders). codex 2라운드(N4-2a Blocker/Medium + N4-2b) 통과. **N4-3 land + 배포 + 프로덕션 verify**(08db271, 2026-07-22): `FREE_SNAPSHOT_TABS`에 tether 추가(precompute 순회 + endpoint 게이트 단일 진실소스 → 자동 활성) + build 분기 + serve tab↔shape 결합. codex 3라운드 통과. EC2 배포(build+force-recreate) 후 precompute 트리거 + Redis canonical 직접 검증 — **4기간(1d/1w/3m/1y) 전부 validate=True / kind=source_grouped / primary_asset=usdt-krw / as_of=HH:30 / stale=False / rate=거래소5(upbit·bithumb·coinone·korbit·gopax)+kb·hana+investing / KRX series·rate 0 / graph 실데이터 non-empty(1d 10/10 각 144pt · 장기 4/4)**. 서버 활성은 dormant(엔드포인트 auth-gated, 소비 client는 App Store 배포 후). 테스트 free_snapshot 72 passed / 전체 3604. **N4-4 land + dev E2E PASS(2026-07-22)**: iOS grouped adapter(FreeRate flat/grouped, kind-peek)/group-aware allowlist(KRX fail-closed)/코어 탭(source 바)/그래프(거래소 5토글·DXY↔선물 상호배타·구역 프리미엄 정합)/3 알림 preview(거래소 가격·김프·비교, no-persist + malformed-rate 크래시 가드)/라우팅(테더-first, 인증 게이트). **+ graph fail-closed 하드닝(codex 6라운드 Blocker 0)**: per-tab ID allowlist(4탭 카탈로그 1:1) + envelope 결합(assertEnvelope/decodeAndValidate behavioral) + content-level KRX guard(서버 `_assert_krx_free` graph + 클라 `hasKrxContaminatedPoint`, 4마커 대칭) — 서버 257a05d 배포·검증 / iOS 1cfa978·778d294·9c255eb. 실사용자 노출은 App Store 배포(TOPIC_V2 arming, 별도 GO) 후.
-- [ ] §3.1 매트릭스 + 캐시 G2∧G3 전역 → serve-time G1∧premium.
+- [x] §3.1 GraphV2 인증 + superset 캐시 + serve-time `premium ∧ G3 ∧ G2 ∧ G1` 구현·로컬 검증
+      (2026-08-23, 커밋·배포·실서버 권한 매트릭스는 별도).
 - [ ] iOS 4a~4d → Android 이식(REST interceptor 재사용).
 - [x] **E3 REST twin 게이트** — `GET /api/v2/topics/snapshot`에 인증+premium+per-user KRX 강제 (2026-07-25 서버 land,
       §8.1 E3). `TOPIC_DISPATCHER_ENABLED=true` 선행 조건. ~~잔여 = iOS bootstrap 3종 인증 이관~~

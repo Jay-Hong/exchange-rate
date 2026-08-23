@@ -8,7 +8,7 @@ conftest.py가 firebase stub + DATABASE_URL=sqlite를 import 전에 설정.
   - build_catalog: 테더 1d만 11 series, usd 등 다른 탭은 1d 미노출 (장기 5 series와 미혼합).
 """
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 from datetime import datetime, timedelta, timezone
 
 from app import models
@@ -25,6 +25,8 @@ from app.graph_v2_intraday import (
     _trim_in_progress,
     build_tab_1d_in_progress,
     build_tab_1d_payload,
+    cache_key_1d,
+    precompute_intraday_1d,
 )
 
 models.Base.metadata.create_all(engine)
@@ -33,11 +35,9 @@ models.Base.metadata.create_all(engine)
 
 # ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
 # 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
-# ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
-# 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
 # ADR-039 §6.1(2026-07-26): krx.* 포함 여부는 이제 **호출자가 넘기는 `krx_visible`**이 정한다
-# (default False). 무인증 endpoint는 항상 default를 쓰므로, 아래 테스트가 krx를 기대하는
-# 곳은 `krx_visible=True`를 명시한다 — 무인증 기본 동작은 tests/test_graph_v2_krx_exposure.py.
+# (default False). 아래 테스트가 승인 사용자 구성을 기대하는 곳은 `krx_visible=True`를 명시한다.
+# 미승인 응답의 기본 동작은 tests/test_graph_v2_krx_exposure.py에서 검증한다.
 _KRX_GATES_OPEN = patch.multiple("app.config",
                                  KRX_FUTURES_ENABLED=True,
                                  KRX_CLIENT_DISTRIBUTION_ENABLED=True)
@@ -203,7 +203,7 @@ class TestCatalog1dIsolation(unittest.TestCase):
         jpy/eur: 8 banks + investing — DXY 계열 미노출(§9:521).
 
         krx 포함 구성은 `krx_visible=True`(= per-user 게이트 land 후 entitled 사용자)에서 검증한다 —
-        무인증 endpoint의 기본(krx 제외) 구성은 tests/test_graph_v2_krx_exposure.py (ADR-039 §6.1)."""
+        미승인 사용자의 krx 제외 구성은 tests/test_graph_v2_krx_exposure.py (ADR-039 §6.1)."""
         catalog = build_catalog(krx_visible=True)
         tabs = {t["id"]: t for t in catalog["tabs"]}
 
@@ -238,6 +238,32 @@ class TestCatalog1dIsolation(unittest.TestCase):
                              [f"investing.{tab_id}", f"hana.{tab_id}"])
         # jpy/eur 장기(3m)는 investing+hana 2개 유지 (1d와 분리)
         self.assertEqual(len(tabs["jpy"]["periods"]["3m"]["all_series"]), 2)
+
+
+class TestPrecomputeSuperset(unittest.TestCase):
+
+    def test_cron_builds_every_tab_as_krx_superset(self):
+        """공용 1d cron 캐시는 승인 사용자에 맞춰 KRX 포함 payload를 굽는다."""
+        from app.graph_v2_intraday import CACHE_TTL_SECONDS, INTRADAY_TABS
+
+        redis_client = MagicMock()
+
+        def payload(tab, *, krx_visible):
+            self.assertTrue(krx_visible)
+            return {"tab": tab, "series": [{"id": f"series.{tab}"}]}
+
+        with patch("redis.from_url", return_value=redis_client), \
+             patch("app.graph_v2_intraday.build_tab_1d_payload", side_effect=payload) as build:
+            precompute_intraday_1d()
+
+        self.assertEqual(
+            build.call_args_list,
+            [call(tab, krx_visible=True) for tab in INTRADAY_TABS],
+        )
+        written = {args[0]: args[1:] for args, _kwargs in redis_client.setex.call_args_list}
+        self.assertEqual(set(written), {cache_key_1d(tab) for tab in INTRADAY_TABS})
+        self.assertTrue(all(ttl == CACHE_TTL_SECONDS for ttl, _payload in written.values()))
+        redis_client.close.assert_called_once_with()
 
     def test_default_visible_subset_of_all_series(self):
         """전 탭·전 period에서 default_visible ⊆ all_series (catalog 무결성)."""

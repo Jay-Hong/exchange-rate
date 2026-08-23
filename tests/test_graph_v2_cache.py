@@ -30,6 +30,14 @@ class TestGraphV2Cache(unittest.TestCase):
     def setUpClass(cls):
         # context manager 미사용 → lifespan(scheduler) 미진입
         cls.client = TestClient(app)
+        cls.access_patcher = patch(
+            "app.main._resolve_graph_v2_krx_visible", new=AsyncMock(return_value=False)
+        )
+        cls.access_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.access_patcher.stop()
 
     def test_cache_miss_builds_and_sets(self):
         """miss(get None) → build_tab 호출 + set(key/TTL) 호출."""
@@ -41,9 +49,10 @@ class TestGraphV2Cache(unittest.TestCase):
 
         self.assertEqual(r.status_code, 200)
         mbuild.assert_called_once()
+        self.assertTrue(mbuild.call_args.kwargs["krx_visible"])
         mset.assert_awaited_once()
         args, kwargs = mset.await_args
-        self.assertEqual(args[0], "graph_v2:tab:tether:3m")
+        self.assertEqual(args[0], "graph_v2:superset:v1:tab:tether:3m")
         self.assertEqual(kwargs.get("ex"), 1800)  # 3m TTL
 
     def test_cache_hit_skips_build(self):
@@ -69,6 +78,7 @@ class TestGraphV2Cache(unittest.TestCase):
 
         self.assertEqual(r.status_code, 200)
         mbuild.assert_called_once()
+        self.assertTrue(mbuild.call_args.kwargs["krx_visible"])
         mset.assert_awaited_once()
         args, kwargs = mset.await_args
         self.assertEqual(kwargs.get("ex"), 300)  # 1w TTL
@@ -95,9 +105,9 @@ class TestGraphV2Cache(unittest.TestCase):
         seed = {"bithumb.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
 
         def fake_get(key):
-            if key == "graph_v2:tab:tether:1d":
+            if key == "graph_v2:superset:v1:tab:tether:1d":
                 return json.dumps(closed)
-            if key == "graph_v2:tab:tether:1d:in_progress":
+            if key == "graph_v2:superset:v1:tab:tether:1d:in_progress":
                 return json.dumps(seed)
             return None
 
@@ -126,9 +136,9 @@ class TestGraphV2Cache(unittest.TestCase):
         seed = {"upbit.usdt-krw": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
 
         def fake_get(key):
-            if key == "graph_v2:tab:tether:1d":
+            if key == "graph_v2:superset:v1:tab:tether:1d":
                 return json.dumps(stale_closed)
-            if key == "graph_v2:tab:tether:1d:in_progress":
+            if key == "graph_v2:superset:v1:tab:tether:1d:in_progress":
                 return json.dumps(seed)
             return None
 
@@ -139,15 +149,15 @@ class TestGraphV2Cache(unittest.TestCase):
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)
-        mbuild.assert_called_once()   # stale 경계 → 온디맨드 rebuild
+        mbuild.assert_called_once_with("tether", krx_visible=True)
         self.assertEqual(r.json()["metadata"].get("rebuilt"), True)   # 캐시 아닌 rebuild 값 반환
         # closed rebuild set(TTL 1200) 포함
         set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
-        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d"), 1200)
+        self.assertEqual(set_ttl_by_key.get("graph_v2:superset:v1:tab:tether:1d"), 1200)
 
     def test_usd_1d_cache_miss_rebuilds_with_per_tab_key(self):
         """usd 1d(FX 탭 intraday 신규 지원) miss → build_tab_1d_payload('usd') 호출 + per-tab 캐시 키
-        (graph_v2:tab:usd:1d[,:in_progress]) SET — 테더와 키 분리 확인."""
+        (graph_v2:superset:v1:tab:usd:1d[,:in_progress]) SET — 테더와 키 분리 확인."""
         closed = {"tab": "usd", "period": "1d", "series": [], "metadata": {}}
         seed = {"kb.usd": {"bucket_start": "b", "high": 2.0, "low": 1.0, "close": 1.5, "sampled_at": "s"}}
         with patch("app.main.redis_cache.get", new=AsyncMock(return_value=None)), \
@@ -157,11 +167,11 @@ class TestGraphV2Cache(unittest.TestCase):
             r = self.client.get("/api/v2/graph/tab?tab=usd&period=1d")
 
         self.assertEqual(r.status_code, 200)
-        mbuild.assert_called_once_with("usd")
-        mseed.assert_called_once_with("usd")
+        mbuild.assert_called_once_with("usd", krx_visible=True)
+        mseed.assert_called_once_with("usd", krx_visible=True)
         set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
-        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:usd:1d"), 1200)
-        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:usd:1d:in_progress"), 15)
+        self.assertEqual(set_ttl_by_key.get("graph_v2:superset:v1:tab:usd:1d"), 1200)
+        self.assertEqual(set_ttl_by_key.get("graph_v2:superset:v1:tab:usd:1d:in_progress"), 15)
         self.assertEqual(r.json()["in_progress"], seed)
 
     def test_tether_1d_cache_miss_rebuilds_closed_and_in_progress(self):
@@ -176,12 +186,12 @@ class TestGraphV2Cache(unittest.TestCase):
             r = self.client.get("/api/v2/graph/tab?tab=tether&period=1d")
 
         self.assertEqual(r.status_code, 200)
-        mbuild.assert_called_once()
-        mseed.assert_called_once()
+        mbuild.assert_called_once_with("tether", krx_visible=True)
+        mseed.assert_called_once_with("tether", krx_visible=True)
         self.assertEqual(mset.await_count, 2)   # closed + in_progress
         set_ttl_by_key = {c.args[0]: c.kwargs.get("ex") for c in mset.await_args_list}
-        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d"), 1200)          # closed 안전망
-        self.assertEqual(set_ttl_by_key.get("graph_v2:tab:tether:1d:in_progress"), 15)  # seed short TTL
+        self.assertEqual(set_ttl_by_key.get("graph_v2:superset:v1:tab:tether:1d"), 1200)
+        self.assertEqual(set_ttl_by_key.get("graph_v2:superset:v1:tab:tether:1d:in_progress"), 15)
         self.assertEqual(r.json()["in_progress"], seed)
 
     def test_unknown_tab_bypasses_cache(self):

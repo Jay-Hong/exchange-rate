@@ -65,8 +65,8 @@ class _Base(unittest.TestCase):
 # ADR-038 — 이 모듈의 계약 테스트는 KRX 노출(게이트 오픈) 전제로 작성됨.
 # 게이트 닫힘(G2/G3 off) 동작은 tests/test_krx_entitlement_gate.py에서 별도 검증.
 # ADR-039 §6.1(2026-07-26): krx.* 포함 여부는 이제 **호출자가 넘기는 `krx_visible`**이 정한다
-# (default False). 무인증 endpoint는 항상 default를 쓰므로, 아래 테스트가 krx를 기대하는
-# 곳은 `krx_visible=True`를 명시한다 — 무인증 기본 동작은 tests/test_graph_v2_krx_exposure.py.
+# (default False). 아래 테스트가 승인 사용자 구성을 기대하는 곳은 `krx_visible=True`를 명시한다.
+# 미승인 기본 동작은 tests/test_graph_v2_krx_exposure.py에서 검증한다.
 _KRX_GATES_OPEN = patch.multiple("app.config",
                                  KRX_FUTURES_ENABLED=True,
                                  KRX_CLIENT_DISTRIBUTION_ENABLED=True)

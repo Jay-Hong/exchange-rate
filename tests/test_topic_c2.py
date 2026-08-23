@@ -354,6 +354,19 @@ def test_one_for_one_replacement_below_a_citation_does_not_shift():
     assert (shifted, touched) == (False, False)
 
 
+def test_offsetting_hunks_above_a_citation_do_not_shift_it():
+    """**거짓 경보 2번째 형태** — 위에서 -1 과 +1 이 상쇄되면 아래 인용은 한 줄도 안 움직인다."""
+    shifted, touched = topic_c2.coordinate_findings(
+        {148, 369}, [(10, 2, 10, 1), (14, 1, 13, 2)])
+    assert (shifted, touched) == (False, False)
+
+
+def test_offsetting_hunks_still_shift_a_citation_between_them():
+    """상쇄가 **끝나기 전** 구간의 인용은 실제로 밀린다 — 위 완화가 지나치지 않음을 보인다."""
+    shifted, _touched = topic_c2.coordinate_findings({12}, [(10, 2, 10, 1), (14, 1, 13, 2)])
+    assert shifted
+
+
 def test_insertion_above_a_citation_shifts():
     """앞 시험이 공허하지 않음을 보인다 — **줄 수가 바뀌면** 반드시 밀림으로 잡힌다."""
     cited = {313, 369}
@@ -367,9 +380,19 @@ def test_replacing_a_cited_line_is_reported_as_content_change_not_shift():
     assert (shifted, touched) == (False, True)
 
 
-def test_deleting_a_cited_line_is_both_shift_and_content_change():
+def test_deleting_a_cited_line_is_a_content_change_for_that_line():
+    """인용된 줄 자체가 삭제되면 그 줄에 대해서는 **내용 변경**이다(가리키던 것이 사라졌다).
+
+    밀림은 그 줄이 아니라 **아래 줄들**에 생긴다 — 다음 시험이 그쪽을 잡는다.
+    `run_c2` 는 둘 중 하나만 켜져도 중단하므로 판정 결과는 어느 쪽이든 치명이다.
+    """
     shifted, touched = topic_c2.coordinate_findings({369}, [(369, 1, 369, 0)])
-    assert shifted and touched
+    assert touched and not shifted
+
+
+def test_deleting_a_line_shifts_citations_below_it():
+    shifted, touched = topic_c2.coordinate_findings({400}, [(369, 1, 369, 0)])
+    assert shifted and not touched
 
 
 def test_append_below_every_citation_is_clean():

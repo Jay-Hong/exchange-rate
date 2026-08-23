@@ -1,15 +1,10 @@
-"""무인증 graph v2 표면의 KRX fail-closed 계약 (ADR-039 §3.1 / §6.1, 2026-07-26).
+"""인증된 GraphV2의 사용자별 KRX 존재 숨김 계약 (ADR-039 §3.1 / §6.1).
 
-`GET /api/v2/graph/tab`·`/catalog`은 **인증이 없는데** series 목록을 `krx_gates_open()`(G2∧G3)
-**만으로** 정했다. 즉 `KRX_CLIENT_DISTRIBUTION_ENABLED=true`로 되돌리는 순간 무인증 caller가
-KRX 그래프 series를 받았다 — E3가 REST twin에서 막은 것과 **같은 누수**가 sibling에 남아 있었다.
-
-현재 구조: krx.* 포함 여부는 **호출자가 넘기는 `krx_visible`(default False)**이 정한다.
-env flag가 아니다 — flag는 per-user 게이트를 만들지 않은 채 `.env` 한 줄로 §3.2 위반을 켤 수 있어
-기각했다. 이 endpoint들엔 인증이 없어 넘길 사용자가 없으므로 실제 호출자는 항상 default를 쓴다.
+공용 Redis에는 KRX 포함 superset만 저장하고, endpoint가 Firebase+premium+G3+G2+G1 판정을
+`krx_visible`로 전달해 응답 직전에 비승인 사용자의 KRX를 제거한다. 개인화 결과는 재캐시하지 않는다.
 
 이 파일이 잠그는 것:
-1. **전역 게이트를 열어도** 무인증 graph 표면에 `krx.*`가 나타나지 않는다(3m/1y/1w + 1d + catalog)
+1. **전역 게이트를 열어도** 미승인 premium 응답에 `krx.*`가 나타나지 않는다(3m/1y/1w + 1d + catalog)
 2. `krx_visible`을 받는 **모든** 함수의 default가 False + keyword-only
    (목록 하드코딩이 아니라 모듈에서 도출 — `test_every_krx_visible_function_defaults_to_hidden`)
 3. 내용 레벨 검사 — series 목록뿐 아니라 **응답 JSON 어디에도** 'krx' 문자열이 없다
@@ -39,11 +34,19 @@ def _gates_open():
     )
 
 
-class TestUnauthenticatedGraphKrxFailClosed(unittest.TestCase):
+class TestGraphKrxHiddenForUnapprovedPremium(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)
+        cls.access_patcher = patch(
+            "app.main._resolve_graph_v2_krx_visible", new=AsyncMock(return_value=False)
+        )
+        cls.access_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.access_patcher.stop()
 
     def test_gates_are_actually_open_in_fixture(self):
         """이 파일의 다른 테스트가 vacuous하지 않음을 보증 — 전역 게이트는 실제로 열려 있다."""
@@ -161,7 +164,7 @@ class TestCachedPayloadCannotBypassGate(unittest.TestCase):
         payload.update(extra or {})
         return json.dumps(payload)
 
-    def _get(self, period, cache_map, builders):
+    def _get(self, period, cache_map, builders, *, krx_visible=False):
         """Redis가 key별로 오염된 payload를 돌려주는 상황 — 빌더는 호출되지 않는다.
 
         ⚠️ key 무관 단일 반환값을 쓰면 1d의 `in_progress` 조회까지 같은 값을 받아
@@ -172,6 +175,8 @@ class TestCachedPayloadCannotBypassGate(unittest.TestCase):
 
         a, b = _gates_open()
         stack = [a, b,
+                 patch("app.main._resolve_graph_v2_krx_visible",
+                       new=AsyncMock(return_value=krx_visible)),
                  patch("app.main.redis_cache.get", new=_fake_get),
                  patch("app.main.redis_cache.set", new=AsyncMock(return_value=None))]
         spies = {}
@@ -191,7 +196,8 @@ class TestCachedPayloadCannotBypassGate(unittest.TestCase):
 
     def test_long_period_cached_krx_is_stripped_at_serve_time(self):
         r, spies = self._get(
-            "3m", {"graph_v2:tab:usd:3m": self._poisoned()}, ["app.graph_v2.build_tab"])
+            "3m", {"graph_v2:superset:v1:tab:usd:3m": self._poisoned()},
+            ["app.graph_v2.build_tab"])
         self.assertEqual(r.status_code, 200)
         # 캐시 hit 경로임을 보증(= 이 테스트가 vacuous하지 않음)
         spies["app.graph_v2.build_tab"].assert_not_called()
@@ -214,7 +220,8 @@ class TestCachedPayloadCannotBypassGate(unittest.TestCase):
         })
         r, spies = self._get(
             "1d",
-            {"graph_v2:tab:usd:1d": closed, "graph_v2:tab:usd:1d:in_progress": seed},
+            {"graph_v2:superset:v1:tab:usd:1d": closed,
+             "graph_v2:superset:v1:tab:usd:1d:in_progress": seed},
             ["app.graph_v2_intraday.build_tab_1d_payload",
              "app.graph_v2_intraday.build_tab_1d_in_progress"])
         self.assertEqual(r.status_code, 200)
@@ -224,6 +231,15 @@ class TestCachedPayloadCannotBypassGate(unittest.TestCase):
         self.assertNotIn("krx.usd-krw-futures", [s["id"] for s in body["series"]])
         self.assertIn("hana.usd", body["in_progress"])          # seed가 실제로 실렸고
         self.assertNotIn("krx.usd-krw-futures", body["in_progress"])  # krx만 빠졌다
+
+    def test_same_superset_cache_keeps_krx_for_approved_user(self):
+        r, spies = self._get(
+            "3m", {"graph_v2:superset:v1:tab:usd:3m": self._poisoned()},
+            ["app.graph_v2.build_tab"], krx_visible=True,
+        )
+        self.assertEqual(r.status_code, 200)
+        spies["app.graph_v2.build_tab"].assert_not_called()
+        self.assertIn("krx.usd-krw-futures", [s["id"] for s in r.json()["series"]])
 
     def test_strip_is_a_noop_for_entitled_callers(self):
         """대조군 — `krx_visible=True`면 필터가 걸리지 않는다(과잉 차단 아님).

@@ -27,6 +27,14 @@ class TestGraphV2Endpoints(unittest.TestCase):
     def setUpClass(cls):
         # context manager 미사용 → lifespan(scheduler) 미진입
         cls.client = TestClient(app)
+        cls.access_patcher = patch(
+            "app.main._resolve_graph_v2_krx_visible", new=AsyncMock(return_value=False)
+        )
+        cls.access_patcher.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.access_patcher.stop()
 
     def test_catalog_200(self):
         r = self.client.get("/api/v2/graph/catalog")
@@ -57,7 +65,7 @@ class TestGraphV2Endpoints(unittest.TestCase):
         self.assertNotIn("citi.usd", ids)
         self.assertNotIn("dxy_futures", ids)
         self.assertIn("in_progress", body)
-        self.assertEqual(r.headers.get("cache-control"), "no-store")
+        self.assertEqual(r.headers.get("cache-control"), "private, no-store")
 
     def test_tab_1w_200_hourly(self):
         # 1w 이제 지원 (hourly). 빈 DB → 200 + bucket_size 1h + insufficient.

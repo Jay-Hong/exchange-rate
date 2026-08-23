@@ -46,17 +46,25 @@ BUCKET_SECONDS = 600          # 10분봉
 WINDOW_HOURS = 24             # 1d = 최근 24시간
 
 
+GRAPH_V2_SUPERSET_CACHE_PREFIX = "graph_v2:superset:v1:tab"
+
+
+def cache_key(tab: str, period: str) -> str:
+    """승인 여부와 무관한 GraphV2 공용 superset 캐시 키."""
+    return f"{GRAPH_V2_SUPERSET_CACHE_PREFIX}:{tab}:{period}"
+
+
 def cache_key_1d(tab: str) -> str:
-    """탭별 1d closed payload 캐시 키."""
-    return f"graph_v2:tab:{tab}:1d"
+    """탭별 1d closed superset payload 캐시 키."""
+    return cache_key(tab, "1d")
 
 
 def cache_key_1d_in_progress(tab: str) -> str:
-    """탭별 진행 중(현재) 10분봉 seed 캐시 키 — closed와 별개 short-TTL cache-aside."""
-    return f"graph_v2:tab:{tab}:1d:in_progress"
+    """탭별 진행 중(현재) 10분봉 superset seed 캐시 키."""
+    return f"{cache_key_1d(tab)}:in_progress"
 
 
-# 테더 키 별칭 (per-tab helper 도입 전 상수 — 문자열 동일, 기존 참조 호환)
+# 테더 키 별칭 (기존 import 참조 호환; 실제 값은 새 superset namespace)
 CACHE_KEY_TETHER_1D = cache_key_1d("tether")
 CACHE_KEY_TETHER_1D_IN_PROGRESS = cache_key_1d_in_progress("tether")
 # cron */10이 신선도 책임 → TTL은 안전망(>10분). cron 사망 시 ~20분 후 만료 → miss rebuild로 자연 복구.
@@ -156,14 +164,11 @@ TAB_1D_DEFAULT_VISIBLE = {
 INTRADAY_TABS = tuple(TAB_1D_SERIES)
 
 
-# ADR-039 §3.1/§6.1 (2026-07-26) — 무인증 graph 표면의 krx.* 노출은 **호출자가 전달하는
-# per-user 판정**(`krx_visible`)에 달려 있다. env flag가 **아니다**: flag로 두면 per-user 게이트를
-# 만들지 않은 채 `.env` 한 줄로 §3.2 위반 상태를 켤 수 있다(codex 지적). 이 endpoint들엔 인증이
-# 없으므로 실제 호출자는 항상 default False를 쓰고, per-user 게이트가 land하면 그때 실제 판정을
-# 넘기면 된다 — 파라미터가 이미 자리에 있다.
+# ADR-039 §3.1/§6.1 — 공용 precompute는 KRX 포함 superset을 만들고, 인증 endpoint가 전달한
+# 사용자별 `krx_visible`은 serve-time 필터에만 사용한다. default False는 직접 호출도 fail-closed.
 
 def tab_1d_specs(tab: str, *, krx_visible: bool = False) -> list:
-    """탭 1d series spec 목록 — 무인증 표면이라 krx 계열은 fail-closed 제외 (ADR-039 §3.1).
+    """탭 1d series spec 목록 — 기본 호출에서는 krx 계열을 fail-closed 제외 (ADR-039 §3.1).
 
     build/precompute/in_progress 모든 경로가 이 accessor를 경유 → 게이트 일원화
     (import-time 상수 TAB_1D_SERIES는 전체 집합 유지 — catalog 쪽도 동일 필터 적용).
@@ -495,7 +500,8 @@ def precompute_intraday_1d() -> None:
     try:
         for tab in INTRADAY_TABS:
             try:
-                payload = build_tab_1d_payload(tab)
+                # 공용 캐시는 항상 KRX 포함 superset으로 굽고, 사용자별 제거는 응답 직전에만 한다.
+                payload = build_tab_1d_payload(tab, krx_visible=True)
                 redis_client.setex(cache_key_1d(tab), CACHE_TTL_SECONDS, json.dumps(payload))
                 series_counts[tab] = len(payload["series"])
             except Exception:

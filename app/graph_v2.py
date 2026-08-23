@@ -139,11 +139,9 @@ _TAB_DEFAULT_VISIBLE = {
 }
 
 
-# ADR-039 §3.1/§6.1 (2026-07-26) — 무인증 graph 표면의 krx.* 노출은 **호출자가 전달하는
-# per-user 판정**(`krx_visible`)에 달려 있다. env flag가 **아니다**: flag로 두면 per-user 게이트를
-# 만들지 않은 채 `.env` 한 줄로 §3.2 위반 상태를 켤 수 있다(codex 지적). 이 endpoint들엔 인증이
-# 없으므로 실제 호출자는 항상 default False를 쓰고, per-user 게이트가 land하면 그때 실제 판정을
-# 넘기면 된다 — 파라미터가 이미 자리에 있다.
+# ADR-039 §3.1/§6.1 — 인증된 GraphV2의 krx.* 노출은 endpoint가 전달하는 사용자별 판정
+# (`krx_visible = premium ∧ G3 ∧ G2 ∧ G1`)에 달려 있다. env flag 하나로 노출을 열 수 없고,
+# default False는 endpoint 밖의 호출자도 fail-closed로 유지한다.
 
 def strip_krx_if_not_allowed(payload, *, krx_visible: bool = False):
     """**serve-time** fail-closed — 승인되지 않았으면 응답에서 krx.* 를 제거한다 (codex Major).
@@ -156,10 +154,7 @@ def strip_krx_if_not_allowed(payload, *, krx_visible: bool = False):
     `series`(list, 장기·1d 공통)와 `in_progress`(dict, 1d seed) 두 shape를 모두 훑는다.
     원본을 변형하지 않고 copy-on-write — 캐시 객체가 공유될 수 있다.
 
-    **현재(subset 캐시) WARNING의 의미**: 프로덕션 호출자는 전부 `krx_visible=False`라 캐시에
-    krx가 들어갈 일이 없다 → 제거가 실제로 일어났다면 **구 배포가 남긴 캐시 잔존**이다(관측 가치 O).
-    ⚠️ per-user 게이트 slice에서 캐시를 superset(krx 포함)으로 바꾸면 제거가 **정상 동작**이 되므로
-    그때 WARNING은 debug로 격하해야 한다 — 안 그러면 매 비인가 요청마다 노이즈가 된다.
+    공용 캐시는 KRX 포함 superset이므로 비승인 요청의 제거는 정상 동작이다.
     """
     if krx_visible or not isinstance(payload, dict):
         return payload
@@ -179,8 +174,8 @@ def strip_krx_if_not_allowed(payload, *, krx_visible: bool = False):
             out = {**out, "in_progress": kept_ip}
 
     if out is not payload:
-        logger.warning(
-            "graph v2 응답에서 미승인 krx series 제거 — 캐시 잔존 (ADR-039 §6.1)",
+        logger.debug(
+            "graph v2 응답에서 비승인 krx series 제거",
             extra={"event": "graph_v2_krx_stripped", "tab": payload.get("tab"),
                    "period": payload.get("period")},
         )

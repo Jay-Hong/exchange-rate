@@ -149,11 +149,11 @@ class TestGraphV2KrxSeriesComposition(unittest.TestCase):
     ⚠️ **2026-07-26 축 변경**: 구 `TestGraphV2KrxFilter`는 "전역 게이트(G3∧G2)가 열리면 무인증
     catalog/tab에 krx가 실린다"를 잠갔다. ADR-039 §3.1이 서버 per-user 강제를 요구하므로 그 축은
     **호출자가 넘기는 `krx_visible`**로 바뀌었다(env flag 아님 — flag는 게이트 없이 `.env` 한 줄로
-    §3.2 위반을 켤 수 있어 기각). 무인증 endpoint는 항상 default False를 쓰므로 여기 `krx_visible=True`
-    케이스는 **per-user 게이트가 land한 뒤 entitled 사용자가 볼 구성**을 미리 잠근다.
+    §3.2 위반을 켤 수 있어 기각). 현재 인증 endpoint가 사용자별 판정을 전달하며, 여기
+    `krx_visible=True` 케이스는 승인된 구독자가 볼 구성을 잠근다.
 
     전역 게이트 자체의 판정은 `TestEntitlementsGates.test_krx_gates_open` / `compute_krx_visible`,
-    무인증 경로의 기본(False) 동작은 tests/test_graph_v2_krx_exposure.py.
+    미승인 경로의 기본(False) 동작은 tests/test_graph_v2_krx_exposure.py.
     """
 
     _KRX = "krx.usd-krw-futures"
@@ -191,7 +191,7 @@ class TestGraphV2KrxSeriesComposition(unittest.TestCase):
 
     def test_catalog_reflects_krx_visible(self):
         from app.graph_v2 import build_catalog
-        catalog = build_catalog()                      # default False = 무인증 endpoint 경로
+        catalog = build_catalog()                      # default False = 미승인/fail-closed 경로
         tether = next(t for t in catalog["tabs"] if t["id"] == "tether")
         for period, spec in tether["periods"].items():
             self.assertNotIn(self._KRX, spec["all_series"], period)
