@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: Jay-Hong/fxi-ios
-          ref: 66152f23ea7dc720bc2552d2606431267da7f509
+          ref: 8eafcfb98e457bb308e3b0180537f6f35b1ee35b
           path: ios
           fetch-depth: 0
           ssh-key: ${{ secrets.TOPIC_MIGRATION_IOS_DEPLOY_KEY }}

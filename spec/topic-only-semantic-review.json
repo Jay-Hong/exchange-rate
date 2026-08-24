@@ -150,7 +150,9 @@
           "**폭 상한의 전제가 과장이었다 — iPad 는 지원 대상** (iOS `1099528`). 가드가 375pt 를 \"가장 좁은 지원 기기\" 라고 단정했으나 `TARGETED_DEVICE_FAMILY = 1,2` 라 이 앱은 **iPad 도 지원**한다(리포에 iPad 대응 47건 + 기기 모델 표). iPad Slide Over 와 iPhone Display Zoom 은 375pt 보다 좁은 창을 만든다. 전제를 \"iPhone 세로 · 표준 확대에서 가장 좁은 창 375pt\" 로 좁혀 적고, 덮지 못하는 구성을 명시하고, 그 조합에서 줄바꿈을 허용한다는 **범위 결정**임을 밝혔다. ⚠️ 그 창들의 실제 폭은 이 리포에서 재지 않았으므로 **수치를 박지 않았다** — 미검증 수치를 임계값에 넣는 것이 이 트랙에서 반복한 실수의 원인이었다. 임계값 자체는 그대로 뒀다: 낮추면 접근성 크기에서 현재 문구가 즉시 red 가 되고 그건 제품이 정할 범위 결정이다. codex 의 \"iOS 17+ 라 320pt 1세대 SE 는 대상 밖\" 은 실측으로 확인됐다(`IPHONEOS_DEPLOYMENT_TARGET = 17.0`) — 맞는 절반이고, 빠진 절반이 iPad 였다.",
           "semantic-input-binding/v1:0052:fe2332f5208a08a2aa6ef2fdf125087e3349c295adbfa33f04482ba2cd861a5d:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:author=Claude Code:reviewer=OpenAI Codex",
           "**iPad 멀티태스킹 논거 보강 — 근거가 약했다** (iOS `66152f2`). 0052 에서 iPad 멀티태스킹 적용 근거로 `TARGETED_DEVICE_FAMILY = 1,2` 만 들었는데 그것만으로는 부족하다 — iPad 를 지원하면서도 `UIRequiresFullScreen = true` 면 Slide Over 대상이 아니다(codex 지적). **결론은 맞았고 근거가 약했다**. 실측 보강: `UIRequiresFullScreen` 이 Info.plist·pbxproj 양쪽 **0건**이고 4방향을 모두 선언한다 → 전체화면 옵트아웃을 하지 않았으므로 시스템이 가변 폭 창을 준다. 수치는 여전히 박지 않았다(그 창들의 실제 폭은 이 리포에서 재지 않았다). ⛔ 교훈: **설정 하나로 결론을 세우지 말 것** — \"X 를 지원한다\" 와 \"X 의 동작 Y 에 노출된다\" 는 다르고, 사이에 옵트아웃 스위치가 있을 수 있다.",
-          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=Claude Code:reviewer=OpenAI Codex",
+          "**mini 논리 폭 실측 + LayoutMetrics 선재 오표기 정정** (iOS `8eafcfb`). 375pt 전제를 웹 표가 아니라 **시뮬레이터로 직접 쟀다** — iPhone 13 mini logical `375×812pt` · native `1080×2340px` · scale 3. `native ÷ scale = 360` 은 물리 출력 다운샘플이지 논리 좌표가 아니다(codex 가 중간에 이걸 360pt 로 오해해 임계값을 낮추려 했다가 되돌렸다). 함정을 주석에 박아 다시 돌지 않게 했다. codex 가 찾은 **선재 오표기**도 정정 — `LayoutMetrics.sizeCategory` 의 `< 375pt` 분기가 \"iPhone SE, mini\" 로 적혀 있었으나 둘 다 정확히 375pt 라 그 분기에 안 들어온다(실제 대상은 Display Zoom·좁은 iPad 창). 코드는 맞고 설명만 틀린 경우다. 실패 메시지의 \"줄바꿈 발생\" → \"줄바꿈할 수 있음\" 과장 제거도 수용했다(근사 측정이 인과를 확정하지 못한다). ⚠️ 다만 codex 편집이 지운 두 가지를 **복원**했다 — ① 테스트 주석의 iPad 멀티태스킹 근거(`UIRequiresFullScreen` 부재 + 4방향): 근거를 빼면 codex 가 한 라운드 전에 지적한 \"단일 설정 추론\" 상태로 되돌아간다. ② 뷰 주석의 \"수치를 여기 적지 않는 이유\": 실천은 남아도 이유가 사라지면 다음 사람이 다시 적는다. **교훈을 지우면 실천이 근거를 잃는다.**",
+          "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -284,7 +286,9 @@
           "**최종 결속 확인 + 최소 폭 전제 점검** (iOS `1099528`). XCTSkip 제거·제품 상수 배선·문구 값과 뷰 배선의 별도 잠금·양 리포 clean·preflight 통과를 재확인했고, 폭 예산의 전제인 \"가장 좁은 지원 기기 375pt\" 가 배포 타깃과 맞는지 따로 검사했다 — `IPHONEOS_DEPLOYMENT_TARGET = 17.0` 이라 320pt 1세대 SE 는 대상 밖, SE 2·3세대가 375pt 라는 결론은 iPhone 범위에서 정확하다. 다만 같은 빌드 설정의 `TARGETED_DEVICE_FAMILY = 1,2`(iPad 포함)를 결론에 반영하지 못해 iPad 멀티태스킹 창을 범위 밖으로 남겼다 — 전제를 검사할 때는 **같은 출력 안의 인접 설정까지** 함께 읽어야 한다.",
           "semantic-input-binding/v1:0052:fe2332f5208a08a2aa6ef2fdf125087e3349c295adbfa33f04482ba2cd861a5d:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:author=OpenAI Codex:reviewer=Claude Code",
           "**단일 설정 추론의 한계 지적** (iOS `66152f2`). 클로드의 범위 정정은 방향이 옳으나 `TARGETED_DEVICE_FAMILY = 1,2` 만으로 Slide Over 가 실제 허용된다고 단정할 수 없다고 지적하고, `UIRequiresFullScreen` · iPad 방향 지원 · 멀티태스킹 관련 설정을 직접 확인해 근거를 채웠다 — 옵트아웃이 없고 4방향을 선언하므로 멀티태스킹 대상이라는 판단이 성립한다. 아울러 내가 앞서 낸 \"가장 좁은 지원 기기 375pt\" 결론이 **표준 확대 iPhone 세로에만 유효**하고 전체 지원 창의 최소 폭으로 일반화할 수 없음을 인정했다.",
-          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=OpenAI Codex:reviewer=Claude Code",
+          "**Display Zoom·mini 전제 재검증과 자기 정정** (iOS `8eafcfb`). 주석에 남은 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적하고 소형 iPhone 프로필을 확인하다가, iPhone 12/13 mini 를 `1080px / 3x = 360pt` 로 해석해 \"375pt 전제 자체가 틀렸다\" 고 판단하고 임계값을 320pt 로 낮추는 수정까지 진행했다. 사용자가 지정한 비교표와 로컬 Xcode 프로필을 교차 대조한 뒤 **직접 철회**했다 — mini 의 기본 논리 좌표는 375×812 이고 360×780 은 물리 출력 다운샘플이다. 아울러 `LayoutMetrics` 의 `< 375pt` 구간 설명이 실제 대상(Display Zoom·좁은 iPad 창)과 어긋난 선재 오표기임을 찾아냈다. ⛔ 교훈: **물리 해상도 ÷ scale 은 논리 폭이 아니다** — 다운샘플 기기에서 둘이 갈린다.",
+          "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -425,7 +429,9 @@
           "**최종 결속 확인 + 최소 폭 전제 점검** (iOS `1099528`). XCTSkip 제거·제품 상수 배선·문구 값과 뷰 배선의 별도 잠금·양 리포 clean·preflight 통과를 재확인했고, 폭 예산의 전제인 \"가장 좁은 지원 기기 375pt\" 가 배포 타깃과 맞는지 따로 검사했다 — `IPHONEOS_DEPLOYMENT_TARGET = 17.0` 이라 320pt 1세대 SE 는 대상 밖, SE 2·3세대가 375pt 라는 결론은 iPhone 범위에서 정확하다. 다만 같은 빌드 설정의 `TARGETED_DEVICE_FAMILY = 1,2`(iPad 포함)를 결론에 반영하지 못해 iPad 멀티태스킹 창을 범위 밖으로 남겼다 — 전제를 검사할 때는 **같은 출력 안의 인접 설정까지** 함께 읽어야 한다.",
           "semantic-input-binding/v1:0052:fe2332f5208a08a2aa6ef2fdf125087e3349c295adbfa33f04482ba2cd861a5d:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:author=OpenAI Codex:reviewer=Claude Code",
           "**단일 설정 추론의 한계 지적** (iOS `66152f2`). 클로드의 범위 정정은 방향이 옳으나 `TARGETED_DEVICE_FAMILY = 1,2` 만으로 Slide Over 가 실제 허용된다고 단정할 수 없다고 지적하고, `UIRequiresFullScreen` · iPad 방향 지원 · 멀티태스킹 관련 설정을 직접 확인해 근거를 채웠다 — 옵트아웃이 없고 4방향을 선언하므로 멀티태스킹 대상이라는 판단이 성립한다. 아울러 내가 앞서 낸 \"가장 좁은 지원 기기 375pt\" 결론이 **표준 확대 iPhone 세로에만 유효**하고 전체 지원 창의 최소 폭으로 일반화할 수 없음을 인정했다.",
-          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=OpenAI Codex:reviewer=Claude Code",
+          "**Display Zoom·mini 전제 재검증과 자기 정정** (iOS `8eafcfb`). 주석에 남은 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적하고 소형 iPhone 프로필을 확인하다가, iPhone 12/13 mini 를 `1080px / 3x = 360pt` 로 해석해 \"375pt 전제 자체가 틀렸다\" 고 판단하고 임계값을 320pt 로 낮추는 수정까지 진행했다. 사용자가 지정한 비교표와 로컬 Xcode 프로필을 교차 대조한 뒤 **직접 철회**했다 — mini 의 기본 논리 좌표는 375×812 이고 360×780 은 물리 출력 다운샘플이다. 아울러 `LayoutMetrics` 의 `< 375pt` 구간 설명이 실제 대상(Display Zoom·좁은 iPad 창)과 어긋난 선재 오표기임을 찾아냈다. ⛔ 교훈: **물리 해상도 ÷ scale 은 논리 폭이 아니다** — 다운샘플 기기에서 둘이 갈린다.",
+          "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -567,7 +573,9 @@
           "**폭 상한의 전제가 과장이었다 — iPad 는 지원 대상** (iOS `1099528`). 가드가 375pt 를 \"가장 좁은 지원 기기\" 라고 단정했으나 `TARGETED_DEVICE_FAMILY = 1,2` 라 이 앱은 **iPad 도 지원**한다(리포에 iPad 대응 47건 + 기기 모델 표). iPad Slide Over 와 iPhone Display Zoom 은 375pt 보다 좁은 창을 만든다. 전제를 \"iPhone 세로 · 표준 확대에서 가장 좁은 창 375pt\" 로 좁혀 적고, 덮지 못하는 구성을 명시하고, 그 조합에서 줄바꿈을 허용한다는 **범위 결정**임을 밝혔다. ⚠️ 그 창들의 실제 폭은 이 리포에서 재지 않았으므로 **수치를 박지 않았다** — 미검증 수치를 임계값에 넣는 것이 이 트랙에서 반복한 실수의 원인이었다. 임계값 자체는 그대로 뒀다: 낮추면 접근성 크기에서 현재 문구가 즉시 red 가 되고 그건 제품이 정할 범위 결정이다. codex 의 \"iOS 17+ 라 320pt 1세대 SE 는 대상 밖\" 은 실측으로 확인됐다(`IPHONEOS_DEPLOYMENT_TARGET = 17.0`) — 맞는 절반이고, 빠진 절반이 iPad 였다.",
           "semantic-input-binding/v1:0052:fe2332f5208a08a2aa6ef2fdf125087e3349c295adbfa33f04482ba2cd861a5d:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:author=Claude Code:reviewer=OpenAI Codex",
           "**iPad 멀티태스킹 논거 보강 — 근거가 약했다** (iOS `66152f2`). 0052 에서 iPad 멀티태스킹 적용 근거로 `TARGETED_DEVICE_FAMILY = 1,2` 만 들었는데 그것만으로는 부족하다 — iPad 를 지원하면서도 `UIRequiresFullScreen = true` 면 Slide Over 대상이 아니다(codex 지적). **결론은 맞았고 근거가 약했다**. 실측 보강: `UIRequiresFullScreen` 이 Info.plist·pbxproj 양쪽 **0건**이고 4방향을 모두 선언한다 → 전체화면 옵트아웃을 하지 않았으므로 시스템이 가변 폭 창을 준다. 수치는 여전히 박지 않았다(그 창들의 실제 폭은 이 리포에서 재지 않았다). ⛔ 교훈: **설정 하나로 결론을 세우지 말 것** — \"X 를 지원한다\" 와 \"X 의 동작 Y 에 노출된다\" 는 다르고, 사이에 옵트아웃 스위치가 있을 수 있다.",
-          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=Claude Code:reviewer=OpenAI Codex",
+          "**mini 논리 폭 실측 + LayoutMetrics 선재 오표기 정정** (iOS `8eafcfb`). 375pt 전제를 웹 표가 아니라 **시뮬레이터로 직접 쟀다** — iPhone 13 mini logical `375×812pt` · native `1080×2340px` · scale 3. `native ÷ scale = 360` 은 물리 출력 다운샘플이지 논리 좌표가 아니다(codex 가 중간에 이걸 360pt 로 오해해 임계값을 낮추려 했다가 되돌렸다). 함정을 주석에 박아 다시 돌지 않게 했다. codex 가 찾은 **선재 오표기**도 정정 — `LayoutMetrics.sizeCategory` 의 `< 375pt` 분기가 \"iPhone SE, mini\" 로 적혀 있었으나 둘 다 정확히 375pt 라 그 분기에 안 들어온다(실제 대상은 Display Zoom·좁은 iPad 창). 코드는 맞고 설명만 틀린 경우다. 실패 메시지의 \"줄바꿈 발생\" → \"줄바꿈할 수 있음\" 과장 제거도 수용했다(근사 측정이 인과를 확정하지 못한다). ⚠️ 다만 codex 편집이 지운 두 가지를 **복원**했다 — ① 테스트 주석의 iPad 멀티태스킹 근거(`UIRequiresFullScreen` 부재 + 4방향): 근거를 빼면 codex 가 한 라운드 전에 지적한 \"단일 설정 추론\" 상태로 되돌아간다. ② 뷰 주석의 \"수치를 여기 적지 않는 이유\": 실천은 남아도 이유가 사라지면 다음 사람이 다시 적는다. **교훈을 지우면 실천이 근거를 잃는다.**",
+          "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -715,7 +723,9 @@
           "**폭 상한의 전제가 과장이었다 — iPad 는 지원 대상** (iOS `1099528`). 가드가 375pt 를 \"가장 좁은 지원 기기\" 라고 단정했으나 `TARGETED_DEVICE_FAMILY = 1,2` 라 이 앱은 **iPad 도 지원**한다(리포에 iPad 대응 47건 + 기기 모델 표). iPad Slide Over 와 iPhone Display Zoom 은 375pt 보다 좁은 창을 만든다. 전제를 \"iPhone 세로 · 표준 확대에서 가장 좁은 창 375pt\" 로 좁혀 적고, 덮지 못하는 구성을 명시하고, 그 조합에서 줄바꿈을 허용한다는 **범위 결정**임을 밝혔다. ⚠️ 그 창들의 실제 폭은 이 리포에서 재지 않았으므로 **수치를 박지 않았다** — 미검증 수치를 임계값에 넣는 것이 이 트랙에서 반복한 실수의 원인이었다. 임계값 자체는 그대로 뒀다: 낮추면 접근성 크기에서 현재 문구가 즉시 red 가 되고 그건 제품이 정할 범위 결정이다. codex 의 \"iOS 17+ 라 320pt 1세대 SE 는 대상 밖\" 은 실측으로 확인됐다(`IPHONEOS_DEPLOYMENT_TARGET = 17.0`) — 맞는 절반이고, 빠진 절반이 iPad 였다.",
           "semantic-input-binding/v1:0052:fe2332f5208a08a2aa6ef2fdf125087e3349c295adbfa33f04482ba2cd861a5d:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:author=Claude Code:reviewer=OpenAI Codex",
           "**iPad 멀티태스킹 논거 보강 — 근거가 약했다** (iOS `66152f2`). 0052 에서 iPad 멀티태스킹 적용 근거로 `TARGETED_DEVICE_FAMILY = 1,2` 만 들었는데 그것만으로는 부족하다 — iPad 를 지원하면서도 `UIRequiresFullScreen = true` 면 Slide Over 대상이 아니다(codex 지적). **결론은 맞았고 근거가 약했다**. 실측 보강: `UIRequiresFullScreen` 이 Info.plist·pbxproj 양쪽 **0건**이고 4방향을 모두 선언한다 → 전체화면 옵트아웃을 하지 않았으므로 시스템이 가변 폭 창을 준다. 수치는 여전히 박지 않았다(그 창들의 실제 폭은 이 리포에서 재지 않았다). ⛔ 교훈: **설정 하나로 결론을 세우지 말 것** — \"X 를 지원한다\" 와 \"X 의 동작 Y 에 노출된다\" 는 다르고, 사이에 옵트아웃 스위치가 있을 수 있다.",
-          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=Claude Code:reviewer=OpenAI Codex",
+          "**mini 논리 폭 실측 + LayoutMetrics 선재 오표기 정정** (iOS `8eafcfb`). 375pt 전제를 웹 표가 아니라 **시뮬레이터로 직접 쟀다** — iPhone 13 mini logical `375×812pt` · native `1080×2340px` · scale 3. `native ÷ scale = 360` 은 물리 출력 다운샘플이지 논리 좌표가 아니다(codex 가 중간에 이걸 360pt 로 오해해 임계값을 낮추려 했다가 되돌렸다). 함정을 주석에 박아 다시 돌지 않게 했다. codex 가 찾은 **선재 오표기**도 정정 — `LayoutMetrics.sizeCategory` 의 `< 375pt` 분기가 \"iPhone SE, mini\" 로 적혀 있었으나 둘 다 정확히 375pt 라 그 분기에 안 들어온다(실제 대상은 Display Zoom·좁은 iPad 창). 코드는 맞고 설명만 틀린 경우다. 실패 메시지의 \"줄바꿈 발생\" → \"줄바꿈할 수 있음\" 과장 제거도 수용했다(근사 측정이 인과를 확정하지 못한다). ⚠️ 다만 codex 편집이 지운 두 가지를 **복원**했다 — ① 테스트 주석의 iPad 멀티태스킹 근거(`UIRequiresFullScreen` 부재 + 4방향): 근거를 빼면 codex 가 한 라운드 전에 지적한 \"단일 설정 추론\" 상태로 되돌아간다. ② 뷰 주석의 \"수치를 여기 적지 않는 이유\": 실천은 남아도 이유가 사라지면 다음 사람이 다시 적는다. **교훈을 지우면 실천이 근거를 잃는다.**",
+          "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -854,7 +864,9 @@
           "**최종 결속 확인 + 최소 폭 전제 점검** (iOS `1099528`). XCTSkip 제거·제품 상수 배선·문구 값과 뷰 배선의 별도 잠금·양 리포 clean·preflight 통과를 재확인했고, 폭 예산의 전제인 \"가장 좁은 지원 기기 375pt\" 가 배포 타깃과 맞는지 따로 검사했다 — `IPHONEOS_DEPLOYMENT_TARGET = 17.0` 이라 320pt 1세대 SE 는 대상 밖, SE 2·3세대가 375pt 라는 결론은 iPhone 범위에서 정확하다. 다만 같은 빌드 설정의 `TARGETED_DEVICE_FAMILY = 1,2`(iPad 포함)를 결론에 반영하지 못해 iPad 멀티태스킹 창을 범위 밖으로 남겼다 — 전제를 검사할 때는 **같은 출력 안의 인접 설정까지** 함께 읽어야 한다.",
           "semantic-input-binding/v1:0052:fe2332f5208a08a2aa6ef2fdf125087e3349c295adbfa33f04482ba2cd861a5d:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:author=OpenAI Codex:reviewer=Claude Code",
           "**단일 설정 추론의 한계 지적** (iOS `66152f2`). 클로드의 범위 정정은 방향이 옳으나 `TARGETED_DEVICE_FAMILY = 1,2` 만으로 Slide Over 가 실제 허용된다고 단정할 수 없다고 지적하고, `UIRequiresFullScreen` · iPad 방향 지원 · 멀티태스킹 관련 설정을 직접 확인해 근거를 채웠다 — 옵트아웃이 없고 4방향을 선언하므로 멀티태스킹 대상이라는 판단이 성립한다. 아울러 내가 앞서 낸 \"가장 좁은 지원 기기 375pt\" 결론이 **표준 확대 iPhone 세로에만 유효**하고 전체 지원 창의 최소 폭으로 일반화할 수 없음을 인정했다.",
-          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0053:60b08bd3721934a1c3b83a47200b6557a3af17db8ad431847f67d5df29f5eb55:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:author=OpenAI Codex:reviewer=Claude Code",
+          "**Display Zoom·mini 전제 재검증과 자기 정정** (iOS `8eafcfb`). 주석에 남은 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적하고 소형 iPhone 프로필을 확인하다가, iPhone 12/13 mini 를 `1080px / 3x = 360pt` 로 해석해 \"375pt 전제 자체가 틀렸다\" 고 판단하고 임계값을 320pt 로 낮추는 수정까지 진행했다. 사용자가 지정한 비교표와 로컬 Xcode 프로필을 교차 대조한 뒤 **직접 철회**했다 — mini 의 기본 논리 좌표는 375×812 이고 360×780 은 물리 출력 다운샘플이다. 아울러 `LayoutMetrics` 의 `< 375pt` 구간 설명이 실제 대상(Display Zoom·좁은 iPad 창)과 어긋난 선재 오표기임을 찾아냈다. ⛔ 교훈: **물리 해상도 ÷ scale 은 논리 폭이 아니다** — 다운샘플 기기에서 둘이 갈린다.",
+          "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -868,21 +880,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "8401e21de36f7a3bc84eb77976b58427be33bf644b169f8ab14b0194a55d6861",
+    "manifest_sha256": "2a930b1f851d9988381b4d2583d13d159aac9adc381646414e681e6bd8723663",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "2e62dbf4c1ff7176f97dc758b1afb2d5544344e2a3fda39ccfe8ba0233b69429",
-    "server_commit": "9a511ebdd853c88d3cb31e35387774ee750fc8d1",
-    "ios_commit": "66152f23ea7dc720bc2552d2606431267da7f509"
+    "lock_sha256": "103866441f581219a102659caf69d3a8c5bda4130e13881394e8581f1968c0dd",
+    "server_commit": "e9e7f3d90312ac58e96b427a4af08c98c88ff2e6",
+    "ios_commit": "8eafcfb98e457bb308e3b0180537f6f35b1ee35b"
   },
   "documents": {
-    "ADR": "48e2d7940e0e53cce36c32ee43c031cf06e9e96df2205dbbfa4a9c9d715de9ae",
-    "CLIENT": "d27c27bab106cf68068e3192c1c3e34496b5b26b1e6f4813239cbf259723f8ce",
-    "CUT": "111525220a0c471cb3d0529d558800f7dca52dc53ae1f8d9d988f6d3c53a0e2d",
-    "HAND": "fea6f9bec5e617db3257101ed441882878ce098cf9b6c4795711ff7ff251800a",
-    "HEALTH": "a7dba84de5f0d5fb7356cf43261458559e436c8099dff9b44907e54fee5fdb9f",
-    "LOAD": "b9d35af3308e1eed8a804a9b5a765ede5beb652a41d74aba85e2f71e9ac3b347"
+    "ADR": "e1505154c6d86ae497cb2b941cdd1151286d4fa01ea46adcf07a21827ffc26bc",
+    "CLIENT": "6ff9f0c52918bda079d28df276c6e1a6332614b41d677be88f4d34fd10d252a8",
+    "CUT": "50f9c427f78b934857960626a38174799c8ef33621a5b686e4f5124949acc74b",
+    "HAND": "d13c5e803bf1e8166230cfcb649232887d51de8b696246780ebcf7a47644a8dc",
+    "HEALTH": "3b12b550785f53cbe5044735db2f306857b52b6ca6b67cae9536823b4fa0ca00",
+    "LOAD": "185233f641db9cda1591fdf0f52e9409099adab79470907d97b39e74f1914a6a"
   },
-  "claim_ledger_sha256": "e32424830cd625ef9a0ce129defee6b0f2883b9d0df1768b77ad9f8ead9d6271",
+  "claim_ledger_sha256": "7ee6c71c311af611478ecf828ce479044b12b023c0d6f8a59d89ea8a96f0285d",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,

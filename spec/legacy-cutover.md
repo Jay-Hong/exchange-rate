@@ -3,10 +3,10 @@
 - 책임: 삭제 범위 · 문서 정정 · 테스트 · 순서
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `9a511ebdd853c88d3cb31e35387774ee750fc8d1`
-- iOS 기준 commit: `66152f23ea7dc720bc2552d2606431267da7f509`
+- server 기준 commit: `e9e7f3d90312ac58e96b427a4af08c98c88ff2e6`
+- iOS 기준 commit: `8eafcfb98e457bb308e3b0180537f6f35b1ee35b`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `8401e21de36f7a3bc84eb77976b58427be33bf644b169f8ab14b0194a55d6861`
+- manifest SHA: `2a930b1f851d9988381b4d2583d13d159aac9adc381646414e681e6bd8723663`
 - baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
