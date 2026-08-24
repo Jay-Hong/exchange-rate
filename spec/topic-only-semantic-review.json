@@ -154,7 +154,9 @@
           "**mini 논리 폭 실측 + LayoutMetrics 선재 오표기 정정** (iOS `8eafcfb`). 375pt 전제를 웹 표가 아니라 **시뮬레이터로 직접 쟀다** — iPhone 13 mini logical `375×812pt` · native `1080×2340px` · scale 3. `native ÷ scale = 360` 은 물리 출력 다운샘플이지 논리 좌표가 아니다(codex 가 중간에 이걸 360pt 로 오해해 임계값을 낮추려 했다가 되돌렸다). 함정을 주석에 박아 다시 돌지 않게 했다. codex 가 찾은 **선재 오표기**도 정정 — `LayoutMetrics.sizeCategory` 의 `< 375pt` 분기가 \"iPhone SE, mini\" 로 적혀 있었으나 둘 다 정확히 375pt 라 그 분기에 안 들어온다(실제 대상은 Display Zoom·좁은 iPad 창). 코드는 맞고 설명만 틀린 경우다. 실패 메시지의 \"줄바꿈 발생\" → \"줄바꿈할 수 있음\" 과장 제거도 수용했다(근사 측정이 인과를 확정하지 못한다). ⚠️ 다만 codex 편집이 지운 두 가지를 **복원**했다 — ① 테스트 주석의 iPad 멀티태스킹 근거(`UIRequiresFullScreen` 부재 + 4방향): 근거를 빼면 codex 가 한 라운드 전에 지적한 \"단일 설정 추론\" 상태로 되돌아간다. ② 뷰 주석의 \"수치를 여기 적지 않는 이유\": 실천은 남아도 이유가 사라지면 다음 사람이 다시 적는다. **교훈을 지우면 실천이 근거를 잃는다.**",
           "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=Claude Code:reviewer=OpenAI Codex",
           "**배너 폭 가드의 실질 구멍 3건 — 적대 감사로 발견, 실측으로 확인** (iOS `10e5b8e`). 38-에이전트 감사를 돌려 산문 취향 지적은 버리고 **측정으로 재현되는 것만** 반영했다. ① **둘째 줄(detail)을 아예 안 쟀다** — 클래스명·실패 메시지는 \"배너 문구\" 를 재는 것처럼 읽히는데 headline 만 쟀고, iOS 실측상 detail 은 AX1 에서 339pt 로 예산 335 를 이미 넘는다. ② **\"접근성 크기까지 통과\" 가 거짓** — 시험이 도는 접근성 단계는 AX1 하나(5단계 중 1)뿐이고 AX2~AX5 는 396/475/646pt 로 전부 초과다. ③ **예산의 절반이 뷰와 끊겨 있었다** — `375 - 40` 의 40 은 뷰 패딩의 리터럴 사본이라 뷰에서 바꿔도 예산이 조용히 그대로였다. 이 트랙이 없애려던 실패 양식이 주석에서 시험 리터럴로 **자리만 옮긴** 것이다. 고친 방식: 두 줄 모두 측정 + 줄마다 계약 크기 분리(headline AX1 / detail XXXL, 그 위는 줄바꿈이 정상 — 접근성에서 글자를 줄이는 쪽이 잘못이다) + 패딩을 제품 상수로 만들어 예산이 **파생**되게 하고 배선까지 잠금. 변이 확인: detail 연장 → 385pt RED(이전엔 무가드 통과) / 여백 20→24 → 예산이 327 로 자동 축소되며 RED. 부수로 `CLAUDE.md` 의 `graphHeight // 130-180` 이 실제 175~260 과 어긋나 정정했다(상한이 실제 하한보다 낮았다).",
-          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0055 의 `graphHeight 175~260` 은 내 오류였다 — 정정** (iOS `342b93a`). 0055 에서 구 오류(`130-180`)를 고치면서 **새 오류를 넣었다**: 실제 치역은 `175~240` 이다. `heightMultiplier` 가 iPad(extraLarge)에서 **1.0 으로 고정**돼 230 × 1.0 = 230 이므로 **260 상한은 절대 걸리지 않는다**; 240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단이다. codex 가 잡았고 직접 계산으로 확인했다. 도달 불가라는 사실을 코드 옆에도 남겼다. ⛔ 이 트랙에서 **거짓을 고치는 커밋이 새 거짓을 낳은 것이 두 번째**다(0049→0050 도 같은 형태). 교훈: **정정 커밋의 새 수치야말로 검증 대상이다** — 고치는 쪽이라는 이유로 검산을 건너뛰게 된다. 함께 반영한 산문 정밀화도 전부 codex 지적이 옳았다: 20pt 를 \"예산의 절반\"이라 한 것(예산 335 의 절반이 아니라 한쪽 여백), 실패 메시지의 \"375pt 기기 포기\" 과장, 그리고 **시험 주석에 실측 pt 를 다시 복제한 것** — \"수치의 집은 산문이 아니라 시험\" 이라고 선언한 그 커밋에서 내가 그 원칙을 어겼다. 대신 detail 상한이 낮은 **이유**만 수치 없이 남겼다(`caption1` 이 `subheadline` 보다 접근성 구간에서 가파르게 커진다 — 실측 배율 1.81 vs 1.64).",
+          "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -292,7 +294,9 @@
           "**Display Zoom·mini 전제 재검증과 자기 정정** (iOS `8eafcfb`). 주석에 남은 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적하고 소형 iPhone 프로필을 확인하다가, iPhone 12/13 mini 를 `1080px / 3x = 360pt` 로 해석해 \"375pt 전제 자체가 틀렸다\" 고 판단하고 임계값을 320pt 로 낮추는 수정까지 진행했다. 사용자가 지정한 비교표와 로컬 Xcode 프로필을 교차 대조한 뒤 **직접 철회**했다 — mini 의 기본 논리 좌표는 375×812 이고 360×780 은 물리 출력 다운샘플이다. 아울러 `LayoutMetrics` 의 `< 375pt` 구간 설명이 실제 대상(Display Zoom·좁은 iPad 창)과 어긋난 선재 오표기임을 찾아냈다. ⛔ 교훈: **물리 해상도 ÷ scale 은 논리 폭이 아니다** — 다운샘플 기기에서 둘이 갈린다.",
           "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=OpenAI Codex:reviewer=Claude Code",
           "**Display Zoom 미측정 단정 지적 + mini 재검증** (iOS `10e5b8e` 직전 라운드). 주석의 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적했고, 소형 iPhone 프로필을 확인하다 mini 를 `1080px / 3x = 360pt` 로 해석해 375pt 전제 자체를 부정하고 임계값을 320pt 로 낮추는 수정까지 갔다가, 사용자가 지정한 비교표와 로컬 프로필 교차 대조 후 **직접 철회**했다. 또 뷰 주석이 시험의 \"근사일 뿐\" 한계와 달리 \"한 줄이다/줄바꿈된다\" 를 단정하던 것을 잡았다 — 이건 정확한 지적이었고 그대로 반영됐다. ⛔ 이 라운드의 교훈 둘: **물리 해상도 ÷ scale 은 논리 폭이 아니다**, 그리고 **주석을 압축할 때 검증 근거를 함께 지우면 다음 라운드에 같은 의심이 되살아난다** (iPad 근거·수치 비기재 이유가 두 번 삭제됐다가 두 번 복원됐다).",
-          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=OpenAI Codex:reviewer=Claude Code",
+          "**정정 커밋의 새 수치 검산** (iOS `342b93a`). 클로드의 가드 개선(둘째 줄 측정·여백 상수 결속)은 타당하다고 확인한 뒤, 새로 들어간 산문을 코드로 검산해 `graphHeight 175~260` 이 도달 불가 상한을 치역으로 적은 오류임을 찾았다 — extraLarge 는 배수 1.0 이라 230, 나머지는 240 에서 잘리므로 실효 치역은 175~240 이다. 아울러 (a) 20pt 를 \"폭 예산의 절반\" 이라 한 부정확, (b) 실패 메시지의 기기 포기 과장, (c) 시험 주석에 측정값을 재복제해 stale 문제를 되살린 것을 지적했고 모두 반영됐다. epoch 0055 에 남은 `175~260` 은 append-only 정정이 필요하다고 명시했다.",
+          "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -437,7 +441,9 @@
           "**Display Zoom·mini 전제 재검증과 자기 정정** (iOS `8eafcfb`). 주석에 남은 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적하고 소형 iPhone 프로필을 확인하다가, iPhone 12/13 mini 를 `1080px / 3x = 360pt` 로 해석해 \"375pt 전제 자체가 틀렸다\" 고 판단하고 임계값을 320pt 로 낮추는 수정까지 진행했다. 사용자가 지정한 비교표와 로컬 Xcode 프로필을 교차 대조한 뒤 **직접 철회**했다 — mini 의 기본 논리 좌표는 375×812 이고 360×780 은 물리 출력 다운샘플이다. 아울러 `LayoutMetrics` 의 `< 375pt` 구간 설명이 실제 대상(Display Zoom·좁은 iPad 창)과 어긋난 선재 오표기임을 찾아냈다. ⛔ 교훈: **물리 해상도 ÷ scale 은 논리 폭이 아니다** — 다운샘플 기기에서 둘이 갈린다.",
           "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=OpenAI Codex:reviewer=Claude Code",
           "**Display Zoom 미측정 단정 지적 + mini 재검증** (iOS `10e5b8e` 직전 라운드). 주석의 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적했고, 소형 iPhone 프로필을 확인하다 mini 를 `1080px / 3x = 360pt` 로 해석해 375pt 전제 자체를 부정하고 임계값을 320pt 로 낮추는 수정까지 갔다가, 사용자가 지정한 비교표와 로컬 프로필 교차 대조 후 **직접 철회**했다. 또 뷰 주석이 시험의 \"근사일 뿐\" 한계와 달리 \"한 줄이다/줄바꿈된다\" 를 단정하던 것을 잡았다 — 이건 정확한 지적이었고 그대로 반영됐다. ⛔ 이 라운드의 교훈 둘: **물리 해상도 ÷ scale 은 논리 폭이 아니다**, 그리고 **주석을 압축할 때 검증 근거를 함께 지우면 다음 라운드에 같은 의심이 되살아난다** (iPad 근거·수치 비기재 이유가 두 번 삭제됐다가 두 번 복원됐다).",
-          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=OpenAI Codex:reviewer=Claude Code",
+          "**정정 커밋의 새 수치 검산** (iOS `342b93a`). 클로드의 가드 개선(둘째 줄 측정·여백 상수 결속)은 타당하다고 확인한 뒤, 새로 들어간 산문을 코드로 검산해 `graphHeight 175~260` 이 도달 불가 상한을 치역으로 적은 오류임을 찾았다 — extraLarge 는 배수 1.0 이라 230, 나머지는 240 에서 잘리므로 실효 치역은 175~240 이다. 아울러 (a) 20pt 를 \"폭 예산의 절반\" 이라 한 부정확, (b) 실패 메시지의 기기 포기 과장, (c) 시험 주석에 측정값을 재복제해 stale 문제를 되살린 것을 지적했고 모두 반영됐다. epoch 0055 에 남은 `175~260` 은 append-only 정정이 필요하다고 명시했다.",
+          "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -583,7 +589,9 @@
           "**mini 논리 폭 실측 + LayoutMetrics 선재 오표기 정정** (iOS `8eafcfb`). 375pt 전제를 웹 표가 아니라 **시뮬레이터로 직접 쟀다** — iPhone 13 mini logical `375×812pt` · native `1080×2340px` · scale 3. `native ÷ scale = 360` 은 물리 출력 다운샘플이지 논리 좌표가 아니다(codex 가 중간에 이걸 360pt 로 오해해 임계값을 낮추려 했다가 되돌렸다). 함정을 주석에 박아 다시 돌지 않게 했다. codex 가 찾은 **선재 오표기**도 정정 — `LayoutMetrics.sizeCategory` 의 `< 375pt` 분기가 \"iPhone SE, mini\" 로 적혀 있었으나 둘 다 정확히 375pt 라 그 분기에 안 들어온다(실제 대상은 Display Zoom·좁은 iPad 창). 코드는 맞고 설명만 틀린 경우다. 실패 메시지의 \"줄바꿈 발생\" → \"줄바꿈할 수 있음\" 과장 제거도 수용했다(근사 측정이 인과를 확정하지 못한다). ⚠️ 다만 codex 편집이 지운 두 가지를 **복원**했다 — ① 테스트 주석의 iPad 멀티태스킹 근거(`UIRequiresFullScreen` 부재 + 4방향): 근거를 빼면 codex 가 한 라운드 전에 지적한 \"단일 설정 추론\" 상태로 되돌아간다. ② 뷰 주석의 \"수치를 여기 적지 않는 이유\": 실천은 남아도 이유가 사라지면 다음 사람이 다시 적는다. **교훈을 지우면 실천이 근거를 잃는다.**",
           "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=Claude Code:reviewer=OpenAI Codex",
           "**배너 폭 가드의 실질 구멍 3건 — 적대 감사로 발견, 실측으로 확인** (iOS `10e5b8e`). 38-에이전트 감사를 돌려 산문 취향 지적은 버리고 **측정으로 재현되는 것만** 반영했다. ① **둘째 줄(detail)을 아예 안 쟀다** — 클래스명·실패 메시지는 \"배너 문구\" 를 재는 것처럼 읽히는데 headline 만 쟀고, iOS 실측상 detail 은 AX1 에서 339pt 로 예산 335 를 이미 넘는다. ② **\"접근성 크기까지 통과\" 가 거짓** — 시험이 도는 접근성 단계는 AX1 하나(5단계 중 1)뿐이고 AX2~AX5 는 396/475/646pt 로 전부 초과다. ③ **예산의 절반이 뷰와 끊겨 있었다** — `375 - 40` 의 40 은 뷰 패딩의 리터럴 사본이라 뷰에서 바꿔도 예산이 조용히 그대로였다. 이 트랙이 없애려던 실패 양식이 주석에서 시험 리터럴로 **자리만 옮긴** 것이다. 고친 방식: 두 줄 모두 측정 + 줄마다 계약 크기 분리(headline AX1 / detail XXXL, 그 위는 줄바꿈이 정상 — 접근성에서 글자를 줄이는 쪽이 잘못이다) + 패딩을 제품 상수로 만들어 예산이 **파생**되게 하고 배선까지 잠금. 변이 확인: detail 연장 → 385pt RED(이전엔 무가드 통과) / 여백 20→24 → 예산이 327 로 자동 축소되며 RED. 부수로 `CLAUDE.md` 의 `graphHeight // 130-180` 이 실제 175~260 과 어긋나 정정했다(상한이 실제 하한보다 낮았다).",
-          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0055 의 `graphHeight 175~260` 은 내 오류였다 — 정정** (iOS `342b93a`). 0055 에서 구 오류(`130-180`)를 고치면서 **새 오류를 넣었다**: 실제 치역은 `175~240` 이다. `heightMultiplier` 가 iPad(extraLarge)에서 **1.0 으로 고정**돼 230 × 1.0 = 230 이므로 **260 상한은 절대 걸리지 않는다**; 240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단이다. codex 가 잡았고 직접 계산으로 확인했다. 도달 불가라는 사실을 코드 옆에도 남겼다. ⛔ 이 트랙에서 **거짓을 고치는 커밋이 새 거짓을 낳은 것이 두 번째**다(0049→0050 도 같은 형태). 교훈: **정정 커밋의 새 수치야말로 검증 대상이다** — 고치는 쪽이라는 이유로 검산을 건너뛰게 된다. 함께 반영한 산문 정밀화도 전부 codex 지적이 옳았다: 20pt 를 \"예산의 절반\"이라 한 것(예산 335 의 절반이 아니라 한쪽 여백), 실패 메시지의 \"375pt 기기 포기\" 과장, 그리고 **시험 주석에 실측 pt 를 다시 복제한 것** — \"수치의 집은 산문이 아니라 시험\" 이라고 선언한 그 커밋에서 내가 그 원칙을 어겼다. 대신 detail 상한이 낮은 **이유**만 수치 없이 남겼다(`caption1` 이 `subheadline` 보다 접근성 구간에서 가파르게 커진다 — 실측 배율 1.81 vs 1.64).",
+          "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -735,7 +743,9 @@
           "**mini 논리 폭 실측 + LayoutMetrics 선재 오표기 정정** (iOS `8eafcfb`). 375pt 전제를 웹 표가 아니라 **시뮬레이터로 직접 쟀다** — iPhone 13 mini logical `375×812pt` · native `1080×2340px` · scale 3. `native ÷ scale = 360` 은 물리 출력 다운샘플이지 논리 좌표가 아니다(codex 가 중간에 이걸 360pt 로 오해해 임계값을 낮추려 했다가 되돌렸다). 함정을 주석에 박아 다시 돌지 않게 했다. codex 가 찾은 **선재 오표기**도 정정 — `LayoutMetrics.sizeCategory` 의 `< 375pt` 분기가 \"iPhone SE, mini\" 로 적혀 있었으나 둘 다 정확히 375pt 라 그 분기에 안 들어온다(실제 대상은 Display Zoom·좁은 iPad 창). 코드는 맞고 설명만 틀린 경우다. 실패 메시지의 \"줄바꿈 발생\" → \"줄바꿈할 수 있음\" 과장 제거도 수용했다(근사 측정이 인과를 확정하지 못한다). ⚠️ 다만 codex 편집이 지운 두 가지를 **복원**했다 — ① 테스트 주석의 iPad 멀티태스킹 근거(`UIRequiresFullScreen` 부재 + 4방향): 근거를 빼면 codex 가 한 라운드 전에 지적한 \"단일 설정 추론\" 상태로 되돌아간다. ② 뷰 주석의 \"수치를 여기 적지 않는 이유\": 실천은 남아도 이유가 사라지면 다음 사람이 다시 적는다. **교훈을 지우면 실천이 근거를 잃는다.**",
           "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=Claude Code:reviewer=OpenAI Codex",
           "**배너 폭 가드의 실질 구멍 3건 — 적대 감사로 발견, 실측으로 확인** (iOS `10e5b8e`). 38-에이전트 감사를 돌려 산문 취향 지적은 버리고 **측정으로 재현되는 것만** 반영했다. ① **둘째 줄(detail)을 아예 안 쟀다** — 클래스명·실패 메시지는 \"배너 문구\" 를 재는 것처럼 읽히는데 headline 만 쟀고, iOS 실측상 detail 은 AX1 에서 339pt 로 예산 335 를 이미 넘는다. ② **\"접근성 크기까지 통과\" 가 거짓** — 시험이 도는 접근성 단계는 AX1 하나(5단계 중 1)뿐이고 AX2~AX5 는 396/475/646pt 로 전부 초과다. ③ **예산의 절반이 뷰와 끊겨 있었다** — `375 - 40` 의 40 은 뷰 패딩의 리터럴 사본이라 뷰에서 바꿔도 예산이 조용히 그대로였다. 이 트랙이 없애려던 실패 양식이 주석에서 시험 리터럴로 **자리만 옮긴** 것이다. 고친 방식: 두 줄 모두 측정 + 줄마다 계약 크기 분리(headline AX1 / detail XXXL, 그 위는 줄바꿈이 정상 — 접근성에서 글자를 줄이는 쪽이 잘못이다) + 패딩을 제품 상수로 만들어 예산이 **파생**되게 하고 배선까지 잠금. 변이 확인: detail 연장 → 385pt RED(이전엔 무가드 통과) / 여백 20→24 → 예산이 327 로 자동 축소되며 RED. 부수로 `CLAUDE.md` 의 `graphHeight // 130-180` 이 실제 175~260 과 어긋나 정정했다(상한이 실제 하한보다 낮았다).",
-          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0055 의 `graphHeight 175~260` 은 내 오류였다 — 정정** (iOS `342b93a`). 0055 에서 구 오류(`130-180`)를 고치면서 **새 오류를 넣었다**: 실제 치역은 `175~240` 이다. `heightMultiplier` 가 iPad(extraLarge)에서 **1.0 으로 고정**돼 230 × 1.0 = 230 이므로 **260 상한은 절대 걸리지 않는다**; 240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단이다. codex 가 잡았고 직접 계산으로 확인했다. 도달 불가라는 사실을 코드 옆에도 남겼다. ⛔ 이 트랙에서 **거짓을 고치는 커밋이 새 거짓을 낳은 것이 두 번째**다(0049→0050 도 같은 형태). 교훈: **정정 커밋의 새 수치야말로 검증 대상이다** — 고치는 쪽이라는 이유로 검산을 건너뛰게 된다. 함께 반영한 산문 정밀화도 전부 codex 지적이 옳았다: 20pt 를 \"예산의 절반\"이라 한 것(예산 335 의 절반이 아니라 한쪽 여백), 실패 메시지의 \"375pt 기기 포기\" 과장, 그리고 **시험 주석에 실측 pt 를 다시 복제한 것** — \"수치의 집은 산문이 아니라 시험\" 이라고 선언한 그 커밋에서 내가 그 원칙을 어겼다. 대신 detail 상한이 낮은 **이유**만 수치 없이 남겼다(`caption1` 이 `subheadline` 보다 접근성 구간에서 가파르게 커진다 — 실측 배율 1.81 vs 1.64).",
+          "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -878,7 +888,9 @@
           "**Display Zoom·mini 전제 재검증과 자기 정정** (iOS `8eafcfb`). 주석에 남은 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적하고 소형 iPhone 프로필을 확인하다가, iPhone 12/13 mini 를 `1080px / 3x = 360pt` 로 해석해 \"375pt 전제 자체가 틀렸다\" 고 판단하고 임계값을 320pt 로 낮추는 수정까지 진행했다. 사용자가 지정한 비교표와 로컬 Xcode 프로필을 교차 대조한 뒤 **직접 철회**했다 — mini 의 기본 논리 좌표는 375×812 이고 360×780 은 물리 출력 다운샘플이다. 아울러 `LayoutMetrics` 의 `< 375pt` 구간 설명이 실제 대상(Display Zoom·좁은 iPad 창)과 어긋난 선재 오표기임을 찾아냈다. ⛔ 교훈: **물리 해상도 ÷ scale 은 논리 폭이 아니다** — 다운샘플 기기에서 둘이 갈린다.",
           "semantic-input-binding/v1:0054:430a7848e298a2b246d0584e0c0d64ef164f98c058a79361cf4096d16ede5b4b:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:author=OpenAI Codex:reviewer=Claude Code",
           "**Display Zoom 미측정 단정 지적 + mini 재검증** (iOS `10e5b8e` 직전 라운드). 주석의 \"Display Zoom 은 375pt 보다 좁다\" 가 미측정 단정임을 지적했고, 소형 iPhone 프로필을 확인하다 mini 를 `1080px / 3x = 360pt` 로 해석해 375pt 전제 자체를 부정하고 임계값을 320pt 로 낮추는 수정까지 갔다가, 사용자가 지정한 비교표와 로컬 프로필 교차 대조 후 **직접 철회**했다. 또 뷰 주석이 시험의 \"근사일 뿐\" 한계와 달리 \"한 줄이다/줄바꿈된다\" 를 단정하던 것을 잡았다 — 이건 정확한 지적이었고 그대로 반영됐다. ⛔ 이 라운드의 교훈 둘: **물리 해상도 ÷ scale 은 논리 폭이 아니다**, 그리고 **주석을 압축할 때 검증 근거를 함께 지우면 다음 라운드에 같은 의심이 되살아난다** (iPad 근거·수치 비기재 이유가 두 번 삭제됐다가 두 번 복원됐다).",
-          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0055:fc0f842ad3bb215936514e27244c73d481a86167604ed116072e4e977b24c3c0:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:author=OpenAI Codex:reviewer=Claude Code",
+          "**정정 커밋의 새 수치 검산** (iOS `342b93a`). 클로드의 가드 개선(둘째 줄 측정·여백 상수 결속)은 타당하다고 확인한 뒤, 새로 들어간 산문을 코드로 검산해 `graphHeight 175~260` 이 도달 불가 상한을 치역으로 적은 오류임을 찾았다 — extraLarge 는 배수 1.0 이라 230, 나머지는 240 에서 잘리므로 실효 치역은 175~240 이다. 아울러 (a) 20pt 를 \"폭 예산의 절반\" 이라 한 부정확, (b) 실패 메시지의 기기 포기 과장, (c) 시험 주석에 측정값을 재복제해 stale 문제를 되살린 것을 지적했고 모두 반영됐다. epoch 0055 에 남은 `175~260` 은 append-only 정정이 필요하다고 명시했다.",
+          "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -892,21 +904,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "e9c9107424744d08f750dad9aeda2b2023de8baf8ff6c8bc62688d481b7d543c",
+    "manifest_sha256": "65a33dc91cfb8a3e07e72cd360d11c9f3a658d674ebb14516e9b59903a5e329d",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "b9dc009b4c9f7d41db789b971ece27fae8df4b6b3bd1e050a3f5dd0fbd5a91e6",
-    "server_commit": "5f511603a04ef19b6312a04fc909e66ad3c626ff",
-    "ios_commit": "10e5b8eb3df80dd7a2c5090b80284dafe8fa3523"
+    "lock_sha256": "2646888c34f2e3e76183f83fb4ec7c776f6814d7736813608eb1db288671c616",
+    "server_commit": "21280af9d9db42199ef0cf609219c4041e1da058",
+    "ios_commit": "342b93af7f8c553a95bb7f595b3dc2e2f26e982c"
   },
   "documents": {
-    "ADR": "f3a644cdb5802190050783a6df99e6b5a74755b238b1bcea3e6df09b29d0877b",
-    "CLIENT": "f932d12940ce0e0ce5bb61d8c10270101f049501e3ddbf4ede93e027159452a0",
-    "CUT": "dbb9da17c472837fd8579e829b82c95e522baa3a8ac89215b68750f41c43cae4",
-    "HAND": "3a13910b1a1094a909a917072cf81b041a763dcc3333f849aa0e25aeb5a244e8",
-    "HEALTH": "2d55d37e22274a119c34df131e8825eafcea4b6e3a28bce73528d054a80bfaae",
-    "LOAD": "e6cce899f214ed2ce0b52b62965294666641e7133b8c4890ef050676a23e305d"
+    "ADR": "915a96d0bb68a8f55981363af3a682c427b6ca5a4820b9ef436a4bc5fa994874",
+    "CLIENT": "23519500d2ce8c956089520d5c0ebd9d2960df3176a49199cf470e605589970a",
+    "CUT": "70f595d0c710e5f533a78d1f46fbeb4fc7b39d69e295d9019c6e7cc803d0f785",
+    "HAND": "5f07825057eab4ba4d31fe7e738627aa8ad6377953dd5b6544826db5c6d60df4",
+    "HEALTH": "a2e4e1a0473748f06b05dac21a48dee1a0d5b6fa0f241d0c23742224b6a7607a",
+    "LOAD": "1ad20b632c27f57b6616b12e39db20a347538e271dca91eae885e8a52d3f1cc9"
   },
-  "claim_ledger_sha256": "3579524fdae7699171143990f6c2d9a0d156777f0b7c4818474bc66931a466ba",
+  "claim_ledger_sha256": "307381cdb7a308852a81d726e86a6d821a35d2f64ba1f16da9e9d0476c1a5f1f",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,

@@ -3,10 +3,10 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `5f511603a04ef19b6312a04fc909e66ad3c626ff`
-- iOS 기준 commit: `10e5b8eb3df80dd7a2c5090b80284dafe8fa3523`
+- server 기준 commit: `21280af9d9db42199ef0cf609219c4041e1da058`
+- iOS 기준 commit: `342b93af7f8c553a95bb7f595b3dc2e2f26e982c`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `e9c9107424744d08f750dad9aeda2b2023de8baf8ff6c8bc62688d481b7d543c`
+- manifest SHA: `65a33dc91cfb8a3e07e72cd360d11c9f3a658d674ebb14516e9b59903a5e329d`
 - baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
