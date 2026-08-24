@@ -142,7 +142,9 @@
           "**무료 뉴스 배너 문구를 페이월 혜택명과 정렬** (iOS `dc9c039`). 배너가 \"구독 시 최신 뉴스·아침 보고서 전체 보기\" 라 페이월의 \"환율 보고서\" 와 같은 혜택을 다른 이름으로 불렀다 — 사용자 지정 문구 \"구독 시 뉴스속보 · 환율 보고서 보기\" 로 통일했다. **배너에 \"먼저\" 를 넣지 않은 것은 의도된 차이다**: 무료도 뉴스를 보므로 페이월에서는 \"먼저\" 가 과장 방지에 필요하지만, 배너는 둘째 줄 \"일부 콘텐츠는 구독자에게만 제공됩니다\" 가 범위를 한정해 준다(페이월엔 그 한정구가 없다). 폭을 추정이 아니라 실측했다 — subheadline/medium, 가용 폭 = 화면폭 − 좌우 20pt(SE 335pt) 기준으로 신규 기본 209pt·XXXL 289pt 로 **현행(235/325)보다 짧아** 1줄을 유지한다. 검토했던 \"…먼저 보기·환율 보고서 보기\" 는 기본 265·XXXL 366pt 라 XXXL 에서 전 기기 2줄이 되어(배너는 이미 2줄이라 3줄) 채택하지 않았다.",
           "semantic-input-binding/v1:0048:5237a799e91dd191e912950d39da547ee3b6e9e30ad7088e68e5ab71be86a8b9:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:author=Claude Code:reviewer=OpenAI Codex",
           "**뉴스 혜택 표기 통일 + 내가 남긴 실측 주석이 거짓이 된 것 교정** (iOS `fca3d81`). 페이월/배너가 \"뉴스 속보\"/\"뉴스속보\", 붙임/띄움 가운뎃점으로 갈라져 있어 붙임·\"뉴스속보\" 로 통일했다(앱 관례: 붙임=명사 병렬, 띄움=필드 구분자). 폭 이득 실측 — 배너 붙임은 기본 202pt·XXXL 279pt·접근성(AX1) 331pt 로 가용 폭(SE 335pt) 안에 **접근성 크기까지 한 줄**이고, 띄움은 AX1 341pt 로 2줄이었다. ⛔ **직전 커밋에서 내가 배너 주석에 박은 실측 수치(209/289pt)가 문자열 교체로 거짓이 됐다** — 코덱스는 문자열만 바꾸고 주석을 두었고, 나도 하마터면 넘길 뻔했다. 이건 \"구현이 산문을 거짓으로 만든다\" 의 축소판이다: 주석에 수치를 박으면 그 수치는 문자열의 일부가 된다. 붙임 기준으로 갱신하고 AX1 여유가 4pt 뿐이라는 경고를 덧붙였으며, 측정 하네스에 `측정 대상이 제품 문자열과 다르다` assert 를 걸어 제품 문자열과 대조한 상태에서만 수치가 나오게 했다.",
-          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0049 의 내 문장이 거짓이었다 — 정정 + 가드 실체화** (iOS `a4d2df2`). 0049 에 \"측정 하네스에 assert 를 걸어 제품 문자열과 대조한 상태에서만 수치가 나오게 했다\" 고 적었으나 **그 assert 는 임시 프로브 안에만 있었고 측정 후 삭제했다** — 상시 가드는 존재하지 않았고 남은 건 주석에 박힌 일회성 수치뿐이었다. codex 가 잡았다. 이건 [[feedback_passive_artifact_as_active_mechanism]] 그대로다: 수동적 산출물(삭제된 프로브)을 능동적 기전으로 서술했다. 검문 질문은 \"그래서 **누가 실제로** 그 행동을 하는가\" 다 — 답이 \"아무도\" 였다. 정정: 배너 주석에서 pt 수치를 삭제하고(문자열이 바뀌면 주석이 조용히 거짓이 되는 부류 자체를 제거) `NewsBannerCopyWidthTests` 를 신설해 **제품 소스에서 배너 문자열을 직접 추출**하고 기본·XXXL·AX1 폭 상한(SE 가용 335pt)을 강제한다. 변이로 물음을 확인했고(\"먼저 보기\" 추가 시 XXXL 361pt·AX1 428pt RED) 추출이 공허하지 않음도 실제 출력으로 봤다. ⚠️ 이 가드는 \"한 줄 렌더 보증\" 이 아니다 — UIFont 근사라 SwiftUI 실제 줄바꿈과 다르며 잡는 것은 \"예산 초과로 길어지는 것\" 뿐이다. 그 한계를 시험 주석에 명시했다(가드를 과대 서술하는 것이 애초의 실수였으므로).",
+          "semantic-input-binding/v1:0050:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:4d858582a216e63f204bfa4f7e8b950db7d2ba754d6426b4acc3980d44f83962:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -268,7 +270,9 @@
           "**배너 통일 제안과 폭 추정의 한계** (iOS `dc9c039`). 페이월만 바꾸고 배너를 두면 같은 구매 흐름에서 혜택명이 둘이 된다는 지적은 맞았고 그대로 반영됐다. 다만 초안은 \"먼저 보기\" 를 배너에도 넣었고 폭을 \"약 265pt 대 가용 390pt\" 로 추정했는데, 가용 폭은 `.padding(.horizontal, 20)` 때문에 화면폭 − 40 (SE 335pt)이고 265pt 는 기본 크기 값이라 Dynamic Type 상단이 빠져 있었다 — 실측 결과 그 안은 XXXL 에서 전 기기 2줄이었다. ⛔ 교훈: **폭·줄바꿈은 추정하지 말고 잰다**(이 앱은 `dynamicTypeSize` 상한이 0건이라 접근성 크기까지 도달한다). 또 배너 문자열은 사용자가 유지를 지정했던 부분이라 재작성은 사용자 제안으로 열린 뒤에 반영했다.",
           "semantic-input-binding/v1:0048:5237a799e91dd191e912950d39da547ee3b6e9e30ad7088e68e5ab71be86a8b9:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:author=OpenAI Codex:reviewer=Claude Code",
           "**가운뎃점 붙임 판정** (iOS `fca3d81`). `·` 가 두 혜택을 하나로 묶는 기호이므로 양옆을 붙이는 편이 읽기 쉽고 앱의 기존 명사 병렬 표기와 일치하며 작은 화면·Dynamic Type 에서 가장 짧다고 판정했고, 페이월·배너·회귀 잠금 두 곳의 표기를 함께 맞췄다. 실측이 이 판정을 뒷받침했다(AX1 331pt vs 341pt — 붙임만 SE 가용 폭 335pt 안에 한 줄로 남는다). 다만 문자열 네 곳만 고치고 배너 주석의 실측 수치는 갱신하지 않아 산문이 코드와 어긋난 채 남았다 — 문자열을 바꿀 때는 그 문자열을 설명하는 주석도 같은 작업 단위로 본다.",
-          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=OpenAI Codex:reviewer=Claude Code",
+          "**\"재발을 막았다\" 주장 반증** (iOS `a4d2df2`). 표기 구현·회귀 시험·양 리포 상태는 정확했으나, 클로드의 \"측정 하네스 assert 로 재발을 막았다\" 는 설명이 부정확함을 지적했다 — `TempProbe3` 는 측정 후 삭제됐고 영구 시험에 남아 있지 않으며, 현재 시험은 문구만 잠그고 AX1 331pt 나 한 줄 유지 여부는 잠그지 않는다. `NewsTabView.swift` 의 수치는 일회성 UIFont 측정 기록일 뿐이다. 한 줄 유지가 제품 계약이라면 별도 레이아웃 시험이 필요하지만 당시 요구 범위에는 과도하다고 봤다 — 실제 채택된 해법은 그 중간이다(SwiftUI 호스팅 대신 제품 문자열에서 재는 근사 폭 상한, 한계를 명시).",
+          "semantic-input-binding/v1:0050:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:4d858582a216e63f204bfa4f7e8b950db7d2ba754d6426b4acc3980d44f83962:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -401,7 +405,9 @@
           "**배너 통일 제안과 폭 추정의 한계** (iOS `dc9c039`). 페이월만 바꾸고 배너를 두면 같은 구매 흐름에서 혜택명이 둘이 된다는 지적은 맞았고 그대로 반영됐다. 다만 초안은 \"먼저 보기\" 를 배너에도 넣었고 폭을 \"약 265pt 대 가용 390pt\" 로 추정했는데, 가용 폭은 `.padding(.horizontal, 20)` 때문에 화면폭 − 40 (SE 335pt)이고 265pt 는 기본 크기 값이라 Dynamic Type 상단이 빠져 있었다 — 실측 결과 그 안은 XXXL 에서 전 기기 2줄이었다. ⛔ 교훈: **폭·줄바꿈은 추정하지 말고 잰다**(이 앱은 `dynamicTypeSize` 상한이 0건이라 접근성 크기까지 도달한다). 또 배너 문자열은 사용자가 유지를 지정했던 부분이라 재작성은 사용자 제안으로 열린 뒤에 반영했다.",
           "semantic-input-binding/v1:0048:5237a799e91dd191e912950d39da547ee3b6e9e30ad7088e68e5ab71be86a8b9:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:author=OpenAI Codex:reviewer=Claude Code",
           "**가운뎃점 붙임 판정** (iOS `fca3d81`). `·` 가 두 혜택을 하나로 묶는 기호이므로 양옆을 붙이는 편이 읽기 쉽고 앱의 기존 명사 병렬 표기와 일치하며 작은 화면·Dynamic Type 에서 가장 짧다고 판정했고, 페이월·배너·회귀 잠금 두 곳의 표기를 함께 맞췄다. 실측이 이 판정을 뒷받침했다(AX1 331pt vs 341pt — 붙임만 SE 가용 폭 335pt 안에 한 줄로 남는다). 다만 문자열 네 곳만 고치고 배너 주석의 실측 수치는 갱신하지 않아 산문이 코드와 어긋난 채 남았다 — 문자열을 바꿀 때는 그 문자열을 설명하는 주석도 같은 작업 단위로 본다.",
-          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=OpenAI Codex:reviewer=Claude Code",
+          "**\"재발을 막았다\" 주장 반증** (iOS `a4d2df2`). 표기 구현·회귀 시험·양 리포 상태는 정확했으나, 클로드의 \"측정 하네스 assert 로 재발을 막았다\" 는 설명이 부정확함을 지적했다 — `TempProbe3` 는 측정 후 삭제됐고 영구 시험에 남아 있지 않으며, 현재 시험은 문구만 잠그고 AX1 331pt 나 한 줄 유지 여부는 잠그지 않는다. `NewsTabView.swift` 의 수치는 일회성 UIFont 측정 기록일 뿐이다. 한 줄 유지가 제품 계약이라면 별도 레이아웃 시험이 필요하지만 당시 요구 범위에는 과도하다고 봤다 — 실제 채택된 해법은 그 중간이다(SwiftUI 호스팅 대신 제품 문자열에서 재는 근사 폭 상한, 한계를 명시).",
+          "semantic-input-binding/v1:0050:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:4d858582a216e63f204bfa4f7e8b950db7d2ba754d6426b4acc3980d44f83962:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -535,7 +541,9 @@
           "**무료 뉴스 배너 문구를 페이월 혜택명과 정렬** (iOS `dc9c039`). 배너가 \"구독 시 최신 뉴스·아침 보고서 전체 보기\" 라 페이월의 \"환율 보고서\" 와 같은 혜택을 다른 이름으로 불렀다 — 사용자 지정 문구 \"구독 시 뉴스속보 · 환율 보고서 보기\" 로 통일했다. **배너에 \"먼저\" 를 넣지 않은 것은 의도된 차이다**: 무료도 뉴스를 보므로 페이월에서는 \"먼저\" 가 과장 방지에 필요하지만, 배너는 둘째 줄 \"일부 콘텐츠는 구독자에게만 제공됩니다\" 가 범위를 한정해 준다(페이월엔 그 한정구가 없다). 폭을 추정이 아니라 실측했다 — subheadline/medium, 가용 폭 = 화면폭 − 좌우 20pt(SE 335pt) 기준으로 신규 기본 209pt·XXXL 289pt 로 **현행(235/325)보다 짧아** 1줄을 유지한다. 검토했던 \"…먼저 보기·환율 보고서 보기\" 는 기본 265·XXXL 366pt 라 XXXL 에서 전 기기 2줄이 되어(배너는 이미 2줄이라 3줄) 채택하지 않았다.",
           "semantic-input-binding/v1:0048:5237a799e91dd191e912950d39da547ee3b6e9e30ad7088e68e5ab71be86a8b9:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:author=Claude Code:reviewer=OpenAI Codex",
           "**뉴스 혜택 표기 통일 + 내가 남긴 실측 주석이 거짓이 된 것 교정** (iOS `fca3d81`). 페이월/배너가 \"뉴스 속보\"/\"뉴스속보\", 붙임/띄움 가운뎃점으로 갈라져 있어 붙임·\"뉴스속보\" 로 통일했다(앱 관례: 붙임=명사 병렬, 띄움=필드 구분자). 폭 이득 실측 — 배너 붙임은 기본 202pt·XXXL 279pt·접근성(AX1) 331pt 로 가용 폭(SE 335pt) 안에 **접근성 크기까지 한 줄**이고, 띄움은 AX1 341pt 로 2줄이었다. ⛔ **직전 커밋에서 내가 배너 주석에 박은 실측 수치(209/289pt)가 문자열 교체로 거짓이 됐다** — 코덱스는 문자열만 바꾸고 주석을 두었고, 나도 하마터면 넘길 뻔했다. 이건 \"구현이 산문을 거짓으로 만든다\" 의 축소판이다: 주석에 수치를 박으면 그 수치는 문자열의 일부가 된다. 붙임 기준으로 갱신하고 AX1 여유가 4pt 뿐이라는 경고를 덧붙였으며, 측정 하네스에 `측정 대상이 제품 문자열과 다르다` assert 를 걸어 제품 문자열과 대조한 상태에서만 수치가 나오게 했다.",
-          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0049 의 내 문장이 거짓이었다 — 정정 + 가드 실체화** (iOS `a4d2df2`). 0049 에 \"측정 하네스에 assert 를 걸어 제품 문자열과 대조한 상태에서만 수치가 나오게 했다\" 고 적었으나 **그 assert 는 임시 프로브 안에만 있었고 측정 후 삭제했다** — 상시 가드는 존재하지 않았고 남은 건 주석에 박힌 일회성 수치뿐이었다. codex 가 잡았다. 이건 [[feedback_passive_artifact_as_active_mechanism]] 그대로다: 수동적 산출물(삭제된 프로브)을 능동적 기전으로 서술했다. 검문 질문은 \"그래서 **누가 실제로** 그 행동을 하는가\" 다 — 답이 \"아무도\" 였다. 정정: 배너 주석에서 pt 수치를 삭제하고(문자열이 바뀌면 주석이 조용히 거짓이 되는 부류 자체를 제거) `NewsBannerCopyWidthTests` 를 신설해 **제품 소스에서 배너 문자열을 직접 추출**하고 기본·XXXL·AX1 폭 상한(SE 가용 335pt)을 강제한다. 변이로 물음을 확인했고(\"먼저 보기\" 추가 시 XXXL 361pt·AX1 428pt RED) 추출이 공허하지 않음도 실제 출력으로 봤다. ⚠️ 이 가드는 \"한 줄 렌더 보증\" 이 아니다 — UIFont 근사라 SwiftUI 실제 줄바꿈과 다르며 잡는 것은 \"예산 초과로 길어지는 것\" 뿐이다. 그 한계를 시험 주석에 명시했다(가드를 과대 서술하는 것이 애초의 실수였으므로).",
+          "semantic-input-binding/v1:0050:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:4d858582a216e63f204bfa4f7e8b950db7d2ba754d6426b4acc3980d44f83962:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -675,7 +683,9 @@
           "**무료 뉴스 배너 문구를 페이월 혜택명과 정렬** (iOS `dc9c039`). 배너가 \"구독 시 최신 뉴스·아침 보고서 전체 보기\" 라 페이월의 \"환율 보고서\" 와 같은 혜택을 다른 이름으로 불렀다 — 사용자 지정 문구 \"구독 시 뉴스속보 · 환율 보고서 보기\" 로 통일했다. **배너에 \"먼저\" 를 넣지 않은 것은 의도된 차이다**: 무료도 뉴스를 보므로 페이월에서는 \"먼저\" 가 과장 방지에 필요하지만, 배너는 둘째 줄 \"일부 콘텐츠는 구독자에게만 제공됩니다\" 가 범위를 한정해 준다(페이월엔 그 한정구가 없다). 폭을 추정이 아니라 실측했다 — subheadline/medium, 가용 폭 = 화면폭 − 좌우 20pt(SE 335pt) 기준으로 신규 기본 209pt·XXXL 289pt 로 **현행(235/325)보다 짧아** 1줄을 유지한다. 검토했던 \"…먼저 보기·환율 보고서 보기\" 는 기본 265·XXXL 366pt 라 XXXL 에서 전 기기 2줄이 되어(배너는 이미 2줄이라 3줄) 채택하지 않았다.",
           "semantic-input-binding/v1:0048:5237a799e91dd191e912950d39da547ee3b6e9e30ad7088e68e5ab71be86a8b9:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:author=Claude Code:reviewer=OpenAI Codex",
           "**뉴스 혜택 표기 통일 + 내가 남긴 실측 주석이 거짓이 된 것 교정** (iOS `fca3d81`). 페이월/배너가 \"뉴스 속보\"/\"뉴스속보\", 붙임/띄움 가운뎃점으로 갈라져 있어 붙임·\"뉴스속보\" 로 통일했다(앱 관례: 붙임=명사 병렬, 띄움=필드 구분자). 폭 이득 실측 — 배너 붙임은 기본 202pt·XXXL 279pt·접근성(AX1) 331pt 로 가용 폭(SE 335pt) 안에 **접근성 크기까지 한 줄**이고, 띄움은 AX1 341pt 로 2줄이었다. ⛔ **직전 커밋에서 내가 배너 주석에 박은 실측 수치(209/289pt)가 문자열 교체로 거짓이 됐다** — 코덱스는 문자열만 바꾸고 주석을 두었고, 나도 하마터면 넘길 뻔했다. 이건 \"구현이 산문을 거짓으로 만든다\" 의 축소판이다: 주석에 수치를 박으면 그 수치는 문자열의 일부가 된다. 붙임 기준으로 갱신하고 AX1 여유가 4pt 뿐이라는 경고를 덧붙였으며, 측정 하네스에 `측정 대상이 제품 문자열과 다르다` assert 를 걸어 제품 문자열과 대조한 상태에서만 수치가 나오게 했다.",
-          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0049 의 내 문장이 거짓이었다 — 정정 + 가드 실체화** (iOS `a4d2df2`). 0049 에 \"측정 하네스에 assert 를 걸어 제품 문자열과 대조한 상태에서만 수치가 나오게 했다\" 고 적었으나 **그 assert 는 임시 프로브 안에만 있었고 측정 후 삭제했다** — 상시 가드는 존재하지 않았고 남은 건 주석에 박힌 일회성 수치뿐이었다. codex 가 잡았다. 이건 [[feedback_passive_artifact_as_active_mechanism]] 그대로다: 수동적 산출물(삭제된 프로브)을 능동적 기전으로 서술했다. 검문 질문은 \"그래서 **누가 실제로** 그 행동을 하는가\" 다 — 답이 \"아무도\" 였다. 정정: 배너 주석에서 pt 수치를 삭제하고(문자열이 바뀌면 주석이 조용히 거짓이 되는 부류 자체를 제거) `NewsBannerCopyWidthTests` 를 신설해 **제품 소스에서 배너 문자열을 직접 추출**하고 기본·XXXL·AX1 폭 상한(SE 가용 335pt)을 강제한다. 변이로 물음을 확인했고(\"먼저 보기\" 추가 시 XXXL 361pt·AX1 428pt RED) 추출이 공허하지 않음도 실제 출력으로 봤다. ⚠️ 이 가드는 \"한 줄 렌더 보증\" 이 아니다 — UIFont 근사라 SwiftUI 실제 줄바꿈과 다르며 잡는 것은 \"예산 초과로 길어지는 것\" 뿐이다. 그 한계를 시험 주석에 명시했다(가드를 과대 서술하는 것이 애초의 실수였으므로).",
+          "semantic-input-binding/v1:0050:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:4d858582a216e63f204bfa4f7e8b950db7d2ba754d6426b4acc3980d44f83962:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -806,7 +816,9 @@
           "**배너 통일 제안과 폭 추정의 한계** (iOS `dc9c039`). 페이월만 바꾸고 배너를 두면 같은 구매 흐름에서 혜택명이 둘이 된다는 지적은 맞았고 그대로 반영됐다. 다만 초안은 \"먼저 보기\" 를 배너에도 넣었고 폭을 \"약 265pt 대 가용 390pt\" 로 추정했는데, 가용 폭은 `.padding(.horizontal, 20)` 때문에 화면폭 − 40 (SE 335pt)이고 265pt 는 기본 크기 값이라 Dynamic Type 상단이 빠져 있었다 — 실측 결과 그 안은 XXXL 에서 전 기기 2줄이었다. ⛔ 교훈: **폭·줄바꿈은 추정하지 말고 잰다**(이 앱은 `dynamicTypeSize` 상한이 0건이라 접근성 크기까지 도달한다). 또 배너 문자열은 사용자가 유지를 지정했던 부분이라 재작성은 사용자 제안으로 열린 뒤에 반영했다.",
           "semantic-input-binding/v1:0048:5237a799e91dd191e912950d39da547ee3b6e9e30ad7088e68e5ab71be86a8b9:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:author=OpenAI Codex:reviewer=Claude Code",
           "**가운뎃점 붙임 판정** (iOS `fca3d81`). `·` 가 두 혜택을 하나로 묶는 기호이므로 양옆을 붙이는 편이 읽기 쉽고 앱의 기존 명사 병렬 표기와 일치하며 작은 화면·Dynamic Type 에서 가장 짧다고 판정했고, 페이월·배너·회귀 잠금 두 곳의 표기를 함께 맞췄다. 실측이 이 판정을 뒷받침했다(AX1 331pt vs 341pt — 붙임만 SE 가용 폭 335pt 안에 한 줄로 남는다). 다만 문자열 네 곳만 고치고 배너 주석의 실측 수치는 갱신하지 않아 산문이 코드와 어긋난 채 남았다 — 문자열을 바꿀 때는 그 문자열을 설명하는 주석도 같은 작업 단위로 본다.",
-          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0049:3139bd9af9fd96845c754904e35d106a0f787c9099f13e5ab7e637d3700c356a:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:author=OpenAI Codex:reviewer=Claude Code",
+          "**\"재발을 막았다\" 주장 반증** (iOS `a4d2df2`). 표기 구현·회귀 시험·양 리포 상태는 정확했으나, 클로드의 \"측정 하네스 assert 로 재발을 막았다\" 는 설명이 부정확함을 지적했다 — `TempProbe3` 는 측정 후 삭제됐고 영구 시험에 남아 있지 않으며, 현재 시험은 문구만 잠그고 AX1 331pt 나 한 줄 유지 여부는 잠그지 않는다. `NewsTabView.swift` 의 수치는 일회성 UIFont 측정 기록일 뿐이다. 한 줄 유지가 제품 계약이라면 별도 레이아웃 시험이 필요하지만 당시 요구 범위에는 과도하다고 봤다 — 실제 채택된 해법은 그 중간이다(SwiftUI 호스팅 대신 제품 문자열에서 재는 근사 폭 상한, 한계를 명시).",
+          "semantic-input-binding/v1:0050:056175aaf785de8e07860d6bf52b56ebab4450d79a01963ba79041f2ff635f2c:4d858582a216e63f204bfa4f7e8b950db7d2ba754d6426b4acc3980d44f83962:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -820,21 +832,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "93d8d6f0b021c6827e5cc1aeb3d1a600d2300cd1b88bbfefcd02397abf75e62f",
+    "manifest_sha256": "76bcd214791b5ee3a0b2ba8b59413c100cc0f7cd52163d5e19130331015a324d",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "c207f12f92c98cd26b0dcf5450fc710308a7b2138e4fc85eaa456903747a8f82",
-    "server_commit": "556625fe506d4a8021dd8ffab593b28c0dd1a6ad",
-    "ios_commit": "fca3d81d69818010512f5796acf7f225c7e6730b"
+    "lock_sha256": "df355fde9261239d7c259e2ea9ea2d53dcf0b27d21f0b1b7af24bee704bceb82",
+    "server_commit": "17abf617786fe446c0bc9b2f1653ee8232e9200f",
+    "ios_commit": "a4d2df242e8d3a2cc69ed657fc0f11a966d7ddc6"
   },
   "documents": {
-    "ADR": "daf9fa8d4071697be8dac656b9830d2702e89c06ad1b878662be4047dd405586",
-    "CLIENT": "8404a4c41aa4e9144c323149f207805cc67f7dbe6ae729439e949af0ab515ed1",
-    "CUT": "33693013761e4023fffcfe340aa13f4a7887b2b64b79358f8a04f35b40de8de3",
-    "HAND": "30bd14d30df6b64f2979e79d1ac81e4160435172472e84e2f754ca52cdbf4dbf",
-    "HEALTH": "d7e1416dbd8053329986f6822a4aec832f2014a578df71b3a27e84b0cbae2809",
-    "LOAD": "d67a1c4155568e9c39c7f33f25f02c843c54e680abb694016fade446a1f2471f"
+    "ADR": "eaadf64ffc8f8fb00397968598e9ce30f82edc2628f1f6722f074a67e884899f",
+    "CLIENT": "172aaf093ba71e125470d8a08d50b37d96e7bdf449e92f828733f1e36edf5a85",
+    "CUT": "b06ba800d6b046d790f5b7a4c96420c9309f24a1854e7b4983888624e54b5b7c",
+    "HAND": "153c60cdd61ac27339f4d1dd2a4a834c03fc1b1498df84da381a44f6105a3a40",
+    "HEALTH": "dd3c13f2779de1e7224ba247aeaacde08203a89e7b9c1059ae2dc20611728ce9",
+    "LOAD": "ea7b0d76af0a1b29e67be813e9937dd380d6514a9e64cda68fe4973252d16980"
   },
-  "claim_ledger_sha256": "6329f374dc5680d3b969d14e2a6ed7faef63a53f990b62bac071b4b584e5fb24",
+  "claim_ledger_sha256": "ec3dad5afb08a16ae76a93b4d8c7e07ccbf7673c13a5786b0262bbd1ceae1265",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
