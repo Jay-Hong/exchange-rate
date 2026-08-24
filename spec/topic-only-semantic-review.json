@@ -134,7 +134,9 @@
           "**내 회귀 시험이 계약보다 좁았다 — 그중 하나는 공허했다** (iOS `7667c9c`). 직전 커밋에서 \"무료 화면의 의도된 설계 셋을 회귀로 잠갔다\" 고 적었는데 둘 다 실제로는 못 잠그고 있었다. **여백**: 시험이 \"환율 함수 두 개에 70pt 가 있는가\" 만 봐서 **탭 4개 중 3개만 검사**했다 — `a05b138` 의 `NewsTabView` 에 `frame(height: 70)` 이 **0건**임을 확인했다. **순서**: `test_freeRouting_includesTetherFirst` 가 단정하는 `FreeSnapshotRouting.tabs` 를 **뷰가 하나도 쓰지 않았다**(사용 파일 0). 화면 순서를 아무렇게나 바꿔도 통과하는 **공허한 시험**이었고, 커밋 메시지의 \"순서를 잠갔다\" 는 거짓이었다. ⛔ 교훈: \"X 를 회귀로 잠갔다\" 고 쓰기 전에 **그 시험이 실제로 소비되는 코드에 걸려 있는지**(단정 대상이 프로덕션 경로에서 쓰이는지)와 **계약의 전 범위를 덮는지**(N개 중 몇 개를 검사하는지)를 세어 봐야 한다.",
           "semantic-input-binding/v1:0044:67b3acca139f02b586a9380ba71aaf85e9af32a65eeae4994b883ce48d723ca1:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:author=Claude Code:reviewer=OpenAI Codex",
           "**FX 렌더 불변 확인 + Smoke 부재 증거의 유효성 교정** (iOS `78a9c48`). 리팩터가 **기준 화면(FX)** 을 바꾸면 안 되므로 대조했다 — `AlertPairLabel` 이 기존 FX 마크업(`HStack(spacing: 4)` · `.title3`/`.bold`/`primaryText` · `.caption`/`secondaryText`)을 그대로 옮겼고 호출 인자도 동일해 **FX 는 픽셀 단위로 불변**이다. `pairLabel` 잔존 참조는 **다른 타입**인 `ComparisonAlertSetting` 것뿐임도 전수 확인했다. ⚠️ **\"배포본에 Smoke 메뉴가 없다\" 의 증거 하나는 무효였다** — Release 바이너리에서 `'Topic 실기기 Smoke'` 가 0건이라는 관측은, **한글 문자열이 Debug 에서도 0** 이라(앞서 실측) 아무것도 증명하지 못한다. 유효한 증거는 ① `#if DEBUG` 소스 가드 ② Release 실효 조건에 `DEBUG` 없음 ③ **관측 가능한 ASCII 심볼** (`DebugTopicSmokeController`/`Section`/`debugTopicSmokeController` — Debug dylib 에선 5/3/2 로 잡히는데 Release 는 0) ④ 현재 배포본 v1.2.2 소스에는 기능 자체가 없음(파일 0 · 문자열 0)이다.",
-          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=Claude Code:reviewer=OpenAI Codex",
+          "**알림 미리보기 CTA 배치와 그리드 intrinsic 계약 복구** (iOS `6068bfa` + `d8b78ff`). 짧은 시트에서는 CTA만 바닥으로 내려가야 하는데 비교 시트의 `SourceSegmentGrid.captionRow` 안 `Color.clear.frame(width: 1)`이 제안 높이를 흡수해 그리드와 뒤 섹션까지 함께 늘어났다. 정렬자의 높이 기여를 0으로 봉하고 `AlertPreviewScroll.contentStack`은 vertical intrinsic 방어를 유지했다. 두 계약을 컨테이너 밖 bare-grid 시험과 별도 greedy-child 시험으로 분리해 한 수정이 다른 회귀를 가리지 않게 했고, 비교·김프 모양 및 700/900pt 뷰포트 불변식까지 잠갔다. 페이월은 무료 범위와 겹치던 구 문구를 `실시간 환율·그래프 업데이트`·`은행별 목표 환율 알림`·`거래소별 테더 가격 알림`·`뉴스 속보 먼저 보기`·`아침 환율 보고서`로 교체했다.",
+          "semantic-input-binding/v1:0046:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:9c4fd123270afdbd1882f0ad8020396d2ad0cdd7c280a0474e6b65aae096a1c8:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -252,7 +254,9 @@
           "**무료 화면 계약의 빈틈 2건 보완** (iOS `7667c9c`). ① **뉴스 탭에만 하단 여백이 없었다** — 사용자 계약은 \"모든 탭 하단에 CTA 가 나타나고 스크롤 최하단에 그 공간이 비어 있다\" 인데 70pt 는 테더·통화 페이지에만 있었고 뉴스는 0이라 마지막 행이 CTA 뒤로 밀려 끝까지 못 읽혔다 → `NewsTabView(bottomContentClearance:)` 추가, **기본값 0** 이라 프리미엄 호출부 무영향. ② **라우팅 상수를 화면이 쓰지 않았다** — `FreeSnapshotRouting.tabs` 를 쓰는 뷰 파일이 0개였고 picker·페이지가 순서를 따로 정의했다 → 둘 다 `ForEach(FreeSnapshotRouting.tabs)` 로 생성. CTA 는 계속 ZStack overlay 이며 `safeAreaInset` 으로 바꾸지 않았다.",
           "semantic-input-binding/v1:0044:67b3acca139f02b586a9380ba71aaf85e9af32a65eeae4994b883ce48d723ca1:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:author=OpenAI Codex:reviewer=Claude Code",
           "**테더 알림 시트 헤더를 FX 와 통일** (iOS `78a9c48`). 테더는 `\"테더 (USDT/KRW)\"` 한 덩어리에 `.title3`/`.bold` 를 걸어 통화쌍까지 굵고 크게 나왔고, FX 는 자산명과 통화쌍을 별도 Text 로 나눠 `(USD/KRW)` 를 `.caption`/보조색으로 낮춘다. 공용 `AlertPairLabel(name:pairCode:)` 로 뽑아 양쪽이 같은 컴포넌트를 쓰게 했다 — 복제해 두면 다시 갈라지므로 **구조로** 막았다. `SourceAlertScope.pairLabel` → `pairCode` 분해.",
-          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=OpenAI Codex:reviewer=Claude Code",
+          "**CTA 레이아웃 독립 재검증과 C2 누락 발견** (iOS `d8b78ff`). 새 DerivedData에서 레이아웃 5건과 페이월 문구 1건이 실제 실행되어 6/6 통과했고, 잎 시험은 `AlertPreviewScroll` 밖에서 `SourceSegmentGrid`의 높이를 400/800pt 제안으로 비교하며 컨테이너 시험은 그리드와 무관한 greedy 자식을 사용하므로 상호 은폐하지 않음을 확인했다. 다만 `d8b78ff`를 iOS에 먼저 push한 뒤 서버 정본은 iOS `78a9c48`에 고정된 채 남아 `preflight`/`verify`가 `E_CODECHANGED`로 실패했다. 인용 경로 3개는 좌표 밀림과 내용 변경이 없었지만, **`Docs impact: none`은 C2 pin 전진 불필요를 뜻하지 않는다**. 코드가 green이어도 정본 게이트가 red인 상태로 보고를 마친 것이 이번 누락이다.",
+          "semantic-input-binding/v1:0046:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:9c4fd123270afdbd1882f0ad8020396d2ad0cdd7c280a0474e6b65aae096a1c8:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -377,7 +381,9 @@
           "**무료 화면 계약의 빈틈 2건 보완** (iOS `7667c9c`). ① **뉴스 탭에만 하단 여백이 없었다** — 사용자 계약은 \"모든 탭 하단에 CTA 가 나타나고 스크롤 최하단에 그 공간이 비어 있다\" 인데 70pt 는 테더·통화 페이지에만 있었고 뉴스는 0이라 마지막 행이 CTA 뒤로 밀려 끝까지 못 읽혔다 → `NewsTabView(bottomContentClearance:)` 추가, **기본값 0** 이라 프리미엄 호출부 무영향. ② **라우팅 상수를 화면이 쓰지 않았다** — `FreeSnapshotRouting.tabs` 를 쓰는 뷰 파일이 0개였고 picker·페이지가 순서를 따로 정의했다 → 둘 다 `ForEach(FreeSnapshotRouting.tabs)` 로 생성. CTA 는 계속 ZStack overlay 이며 `safeAreaInset` 으로 바꾸지 않았다.",
           "semantic-input-binding/v1:0044:67b3acca139f02b586a9380ba71aaf85e9af32a65eeae4994b883ce48d723ca1:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:author=OpenAI Codex:reviewer=Claude Code",
           "**테더 알림 시트 헤더를 FX 와 통일** (iOS `78a9c48`). 테더는 `\"테더 (USDT/KRW)\"` 한 덩어리에 `.title3`/`.bold` 를 걸어 통화쌍까지 굵고 크게 나왔고, FX 는 자산명과 통화쌍을 별도 Text 로 나눠 `(USD/KRW)` 를 `.caption`/보조색으로 낮춘다. 공용 `AlertPairLabel(name:pairCode:)` 로 뽑아 양쪽이 같은 컴포넌트를 쓰게 했다 — 복제해 두면 다시 갈라지므로 **구조로** 막았다. `SourceAlertScope.pairLabel` → `pairCode` 분해.",
-          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=OpenAI Codex:reviewer=Claude Code",
+          "**CTA 레이아웃 독립 재검증과 C2 누락 발견** (iOS `d8b78ff`). 새 DerivedData에서 레이아웃 5건과 페이월 문구 1건이 실제 실행되어 6/6 통과했고, 잎 시험은 `AlertPreviewScroll` 밖에서 `SourceSegmentGrid`의 높이를 400/800pt 제안으로 비교하며 컨테이너 시험은 그리드와 무관한 greedy 자식을 사용하므로 상호 은폐하지 않음을 확인했다. 다만 `d8b78ff`를 iOS에 먼저 push한 뒤 서버 정본은 iOS `78a9c48`에 고정된 채 남아 `preflight`/`verify`가 `E_CODECHANGED`로 실패했다. 인용 경로 3개는 좌표 밀림과 내용 변경이 없었지만, **`Docs impact: none`은 C2 pin 전진 불필요를 뜻하지 않는다**. 코드가 green이어도 정본 게이트가 red인 상태로 보고를 마친 것이 이번 누락이다.",
+          "semantic-input-binding/v1:0046:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:9c4fd123270afdbd1882f0ad8020396d2ad0cdd7c280a0474e6b65aae096a1c8:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -503,7 +509,9 @@
           "**내 회귀 시험이 계약보다 좁았다 — 그중 하나는 공허했다** (iOS `7667c9c`). 직전 커밋에서 \"무료 화면의 의도된 설계 셋을 회귀로 잠갔다\" 고 적었는데 둘 다 실제로는 못 잠그고 있었다. **여백**: 시험이 \"환율 함수 두 개에 70pt 가 있는가\" 만 봐서 **탭 4개 중 3개만 검사**했다 — `a05b138` 의 `NewsTabView` 에 `frame(height: 70)` 이 **0건**임을 확인했다. **순서**: `test_freeRouting_includesTetherFirst` 가 단정하는 `FreeSnapshotRouting.tabs` 를 **뷰가 하나도 쓰지 않았다**(사용 파일 0). 화면 순서를 아무렇게나 바꿔도 통과하는 **공허한 시험**이었고, 커밋 메시지의 \"순서를 잠갔다\" 는 거짓이었다. ⛔ 교훈: \"X 를 회귀로 잠갔다\" 고 쓰기 전에 **그 시험이 실제로 소비되는 코드에 걸려 있는지**(단정 대상이 프로덕션 경로에서 쓰이는지)와 **계약의 전 범위를 덮는지**(N개 중 몇 개를 검사하는지)를 세어 봐야 한다.",
           "semantic-input-binding/v1:0044:67b3acca139f02b586a9380ba71aaf85e9af32a65eeae4994b883ce48d723ca1:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:author=Claude Code:reviewer=OpenAI Codex",
           "**FX 렌더 불변 확인 + Smoke 부재 증거의 유효성 교정** (iOS `78a9c48`). 리팩터가 **기준 화면(FX)** 을 바꾸면 안 되므로 대조했다 — `AlertPairLabel` 이 기존 FX 마크업(`HStack(spacing: 4)` · `.title3`/`.bold`/`primaryText` · `.caption`/`secondaryText`)을 그대로 옮겼고 호출 인자도 동일해 **FX 는 픽셀 단위로 불변**이다. `pairLabel` 잔존 참조는 **다른 타입**인 `ComparisonAlertSetting` 것뿐임도 전수 확인했다. ⚠️ **\"배포본에 Smoke 메뉴가 없다\" 의 증거 하나는 무효였다** — Release 바이너리에서 `'Topic 실기기 Smoke'` 가 0건이라는 관측은, **한글 문자열이 Debug 에서도 0** 이라(앞서 실측) 아무것도 증명하지 못한다. 유효한 증거는 ① `#if DEBUG` 소스 가드 ② Release 실효 조건에 `DEBUG` 없음 ③ **관측 가능한 ASCII 심볼** (`DebugTopicSmokeController`/`Section`/`debugTopicSmokeController` — Debug dylib 에선 5/3/2 로 잡히는데 Release 는 0) ④ 현재 배포본 v1.2.2 소스에는 기능 자체가 없음(파일 0 · 문자열 0)이다.",
-          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=Claude Code:reviewer=OpenAI Codex",
+          "**알림 미리보기 CTA 배치와 그리드 intrinsic 계약 복구** (iOS `6068bfa` + `d8b78ff`). 짧은 시트에서는 CTA만 바닥으로 내려가야 하는데 비교 시트의 `SourceSegmentGrid.captionRow` 안 `Color.clear.frame(width: 1)`이 제안 높이를 흡수해 그리드와 뒤 섹션까지 함께 늘어났다. 정렬자의 높이 기여를 0으로 봉하고 `AlertPreviewScroll.contentStack`은 vertical intrinsic 방어를 유지했다. 두 계약을 컨테이너 밖 bare-grid 시험과 별도 greedy-child 시험으로 분리해 한 수정이 다른 회귀를 가리지 않게 했고, 비교·김프 모양 및 700/900pt 뷰포트 불변식까지 잠갔다. 페이월은 무료 범위와 겹치던 구 문구를 `실시간 환율·그래프 업데이트`·`은행별 목표 환율 알림`·`거래소별 테더 가격 알림`·`뉴스 속보 먼저 보기`·`아침 환율 보고서`로 교체했다.",
+          "semantic-input-binding/v1:0046:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:9c4fd123270afdbd1882f0ad8020396d2ad0cdd7c280a0474e6b65aae096a1c8:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -635,7 +643,9 @@
           "**내 회귀 시험이 계약보다 좁았다 — 그중 하나는 공허했다** (iOS `7667c9c`). 직전 커밋에서 \"무료 화면의 의도된 설계 셋을 회귀로 잠갔다\" 고 적었는데 둘 다 실제로는 못 잠그고 있었다. **여백**: 시험이 \"환율 함수 두 개에 70pt 가 있는가\" 만 봐서 **탭 4개 중 3개만 검사**했다 — `a05b138` 의 `NewsTabView` 에 `frame(height: 70)` 이 **0건**임을 확인했다. **순서**: `test_freeRouting_includesTetherFirst` 가 단정하는 `FreeSnapshotRouting.tabs` 를 **뷰가 하나도 쓰지 않았다**(사용 파일 0). 화면 순서를 아무렇게나 바꿔도 통과하는 **공허한 시험**이었고, 커밋 메시지의 \"순서를 잠갔다\" 는 거짓이었다. ⛔ 교훈: \"X 를 회귀로 잠갔다\" 고 쓰기 전에 **그 시험이 실제로 소비되는 코드에 걸려 있는지**(단정 대상이 프로덕션 경로에서 쓰이는지)와 **계약의 전 범위를 덮는지**(N개 중 몇 개를 검사하는지)를 세어 봐야 한다.",
           "semantic-input-binding/v1:0044:67b3acca139f02b586a9380ba71aaf85e9af32a65eeae4994b883ce48d723ca1:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:author=Claude Code:reviewer=OpenAI Codex",
           "**FX 렌더 불변 확인 + Smoke 부재 증거의 유효성 교정** (iOS `78a9c48`). 리팩터가 **기준 화면(FX)** 을 바꾸면 안 되므로 대조했다 — `AlertPairLabel` 이 기존 FX 마크업(`HStack(spacing: 4)` · `.title3`/`.bold`/`primaryText` · `.caption`/`secondaryText`)을 그대로 옮겼고 호출 인자도 동일해 **FX 는 픽셀 단위로 불변**이다. `pairLabel` 잔존 참조는 **다른 타입**인 `ComparisonAlertSetting` 것뿐임도 전수 확인했다. ⚠️ **\"배포본에 Smoke 메뉴가 없다\" 의 증거 하나는 무효였다** — Release 바이너리에서 `'Topic 실기기 Smoke'` 가 0건이라는 관측은, **한글 문자열이 Debug 에서도 0** 이라(앞서 실측) 아무것도 증명하지 못한다. 유효한 증거는 ① `#if DEBUG` 소스 가드 ② Release 실효 조건에 `DEBUG` 없음 ③ **관측 가능한 ASCII 심볼** (`DebugTopicSmokeController`/`Section`/`debugTopicSmokeController` — Debug dylib 에선 5/3/2 로 잡히는데 Release 는 0) ④ 현재 배포본 v1.2.2 소스에는 기능 자체가 없음(파일 0 · 문자열 0)이다.",
-          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=Claude Code:reviewer=OpenAI Codex",
+          "**알림 미리보기 CTA 배치와 그리드 intrinsic 계약 복구** (iOS `6068bfa` + `d8b78ff`). 짧은 시트에서는 CTA만 바닥으로 내려가야 하는데 비교 시트의 `SourceSegmentGrid.captionRow` 안 `Color.clear.frame(width: 1)`이 제안 높이를 흡수해 그리드와 뒤 섹션까지 함께 늘어났다. 정렬자의 높이 기여를 0으로 봉하고 `AlertPreviewScroll.contentStack`은 vertical intrinsic 방어를 유지했다. 두 계약을 컨테이너 밖 bare-grid 시험과 별도 greedy-child 시험으로 분리해 한 수정이 다른 회귀를 가리지 않게 했고, 비교·김프 모양 및 700/900pt 뷰포트 불변식까지 잠갔다. 페이월은 무료 범위와 겹치던 구 문구를 `실시간 환율·그래프 업데이트`·`은행별 목표 환율 알림`·`거래소별 테더 가격 알림`·`뉴스 속보 먼저 보기`·`아침 환율 보고서`로 교체했다.",
+          "semantic-input-binding/v1:0046:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:9c4fd123270afdbd1882f0ad8020396d2ad0cdd7c280a0474e6b65aae096a1c8:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -758,7 +768,9 @@
           "**무료 화면 계약의 빈틈 2건 보완** (iOS `7667c9c`). ① **뉴스 탭에만 하단 여백이 없었다** — 사용자 계약은 \"모든 탭 하단에 CTA 가 나타나고 스크롤 최하단에 그 공간이 비어 있다\" 인데 70pt 는 테더·통화 페이지에만 있었고 뉴스는 0이라 마지막 행이 CTA 뒤로 밀려 끝까지 못 읽혔다 → `NewsTabView(bottomContentClearance:)` 추가, **기본값 0** 이라 프리미엄 호출부 무영향. ② **라우팅 상수를 화면이 쓰지 않았다** — `FreeSnapshotRouting.tabs` 를 쓰는 뷰 파일이 0개였고 picker·페이지가 순서를 따로 정의했다 → 둘 다 `ForEach(FreeSnapshotRouting.tabs)` 로 생성. CTA 는 계속 ZStack overlay 이며 `safeAreaInset` 으로 바꾸지 않았다.",
           "semantic-input-binding/v1:0044:67b3acca139f02b586a9380ba71aaf85e9af32a65eeae4994b883ce48d723ca1:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:author=OpenAI Codex:reviewer=Claude Code",
           "**테더 알림 시트 헤더를 FX 와 통일** (iOS `78a9c48`). 테더는 `\"테더 (USDT/KRW)\"` 한 덩어리에 `.title3`/`.bold` 를 걸어 통화쌍까지 굵고 크게 나왔고, FX 는 자산명과 통화쌍을 별도 Text 로 나눠 `(USD/KRW)` 를 `.caption`/보조색으로 낮춘다. 공용 `AlertPairLabel(name:pairCode:)` 로 뽑아 양쪽이 같은 컴포넌트를 쓰게 했다 — 복제해 두면 다시 갈라지므로 **구조로** 막았다. `SourceAlertScope.pairLabel` → `pairCode` 분해.",
-          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0045:0a6a51c7ea68eee6dfeccb40706374bae4b3c045e85118de6b5b9623151b83be:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:author=OpenAI Codex:reviewer=Claude Code",
+          "**CTA 레이아웃 독립 재검증과 C2 누락 발견** (iOS `d8b78ff`). 새 DerivedData에서 레이아웃 5건과 페이월 문구 1건이 실제 실행되어 6/6 통과했고, 잎 시험은 `AlertPreviewScroll` 밖에서 `SourceSegmentGrid`의 높이를 400/800pt 제안으로 비교하며 컨테이너 시험은 그리드와 무관한 greedy 자식을 사용하므로 상호 은폐하지 않음을 확인했다. 다만 `d8b78ff`를 iOS에 먼저 push한 뒤 서버 정본은 iOS `78a9c48`에 고정된 채 남아 `preflight`/`verify`가 `E_CODECHANGED`로 실패했다. 인용 경로 3개는 좌표 밀림과 내용 변경이 없었지만, **`Docs impact: none`은 C2 pin 전진 불필요를 뜻하지 않는다**. 코드가 green이어도 정본 게이트가 red인 상태로 보고를 마친 것이 이번 누락이다.",
+          "semantic-input-binding/v1:0046:03cc6e117ace95a1066a95522feef53c9ee8e350d92fdb44b471e3d68de48694:9c4fd123270afdbd1882f0ad8020396d2ad0cdd7c280a0474e6b65aae096a1c8:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -772,21 +784,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "d739aa04b0a292607b4ef2d2ceace88f6dcf56ccef2cf18960bf3f0b696028ba",
+    "manifest_sha256": "30d92f109c44f1da33533d63d9e46c1fb62137cced44fee6927649bcd11131d0",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "37d3f5635bbf9708993c6eec5537d8702153781f8b3871ca32001fb29ead371e",
-    "server_commit": "bf76b6e962444339d359e209c23d99aefbb96dc3",
-    "ios_commit": "78a9c4891465e788ae79e8e87161ce2a8f8af09d"
+    "lock_sha256": "ed540a5dfd915ab03ed872cca431c1e21fe3c7c998be5e0dc765039d4a1dfd60",
+    "server_commit": "f09657157e56b1b07e9261f7fed2ce0c585bc96d",
+    "ios_commit": "d8b78ff39c03bffc5028d714bd9d8e45c1e27954"
   },
   "documents": {
-    "ADR": "c767fa1832c5b4ee2f3d0200347e21181c0fe75d2cfdea8b99a7ec2097e9d6f7",
-    "CLIENT": "1c567ba848889d8f2199e9556def42b35f498914695d15132948b686d4721639",
-    "CUT": "40fafbf1514ba3dcc4023d2de9f09cb80540b431b7baf52e857e8e3043019975",
-    "HAND": "3bde5182cee66c3e97c1066becd5975b6eb194bdefffe313655fc95cae13e08e",
-    "HEALTH": "f86183f7e923d42cbdd810a7923fc7124fd88052416fc4f6ac550917d72d6941",
-    "LOAD": "60f099d0d520f53ebb3a635246fbdc0612ebb2bf1707ea0c42c8a4d92c962513"
+    "ADR": "8bf701c382960a096c9020d56f09354236e4d42fba5aa38569be19628abb61ff",
+    "CLIENT": "e4b012af7507617a00718016ff7eddcd51f3392be2a48c153d4df9cba0aa95fc",
+    "CUT": "6e95a0e404c2e6c4a5c27d7f504baae3aefa2718dd415ec139afc17cbf57536d",
+    "HAND": "3e16506213bff16d475cbdbda6e54d1378bd920d542eaf1f8dcf383011f0a93c",
+    "HEALTH": "619ca51a98beab769f2671e3b0061e7d704c6d4208dc251557035a82b6ab0ed5",
+    "LOAD": "a7d036a7bf1b11fcd0275acc78269fbdf183949586ababeffc048f8be3f029a0"
   },
-  "claim_ledger_sha256": "542deae4a0dba27c795d3895c391a25cb64fe5cf0573e477b788bd5da23328d3",
+  "claim_ledger_sha256": "eaa5b6910cd0f42809384b3df7cb7d7ed2b547d42b3e1db9bb93e87d55586bc2",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
