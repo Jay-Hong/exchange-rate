@@ -3,10 +3,10 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `7b5419cb4cf4250239b63a72048a32202b5365dc`
-- iOS 기준 commit: `dc9c039be7a909468e16792f2c048dc5cdce5959`
+- server 기준 commit: `556625fe506d4a8021dd8ffab593b28c0dd1a6ad`
+- iOS 기준 commit: `fca3d81d69818010512f5796acf7f225c7e6730b`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `3961d305ad50a32fb2891f09a9a6b145ab8e84b53cfbd3e260f3624b59c0affa`
+- manifest SHA: `93d8d6f0b021c6827e5cc1aeb3d1a600d2300cd1b88bbfefcd02397abf75e62f`
 - baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
