@@ -261,7 +261,7 @@ sent_at         DATETIME
 ```sql
 id                    INTEGER PRIMARY KEY
 user_id               TEXT NOT NULL (INDEX)
-tab                   TEXT NOT NULL         -- 'tether' (v1) | 'usd'|'jpy'|'eur' (스키마 예약)
+tab                   TEXT NOT NULL         -- 'tether' | 'usd'|'jpy'|'eur' (FX 3탭 구현 완료, ADR-038 D4)
 left_source           TEXT NOT NULL         -- 기준(김프) / 소스A(비교, canonical 정렬)
 left_asset            TEXT NOT NULL
 right_source          TEXT NOT NULL         -- 비교상대(김프) / 소스B(비교)
