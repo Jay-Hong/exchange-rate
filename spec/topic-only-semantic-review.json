@@ -158,7 +158,9 @@
           "**epoch 0055 의 `graphHeight 175~260` 은 내 오류였다 — 정정** (iOS `342b93a`). 0055 에서 구 오류(`130-180`)를 고치면서 **새 오류를 넣었다**: 실제 치역은 `175~240` 이다. `heightMultiplier` 가 iPad(extraLarge)에서 **1.0 으로 고정**돼 230 × 1.0 = 230 이므로 **260 상한은 절대 걸리지 않는다**; 240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단이다. codex 가 잡았고 직접 계산으로 확인했다. 도달 불가라는 사실을 코드 옆에도 남겼다. ⛔ 이 트랙에서 **거짓을 고치는 커밋이 새 거짓을 낳은 것이 두 번째**다(0049→0050 도 같은 형태). 교훈: **정정 커밋의 새 수치야말로 검증 대상이다** — 고치는 쪽이라는 이유로 검산을 건너뛰게 된다. 함께 반영한 산문 정밀화도 전부 codex 지적이 옳았다: 20pt 를 \"예산의 절반\"이라 한 것(예산 335 의 절반이 아니라 한쪽 여백), 실패 메시지의 \"375pt 기기 포기\" 과장, 그리고 **시험 주석에 실측 pt 를 다시 복제한 것** — \"수치의 집은 산문이 아니라 시험\" 이라고 선언한 그 커밋에서 내가 그 원칙을 어겼다. 대신 detail 상한이 낮은 **이유**만 수치 없이 남겼다(`caption1` 이 `subheadline` 보다 접근성 구간에서 가파르게 커진다 — 실측 배율 1.81 vs 1.64).",
           "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=Claude Code:reviewer=OpenAI Codex",
           "**epoch 0056 의 `215 × 1.2` 도 틀렸다 — 치역을 시험으로 이관** (iOS `67388b5`). 0056 에서 \"240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단\" 이라고 적었는데, 배수 1.2 는 화면 높이 **1013pt** 가 필요해 어떤 아이폰에도 없다 — **도달 불가 경로를 유일 도달점이라 부른 것**이다. 실제 도달은 Pro Max(956pt → 배수 1.1327 → 243.5 → 240 절단)이고, 일반화하면 배수 ≥ 240/215 ≈ 1.116 (= 높이 ≥ 942pt)이다. codex 가 잡았고, 검산해 보니 codex 지적보다도 더 틀려 있었다. ⛔ **세 라운드 연속 정정 커밋이 새 수치 오류를 낳았다**(130-180 → 175-260 → 215×1.2). 원인은 \"고치는 쪽\" 이라는 위치가 검산을 건너뛰게 만든 것이다. 그래서 이번엔 더 정밀한 문장을 쓰지 않고 `LayoutMetricsGraphHeightRangeTests` 를 신설해 실제 논리 해상도 6종으로 치역을 계산·강제하고 **두 경계에 실제로 닿는 구성이 있는지**(죽은 경계 검출)와 260 상한 미발동까지 못 박았다. 코드 주석에서는 수치를 뺐다. 내가 선언해 놓고 세 번 어긴 원칙을 이 자리에 실제로 적용한 것이다. 변이 확인: large base 215→195 → 죽은 상한 RED / extraLarge 230→270 → 260 발동 RED.",
-          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0057 의 `1.2 도달 불가` 는 개념 오류였다 — 기기 ≠ 창** (iOS `1800bf4`). 0057 에 \"배수 1.2 는 높이 1013pt 가 필요해 어떤 아이폰에도 없다 → 도달 불가\" 라고 적었다. 전제는 참인데 **결론이 틀렸다**: `LayoutMetrics` 는 물리 기기가 아니라 **현재 창 크기**로 분류하고(`LayoutMetrics(screenSize: geometry.size)`), iPad 세로 분할 창(폭 414~743 × 높이 ≥ 1013)이 `.large` + 배수 1.2 → 240 에 실제로 도달한다. codex 가 iPad mini 2/3 Split View(414×1133)로 잡았다. ⛔ 더 나쁜 것: **iPad 가변 창이 범위 안이라는 사실을 내가 epoch 0053 에서 직접 증명해 놓았다**(`UIRequiresFullScreen` 부재 + `TARGETED_DEVICE_FAMILY = 1,2`). 그러고도 다음 추론에서 \"아이폰\" 을 세계 전체로 취급했다 — 수치 실수가 아니라 **자기 발견을 다음 추론에 연결하지 못한 실패**다. 같은 혼동이 코드에도 있었다: `heightMultiplier` 주석의 \"iPad 는 1.0 고정\" 은 실은 \"**창 폭이 extraLarge 면** 1.0\" 이다(좁은 iPad 창은 `.large` 라 배수가 1.0 을 넘는다). 표본도 보강했다 — SE 3/mini 분리, iPad 분할 창 추가 + 전용 단정, extraLarge 표본 비어있음 방어(필터가 0건이면 공허 통과였다), 그리고 **아이폰 가로**(956×440 → extraLarge) 추가: \"기기가 아니라 창 폭\" 이 가장 반직관적으로 드러나는 자리라 박아 두었다.",
+          "semantic-input-binding/v1:0058:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:4d5178758dca55d1f7dad516f52b86d7000cc50a7487b256ec2c0afca9926abe:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -300,7 +302,9 @@
           "**정정 커밋의 새 수치 검산** (iOS `342b93a`). 클로드의 가드 개선(둘째 줄 측정·여백 상수 결속)은 타당하다고 확인한 뒤, 새로 들어간 산문을 코드로 검산해 `graphHeight 175~260` 이 도달 불가 상한을 치역으로 적은 오류임을 찾았다 — extraLarge 는 배수 1.0 이라 230, 나머지는 240 에서 잘리므로 실효 치역은 175~240 이다. 아울러 (a) 20pt 를 \"폭 예산의 절반\" 이라 한 부정확, (b) 실패 메시지의 기기 포기 과장, (c) 시험 주석에 측정값을 재복제해 stale 문제를 되살린 것을 지적했고 모두 반영됐다. epoch 0055 에 남은 `175~260` 은 append-only 정정이 필요하다고 명시했다.",
           "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=OpenAI Codex:reviewer=Claude Code",
           "**정정의 정정 검산** (iOS `67388b5`). 클로드의 `graphHeight = 175~240` 과 iPad 260 미도달은 맞다고 확인한 뒤, 남은 한 문장 \"215 × 1.2 가 240 에 닿는 유일한 경로\" 가 틀렸음을 지적했다 — 배수가 240/215 ≈ 1.1163 이상이면 모두 240 으로 제한되므로 단일점이 아니다. 코드 주석을 그 조건으로 바로잡고 epoch 0056 에도 같은 문장이 남아 append-only 정정이 필요함을 명시했다. (클로드의 후속 검산에서 이 지적조차 보수적이었음이 드러났다 — 배수 1.2 자체가 현재 기기에서 도달 불가다.)",
-          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=OpenAI Codex:reviewer=Claude Code",
+          "**표본이 계약을 대표하는지 검사 — 기기/창 혼동 발견** (iOS `1800bf4`). 클로드의 치역 시험이 \"실효 치역 전체\" 를 검증한다면서 임의 기기 6개만 표본 검사하고, SE 3 와 13 mini 를 하나의 375×812 로 묶어 해상도를 잘못 표기한 것을 지적했다. 더 중요한 반례로, `LayoutMetrics` 가 창 CGSize 로 분류하므로 \"어떤 iPhone 에도 1013pt 가 없다\" 만으로 1.2 경로를 도달 불가라 할 수 없음을 보이고 iPad mini(A17 Pro) 세로 2/3 Split View 414×1133 을 반례로 제시했다(사용자 지정 Screen Sizes 표 기준). 그 반례를 따라가 코드 주석의 \"iPad 는 1.0\" 도 창 폭 기준으로 정정했다. ⛔ 교훈: **표본 기반 시험은 표본이 분류 축을 대표하는지 따로 논증해야 한다** — 기기 이름으로 고른 표본은 창 기반 분류를 덮지 못한다.",
+          "semantic-input-binding/v1:0058:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:4d5178758dca55d1f7dad516f52b86d7000cc50a7487b256ec2c0afca9926abe:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -449,7 +453,9 @@
           "**정정 커밋의 새 수치 검산** (iOS `342b93a`). 클로드의 가드 개선(둘째 줄 측정·여백 상수 결속)은 타당하다고 확인한 뒤, 새로 들어간 산문을 코드로 검산해 `graphHeight 175~260` 이 도달 불가 상한을 치역으로 적은 오류임을 찾았다 — extraLarge 는 배수 1.0 이라 230, 나머지는 240 에서 잘리므로 실효 치역은 175~240 이다. 아울러 (a) 20pt 를 \"폭 예산의 절반\" 이라 한 부정확, (b) 실패 메시지의 기기 포기 과장, (c) 시험 주석에 측정값을 재복제해 stale 문제를 되살린 것을 지적했고 모두 반영됐다. epoch 0055 에 남은 `175~260` 은 append-only 정정이 필요하다고 명시했다.",
           "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=OpenAI Codex:reviewer=Claude Code",
           "**정정의 정정 검산** (iOS `67388b5`). 클로드의 `graphHeight = 175~240` 과 iPad 260 미도달은 맞다고 확인한 뒤, 남은 한 문장 \"215 × 1.2 가 240 에 닿는 유일한 경로\" 가 틀렸음을 지적했다 — 배수가 240/215 ≈ 1.1163 이상이면 모두 240 으로 제한되므로 단일점이 아니다. 코드 주석을 그 조건으로 바로잡고 epoch 0056 에도 같은 문장이 남아 append-only 정정이 필요함을 명시했다. (클로드의 후속 검산에서 이 지적조차 보수적이었음이 드러났다 — 배수 1.2 자체가 현재 기기에서 도달 불가다.)",
-          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=OpenAI Codex:reviewer=Claude Code",
+          "**표본이 계약을 대표하는지 검사 — 기기/창 혼동 발견** (iOS `1800bf4`). 클로드의 치역 시험이 \"실효 치역 전체\" 를 검증한다면서 임의 기기 6개만 표본 검사하고, SE 3 와 13 mini 를 하나의 375×812 로 묶어 해상도를 잘못 표기한 것을 지적했다. 더 중요한 반례로, `LayoutMetrics` 가 창 CGSize 로 분류하므로 \"어떤 iPhone 에도 1013pt 가 없다\" 만으로 1.2 경로를 도달 불가라 할 수 없음을 보이고 iPad mini(A17 Pro) 세로 2/3 Split View 414×1133 을 반례로 제시했다(사용자 지정 Screen Sizes 표 기준). 그 반례를 따라가 코드 주석의 \"iPad 는 1.0\" 도 창 폭 기준으로 정정했다. ⛔ 교훈: **표본 기반 시험은 표본이 분류 축을 대표하는지 따로 논증해야 한다** — 기기 이름으로 고른 표본은 창 기반 분류를 덮지 못한다.",
+          "semantic-input-binding/v1:0058:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:4d5178758dca55d1f7dad516f52b86d7000cc50a7487b256ec2c0afca9926abe:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -599,7 +605,9 @@
           "**epoch 0055 의 `graphHeight 175~260` 은 내 오류였다 — 정정** (iOS `342b93a`). 0055 에서 구 오류(`130-180`)를 고치면서 **새 오류를 넣었다**: 실제 치역은 `175~240` 이다. `heightMultiplier` 가 iPad(extraLarge)에서 **1.0 으로 고정**돼 230 × 1.0 = 230 이므로 **260 상한은 절대 걸리지 않는다**; 240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단이다. codex 가 잡았고 직접 계산으로 확인했다. 도달 불가라는 사실을 코드 옆에도 남겼다. ⛔ 이 트랙에서 **거짓을 고치는 커밋이 새 거짓을 낳은 것이 두 번째**다(0049→0050 도 같은 형태). 교훈: **정정 커밋의 새 수치야말로 검증 대상이다** — 고치는 쪽이라는 이유로 검산을 건너뛰게 된다. 함께 반영한 산문 정밀화도 전부 codex 지적이 옳았다: 20pt 를 \"예산의 절반\"이라 한 것(예산 335 의 절반이 아니라 한쪽 여백), 실패 메시지의 \"375pt 기기 포기\" 과장, 그리고 **시험 주석에 실측 pt 를 다시 복제한 것** — \"수치의 집은 산문이 아니라 시험\" 이라고 선언한 그 커밋에서 내가 그 원칙을 어겼다. 대신 detail 상한이 낮은 **이유**만 수치 없이 남겼다(`caption1` 이 `subheadline` 보다 접근성 구간에서 가파르게 커진다 — 실측 배율 1.81 vs 1.64).",
           "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=Claude Code:reviewer=OpenAI Codex",
           "**epoch 0056 의 `215 × 1.2` 도 틀렸다 — 치역을 시험으로 이관** (iOS `67388b5`). 0056 에서 \"240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단\" 이라고 적었는데, 배수 1.2 는 화면 높이 **1013pt** 가 필요해 어떤 아이폰에도 없다 — **도달 불가 경로를 유일 도달점이라 부른 것**이다. 실제 도달은 Pro Max(956pt → 배수 1.1327 → 243.5 → 240 절단)이고, 일반화하면 배수 ≥ 240/215 ≈ 1.116 (= 높이 ≥ 942pt)이다. codex 가 잡았고, 검산해 보니 codex 지적보다도 더 틀려 있었다. ⛔ **세 라운드 연속 정정 커밋이 새 수치 오류를 낳았다**(130-180 → 175-260 → 215×1.2). 원인은 \"고치는 쪽\" 이라는 위치가 검산을 건너뛰게 만든 것이다. 그래서 이번엔 더 정밀한 문장을 쓰지 않고 `LayoutMetricsGraphHeightRangeTests` 를 신설해 실제 논리 해상도 6종으로 치역을 계산·강제하고 **두 경계에 실제로 닿는 구성이 있는지**(죽은 경계 검출)와 260 상한 미발동까지 못 박았다. 코드 주석에서는 수치를 뺐다. 내가 선언해 놓고 세 번 어긴 원칙을 이 자리에 실제로 적용한 것이다. 변이 확인: large base 215→195 → 죽은 상한 RED / extraLarge 230→270 → 260 발동 RED.",
-          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0057 의 `1.2 도달 불가` 는 개념 오류였다 — 기기 ≠ 창** (iOS `1800bf4`). 0057 에 \"배수 1.2 는 높이 1013pt 가 필요해 어떤 아이폰에도 없다 → 도달 불가\" 라고 적었다. 전제는 참인데 **결론이 틀렸다**: `LayoutMetrics` 는 물리 기기가 아니라 **현재 창 크기**로 분류하고(`LayoutMetrics(screenSize: geometry.size)`), iPad 세로 분할 창(폭 414~743 × 높이 ≥ 1013)이 `.large` + 배수 1.2 → 240 에 실제로 도달한다. codex 가 iPad mini 2/3 Split View(414×1133)로 잡았다. ⛔ 더 나쁜 것: **iPad 가변 창이 범위 안이라는 사실을 내가 epoch 0053 에서 직접 증명해 놓았다**(`UIRequiresFullScreen` 부재 + `TARGETED_DEVICE_FAMILY = 1,2`). 그러고도 다음 추론에서 \"아이폰\" 을 세계 전체로 취급했다 — 수치 실수가 아니라 **자기 발견을 다음 추론에 연결하지 못한 실패**다. 같은 혼동이 코드에도 있었다: `heightMultiplier` 주석의 \"iPad 는 1.0 고정\" 은 실은 \"**창 폭이 extraLarge 면** 1.0\" 이다(좁은 iPad 창은 `.large` 라 배수가 1.0 을 넘는다). 표본도 보강했다 — SE 3/mini 분리, iPad 분할 창 추가 + 전용 단정, extraLarge 표본 비어있음 방어(필터가 0건이면 공허 통과였다), 그리고 **아이폰 가로**(956×440 → extraLarge) 추가: \"기기가 아니라 창 폭\" 이 가장 반직관적으로 드러나는 자리라 박아 두었다.",
+          "semantic-input-binding/v1:0058:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:4d5178758dca55d1f7dad516f52b86d7000cc50a7487b256ec2c0afca9926abe:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -755,7 +763,9 @@
           "**epoch 0055 의 `graphHeight 175~260` 은 내 오류였다 — 정정** (iOS `342b93a`). 0055 에서 구 오류(`130-180`)를 고치면서 **새 오류를 넣었다**: 실제 치역은 `175~240` 이다. `heightMultiplier` 가 iPad(extraLarge)에서 **1.0 으로 고정**돼 230 × 1.0 = 230 이므로 **260 상한은 절대 걸리지 않는다**; 240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단이다. codex 가 잡았고 직접 계산으로 확인했다. 도달 불가라는 사실을 코드 옆에도 남겼다. ⛔ 이 트랙에서 **거짓을 고치는 커밋이 새 거짓을 낳은 것이 두 번째**다(0049→0050 도 같은 형태). 교훈: **정정 커밋의 새 수치야말로 검증 대상이다** — 고치는 쪽이라는 이유로 검산을 건너뛰게 된다. 함께 반영한 산문 정밀화도 전부 codex 지적이 옳았다: 20pt 를 \"예산의 절반\"이라 한 것(예산 335 의 절반이 아니라 한쪽 여백), 실패 메시지의 \"375pt 기기 포기\" 과장, 그리고 **시험 주석에 실측 pt 를 다시 복제한 것** — \"수치의 집은 산문이 아니라 시험\" 이라고 선언한 그 커밋에서 내가 그 원칙을 어겼다. 대신 detail 상한이 낮은 **이유**만 수치 없이 남겼다(`caption1` 이 `subheadline` 보다 접근성 구간에서 가파르게 커진다 — 실측 배율 1.81 vs 1.64).",
           "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=Claude Code:reviewer=OpenAI Codex",
           "**epoch 0056 의 `215 × 1.2` 도 틀렸다 — 치역을 시험으로 이관** (iOS `67388b5`). 0056 에서 \"240 에 닿는 유일한 경로는 large 의 215 × 1.2 = 258 → 240 절단\" 이라고 적었는데, 배수 1.2 는 화면 높이 **1013pt** 가 필요해 어떤 아이폰에도 없다 — **도달 불가 경로를 유일 도달점이라 부른 것**이다. 실제 도달은 Pro Max(956pt → 배수 1.1327 → 243.5 → 240 절단)이고, 일반화하면 배수 ≥ 240/215 ≈ 1.116 (= 높이 ≥ 942pt)이다. codex 가 잡았고, 검산해 보니 codex 지적보다도 더 틀려 있었다. ⛔ **세 라운드 연속 정정 커밋이 새 수치 오류를 낳았다**(130-180 → 175-260 → 215×1.2). 원인은 \"고치는 쪽\" 이라는 위치가 검산을 건너뛰게 만든 것이다. 그래서 이번엔 더 정밀한 문장을 쓰지 않고 `LayoutMetricsGraphHeightRangeTests` 를 신설해 실제 논리 해상도 6종으로 치역을 계산·강제하고 **두 경계에 실제로 닿는 구성이 있는지**(죽은 경계 검출)와 260 상한 미발동까지 못 박았다. 코드 주석에서는 수치를 뺐다. 내가 선언해 놓고 세 번 어긴 원칙을 이 자리에 실제로 적용한 것이다. 변이 확인: large base 215→195 → 죽은 상한 RED / extraLarge 230→270 → 260 발동 RED.",
-          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=Claude Code:reviewer=OpenAI Codex",
+          "**epoch 0057 의 `1.2 도달 불가` 는 개념 오류였다 — 기기 ≠ 창** (iOS `1800bf4`). 0057 에 \"배수 1.2 는 높이 1013pt 가 필요해 어떤 아이폰에도 없다 → 도달 불가\" 라고 적었다. 전제는 참인데 **결론이 틀렸다**: `LayoutMetrics` 는 물리 기기가 아니라 **현재 창 크기**로 분류하고(`LayoutMetrics(screenSize: geometry.size)`), iPad 세로 분할 창(폭 414~743 × 높이 ≥ 1013)이 `.large` + 배수 1.2 → 240 에 실제로 도달한다. codex 가 iPad mini 2/3 Split View(414×1133)로 잡았다. ⛔ 더 나쁜 것: **iPad 가변 창이 범위 안이라는 사실을 내가 epoch 0053 에서 직접 증명해 놓았다**(`UIRequiresFullScreen` 부재 + `TARGETED_DEVICE_FAMILY = 1,2`). 그러고도 다음 추론에서 \"아이폰\" 을 세계 전체로 취급했다 — 수치 실수가 아니라 **자기 발견을 다음 추론에 연결하지 못한 실패**다. 같은 혼동이 코드에도 있었다: `heightMultiplier` 주석의 \"iPad 는 1.0 고정\" 은 실은 \"**창 폭이 extraLarge 면** 1.0\" 이다(좁은 iPad 창은 `.large` 라 배수가 1.0 을 넘는다). 표본도 보강했다 — SE 3/mini 분리, iPad 분할 창 추가 + 전용 단정, extraLarge 표본 비어있음 방어(필터가 0건이면 공허 통과였다), 그리고 **아이폰 가로**(956×440 → extraLarge) 추가: \"기기가 아니라 창 폭\" 이 가장 반직관적으로 드러나는 자리라 박아 두었다.",
+          "semantic-input-binding/v1:0058:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:4d5178758dca55d1f7dad516f52b86d7000cc50a7487b256ec2c0afca9926abe:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -902,7 +912,9 @@
           "**정정 커밋의 새 수치 검산** (iOS `342b93a`). 클로드의 가드 개선(둘째 줄 측정·여백 상수 결속)은 타당하다고 확인한 뒤, 새로 들어간 산문을 코드로 검산해 `graphHeight 175~260` 이 도달 불가 상한을 치역으로 적은 오류임을 찾았다 — extraLarge 는 배수 1.0 이라 230, 나머지는 240 에서 잘리므로 실효 치역은 175~240 이다. 아울러 (a) 20pt 를 \"폭 예산의 절반\" 이라 한 부정확, (b) 실패 메시지의 기기 포기 과장, (c) 시험 주석에 측정값을 재복제해 stale 문제를 되살린 것을 지적했고 모두 반영됐다. epoch 0055 에 남은 `175~260` 은 append-only 정정이 필요하다고 명시했다.",
           "semantic-input-binding/v1:0056:139b17b5c9537b51fcf28fe81dc845cdb6c8c0067294748cbf4c86b6f6b27137:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:author=OpenAI Codex:reviewer=Claude Code",
           "**정정의 정정 검산** (iOS `67388b5`). 클로드의 `graphHeight = 175~240` 과 iPad 260 미도달은 맞다고 확인한 뒤, 남은 한 문장 \"215 × 1.2 가 240 에 닿는 유일한 경로\" 가 틀렸음을 지적했다 — 배수가 240/215 ≈ 1.1163 이상이면 모두 240 으로 제한되므로 단일점이 아니다. 코드 주석을 그 조건으로 바로잡고 epoch 0056 에도 같은 문장이 남아 append-only 정정이 필요함을 명시했다. (클로드의 후속 검산에서 이 지적조차 보수적이었음이 드러났다 — 배수 1.2 자체가 현재 기기에서 도달 불가다.)",
-          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0057:8e982d897f4da9a78e686d475f4860c24298668c9e8496e5501216ad8a72fc5e:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:author=OpenAI Codex:reviewer=Claude Code",
+          "**표본이 계약을 대표하는지 검사 — 기기/창 혼동 발견** (iOS `1800bf4`). 클로드의 치역 시험이 \"실효 치역 전체\" 를 검증한다면서 임의 기기 6개만 표본 검사하고, SE 3 와 13 mini 를 하나의 375×812 로 묶어 해상도를 잘못 표기한 것을 지적했다. 더 중요한 반례로, `LayoutMetrics` 가 창 CGSize 로 분류하므로 \"어떤 iPhone 에도 1013pt 가 없다\" 만으로 1.2 경로를 도달 불가라 할 수 없음을 보이고 iPad mini(A17 Pro) 세로 2/3 Split View 414×1133 을 반례로 제시했다(사용자 지정 Screen Sizes 표 기준). 그 반례를 따라가 코드 주석의 \"iPad 는 1.0\" 도 창 폭 기준으로 정정했다. ⛔ 교훈: **표본 기반 시험은 표본이 분류 축을 대표하는지 따로 논증해야 한다** — 기기 이름으로 고른 표본은 창 기반 분류를 덮지 못한다.",
+          "semantic-input-binding/v1:0058:723920d1aa59bbac6c971d20c08cc4abed25f2d1834bef99a2e9535efabf229c:4d5178758dca55d1f7dad516f52b86d7000cc50a7487b256ec2c0afca9926abe:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -916,21 +928,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "164a177264529e10c80e75f4a5ef2a0e2e84a27eaa27125d051769edaee393ff",
+    "manifest_sha256": "c11634f8a6e5cc6ca4d4bfcc6742de4bcbc73331d78e7f66d04af34d7233e152",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "6d605b40d7987e50b8909bfbe901a736751dfc2b4909951af47e5283f8562d31",
-    "server_commit": "9edd78c0de7bf136af985254ec5dece9c153ed12",
-    "ios_commit": "67388b53d526fea85e0374c2e94073c9963d828d"
+    "lock_sha256": "c7f6cacc2eb391d7c4c6596b8e9b2ab5a8d91a273d0ca5d1d50621b0fc999832",
+    "server_commit": "e02bf94af17ca9e7d6b63e37b4a750b0fccee011",
+    "ios_commit": "1800bf4ce04d0ecab2e05b1ff728a888eb9d6850"
   },
   "documents": {
-    "ADR": "fef127ef449f342fa9e37d7c57c93197b2a9104aa9436358891d12e26ff2850d",
-    "CLIENT": "8982f7882b063e4de4d8cf29dedcd69f3d1ea3dcc1e2d48b76605a012cccbc53",
-    "CUT": "bf395dd11ccf602dbae497392cb37567fb978309ece2355cdf4e1690c8ddcbe4",
-    "HAND": "280d0397a43ec0aacddbc45eee7e9a154143553d87f7383e9f307aa8d6de5305",
-    "HEALTH": "e0e8f470990ec14417cc7e82f992ed6b7301c82d2743f7fbe673e3296ebde14b",
-    "LOAD": "2b795057145cec33e7c028d9ecfd00bd16392a0af2bdd5d659927372a163f97c"
+    "ADR": "72f82c08d2bcf7e0923bb7bbf40aaac12de1a38669a535ece78431d831825f0c",
+    "CLIENT": "ede3cce264d959b35f842704c3523f09a3ed237e5a1f0f7cbd83040645afbaf4",
+    "CUT": "bcce2c4b04b04f304058c4bb29c28ae098919bec0a7cfaa9e2cd8203508a0c86",
+    "HAND": "577dddcff60831daf5a7016453bdbb2d702ce19db70ea1474eaade9d8c8ba732",
+    "HEALTH": "80ff91a270535bd992692061d8f6bad9f05c9588fb2e9c82184a2197369b3801",
+    "LOAD": "579ad13e675cee763817279617ace8f49fa4fcd885a9aa6a15b3eae365548e2c"
   },
-  "claim_ledger_sha256": "bb834c551c61785d119477b334686236a6101624157aad5e83e2d1b7ed0cbe87",
+  "claim_ledger_sha256": "8dfd991808b46cd1825ac5ed6dbd5f81081e8517276f667dc614b7b46fe4e786",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
