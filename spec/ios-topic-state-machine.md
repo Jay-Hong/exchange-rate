@@ -3,10 +3,10 @@
 - 책임: 클라이언트 상태기계 · 재시도 · 재검증
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `e02bf94af17ca9e7d6b63e37b4a750b0fccee011`
-- iOS 기준 commit: `1800bf4ce04d0ecab2e05b1ff728a888eb9d6850`
+- server 기준 commit: `fe1f2e861b16a3315ec39a16b46586b073781894`
+- iOS 기준 commit: `7f7c76478d90203eab76b8f442936146237ca81b`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `c11634f8a6e5cc6ca4d4bfcc6742de4bcbc73331d78e7f66d04af34d7233e152`
+- manifest SHA: `d092e793393e835e65b827711b94dce11e97a231beb9d225e02b7e9c179314f3`
 - baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -516,7 +516,7 @@ bounded retry(최대 3회)가 돌지만, **소진되면 그걸로 끝**이다.
 
 ✅ **게이트가 전달 상태까지 넓어졌다.** `ConnectionStatusView` 는 여전히 `connectionState` 만
 보지만(`ios/FXi/Views/ConnectionStatusView.swift:11-48`), 전달 상태는 별도 `StatusBanner` 가
-든다 — 탭 위에 붙고(`ios/FXi/ContentView.swift:87`) `topicStatusMessage(for:)` 문구와
+든다 — 탭 위에 붙고(`ios/FXi/ContentView.swift:105`) `topicStatusMessage(for:)` 문구와
 `canRetryTopicDelivery(for:)` 수동 재시도를 탭 범위로 렌더한다
 (`ios/FXi/Views/Components/OfflineBanner.swift:150-155`).
 
