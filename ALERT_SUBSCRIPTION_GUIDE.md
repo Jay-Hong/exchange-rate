@@ -905,6 +905,19 @@ Paywall 하단에 반드시 포함해야 하는 문구:
 
 #### 7.3 Locked Preview 화면 (재방문 미구독 사용자용)
 
+> ⚠️ **Superseded (2026-08-25) — 아래는 당시 제안의 기록이지 현재 동작이 아니다.**
+>
+> 이 절이 규정한 합성 샘플 화면(`SampleRate` · `SampleRateBarView` · `sampleRates` ·
+> `rateAnimationTimer`)은 **iOS 리포에 하나도 존재하지 않는다**(전수 grep 0건). ADR-039 무료 티어가
+> 대체했다 — 실제 `LockedPreviewView` 는 매시 고정 스냅샷의 **실데이터**를
+> `FreeCurrencyTabView`(→ `RateBarView`) · `FreeTetherTabView`(→ `SourceRateBarView`)로 보여준다
+> (`ios/FXi/Views/Subscription/LockedPreviewView.swift:10-13` — "로그인 전 합성 예시 화면은 더 이상
+> 제공하지 않는다").
+>
+> ⛔ 아래 애니메이션 수치(`1.0초`, `펄스 효과`, `scaleEffect`)를 **현행 계약으로 읽지 말 것**.
+> 실제 막대의 계약은 `ios/FXi/Views/Components/RateBarAnimation.swift` 가 단일 소스다
+> (2026-08-25 기준 0.5초 단일 곡선, 펄스 없음).
+
 **목적**: 앱 강제 종료 대신, 앱의 가치를 **애니메이션 샘플 데이터**로 시각적으로 전달
 
 > **결정**: 실제 환율 데이터 대신 **애니메이션 샘플 데이터** 사용
