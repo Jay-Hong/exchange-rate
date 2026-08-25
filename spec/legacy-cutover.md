@@ -3,10 +3,10 @@
 - 책임: 삭제 범위 · 문서 정정 · 테스트 · 순서
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `fe1f2e861b16a3315ec39a16b46586b073781894`
-- iOS 기준 commit: `7f7c76478d90203eab76b8f442936146237ca81b`
+- server 기준 commit: `6a88ee7dc2fbda69637faad2d42f2c1e71991131`
+- iOS 기준 commit: `cab2dd78a50be3a627d876e15d2c8559c4705599`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `d092e793393e835e65b827711b94dce11e97a231beb9d225e02b7e9c179314f3`
+- manifest SHA: `1a3fc31bf34d45e276ee5867f85336f0b59e307842a1b0df98862e9667cf44e4`
 - baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -221,11 +221,11 @@ architecture test가 callback 소유권과 파일 복원을 함께 감시한다
 | B2 | 오프라인/재기동에서 **topic last-known 으로 복원**된다 | ✅ USDT(`ios/FXiTests/TetherDataPathTests.swift:899-917`) · FX와 은행 알림(`:687-708`) · DXY(`:396-411`) cold-start 복원을 잠근다 |
 | B3 | **legacy 프레임을 무시해도 앱 lifecycle 이 정상**이다 | ✅ legacy `rates/indices`를 넣어도 DXY topic owner가 유지되고 transport lifecycle은 connected로 수렴한다(`ios/FXiTests/TetherDataPathTests.swift:396-411`). architecture test도 legacy handler 복원을 거부한다(`ios/FXiTests/TopicMessageTests.swift:386-428`) |
 | B4 | 무료 티어가 `ExchangeRate` **타입**으로 계속 디코드된다 | ✅ 무료 스냅샷의 `rate.entries`를 `ExchangeRate`로 디코드한다(`ios/FXiTests/TopicMessageTests.swift:494-520`) |
-| B5 | 45초 무수신 → **조용한 재구독** → 실패 확정 시에만 배너 | ✅ **구현·잠금 완료** — 실패 확정이 degraded 로 수렴하는 것을 재검증 경로(`ios/FXiTests/TopicMessageTests.swift:3929` · `ios/FXiTests/TopicMessageTests.swift:6251`)와 최초 인도 경로(`ios/FXiTests/TopicMessageTests.swift:6291`)에서 각각 잠근다 |
-| B6 | **DXY topic 이 live tip 을 공급**한다 | ✅ wire decode(`ios/FXiTests/TopicMessageTests.swift:342-353`) · REST bootstrap(`ios/FXiTests/TetherDataPathTests.swift:357-370`) · WS routing/거절 후 늦은 frame 차단(`ios/FXiTests/TopicMessageTests.swift:3838`)을 잠근다 |
+| B5 | 45초 무수신 → **조용한 재구독** → 실패 확정 시에만 배너 | ✅ **구현·잠금 완료** — 실패 확정이 degraded 로 수렴하는 것을 재검증 경로(`ios/FXiTests/TopicMessageTests.swift:3969` · `ios/FXiTests/TopicMessageTests.swift:6291`)와 최초 인도 경로(`ios/FXiTests/TopicMessageTests.swift:6331`)에서 각각 잠근다 |
+| B6 | **DXY topic 이 live tip 을 공급**한다 | ✅ wire decode(`ios/FXiTests/TopicMessageTests.swift:342-353`) · REST bootstrap(`ios/FXiTests/TetherDataPathTests.swift:357-370`) · WS routing/거절 후 늦은 frame 차단(`ios/FXiTests/TopicMessageTests.swift:3878`)을 잠근다 |
 | B7 | **은행 알림 현재가가 FX topic 을 쓴다** | ✅ FX topic disk last-known을 복원한 뒤 `rates(for:)`의 은행 현재가를 직접 단언한다(`ios/FXiTests/TetherDataPathTests.swift:687-708`) |
-| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:650`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:621`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3861` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |
-| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:6036`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6317`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |
+| B8 | `topics_disabled` → purge → **재활성화 시 복구** | ✅ **양쪽 잠김** — purge 는 `ios/FXiTests/TetherDataPathTests.swift:650`(fail-close) · `ios/FXiTests/TetherDataPathTests.swift:621`(메모리+디스크+파생 상태 동시 제거)가, **재활성화 복구**는 `ios/FXiTests/TopicMessageTests.swift:3901` 이 실 transport 로 잠근다 — 서버 OFF 중 desired 보존 + **자동 재구독 반복 없음**, 다음 연결 세대에서 재전송 → ACK + snapshot → healthy 수렴. ⚠️ 자동 회귀는 코드 복구만 덮는다 — 운영 flag 와 인증·UI 통합은 실기기 smoke 몫이다 |
+| B9 | lease 만료 → **hard-expiry 재연결** | ✅ **구현 완료** — 같은 lease id 는 절대 만료를 연장하지 못하고 새 id 만 연장한다(`ios/FXiTests/TopicMessageTests.swift:6076`). 세대당 1회 강제 reconnect 불변식도 **같은 lease 세대의 두 topic 동시 만료**로 잠겼다(`ios/FXiTests/TopicMessageTests.swift:6357`) — 단일 topic 반복 검사로는 세대 가드를 제거해도 통과하므로 이 형태여야 판별된다 |
 
 <!-- relation: references target=R-CLI-10 -->
 - references: [R-CLI-10](ios-topic-state-machine.md#r-cli-10)
