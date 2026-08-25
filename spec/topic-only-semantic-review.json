@@ -171,7 +171,9 @@
           "**자초한 좌표로 CI 를 빨갛게 만들었다 — epoch 0061 직후 복구** (서버 `4e2f5d7`). epoch 0061 산문에 codex 가 고친 줄을 가리키려고 `ALERT_SUBSCRIPTION_GUIDE.md` 파일명 뒤에 콜론과 956 을 붙여 적었는데, 게이트의 `_cited_lines` 는 `spec/*.json` 안의 그 형태를 전부 **좌표로 파싱**한다. 같은 커밋에서 내가 §7.3 에 supersede 블록 13행을 그 줄 **위에** 삽입했으므로 좌표가 밀렸다 — 956행은 이제 ASCII 아트이고 실제 문장(\"바 너비 변화 + 펄스 효과\")은 969행이다. **커밋된 산문은 정확한 접두사로 남아야 하므로 그 숫자는 고치지 않는다** — append-only 규칙대로 여기서 정정을 덧붙인다. 이 산문은 같은 함정을 되풀이하지 않도록 파일명과 숫자를 붙여 쓰지 않았다. ⛔ **두 절차 위반이 겹쳤다**: (1) 메모리에 박아둔 \"문서 수정은 C2 앞에 먼저 커밋\" 을 어기고 문서 변경을 C2 커밋에 함께 묶었다 — 그래서 로컬 `coords-server` 가 `pin..HEAD` 를 빈 범위로 보고 밀림을 못 봤다(미커밋 변경은 그 범위에 안 들어간다). (2) 로컬 검증에서 `tests/test_topic_c2_integration.py` 를 빼고 원장 시험 3개 파일만 돌렸다 — CI 가 실패한 바로 그 시험이다. 앞으로 C2 뒤 로컬 확인은 **preflight + `topic_c2.py verify` + 통합 시험**까지가 한 단위다. 교훈: **산문에 줄 번호를 적는 순간 그것은 유지보수 대상 좌표가 되고, 커밋되면 되돌릴 수도 없다.**",
           "semantic-input-binding/v1:0062:0d909bfaf05a6a9640718314e2a40ff74ae12f7aaefa3f08da6a986d0f499198:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:author=Claude Code:reviewer=OpenAI Codex",
           "**공용 곡선 4곳의 진단 문구 정정 — 내 라벨이 틀렸다** (iOS `69cc5a0`). 구조 잠금이 세는 `RateBarAnimation.curve(` 4곳을 나는 \"막대 폭·환율 숫자·차이값·타임스탬프\" 라고 적었는데 **타임스탬프는 그 넷에 없다**. 실제는 환율 숫자(`value: rate.rate`) · 막대 폭(`barWidthPercent`) · 차이값 영역 이동(`barWidthPercent`) · 차이값 숫자(`value: diff`) 이고, 타임스탬프는 오른쪽 벽에 고정된 뷰라 `timestampSection` 안에도 그 호출부에도 `.animation` 이 없다(참조 0건 실측). `SourceRateBarView` 도 같은 넷이다. **단언(개수 4)은 처음부터 옳았고 틀린 것은 실패 시 보이는 진단 문구뿐**이라 앱 동작·검사 강도에는 영향이 없다 — 다만 그대로 뒀으면 이 검사가 red 일 때 다음 사람이 타임스탬프 쪽을 뒤졌을 것이다. 행 수 불변(7266)이라 인용 좌표 이동은 없고 `coords` 가 \"인용 밀림 없음 · 인용 줄 내용 불변\" 으로 확인했다. ⛔ 교훈: **개수를 세는 잠금은 세는 값이 맞아도 '무엇을 세는지' 설명이 틀릴 수 있고, 그 설명은 실패한 순간에만 읽히므로 아무도 검산하지 않는다** — 목록을 적을 때는 코드에서 하나씩 되짚을 것.",
-          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=Claude Code:reviewer=OpenAI Codex",
+          "**막대 폭 재설계 1·2단계 — 동작 변화 0 체크포인트** (iOS `d53c7b3`). 두 무리로 갈린 값에서 한쪽 그룹이 구분되지 않는 문제를 고치기 전에, 후보를 같은 입력으로 비교할 fixture 와 현행 기준선을 먼저 세웠다. 알고리즘은 아직 없다. (a) `BarScaleScenario` 15종 + 전이 4방향(병합·분리·삭제·복귀) — 다만 **의미 계약은 실행하지 않는다**: 현행은 표시에 `%.2f`, 폭에 raw Double 을 써서 \"같은 표시 가격 = 같은 폭\" 을 지금 켜면 의도적으로 red 이고 `XCTSkip` 은 조용히 사라지는 검사가 된다. 대신 그 계약을 **잴 수 있는 입력**(같은 표시·다른 raw)을 지금 넣어 두었다. 그룹은 **사람이 지정한다** — 렌더 결과의 최대 단차를 경계로 되짚으면 그룹을 벌리는 알고리즘이 자기가 벌린 자리를 인정받는 순환 채점이 된다. (b) 두 막대 뷰에 복제돼 있던 폭 수식을 `LegacyBarWidthCalculator` 로 추출하고 golden 으로 현행을 있는 그대로 고정했다 — 구간표 7단 임계, 범위 2.0 통과 시 하단이 5%p 튀는 것, 최소 폭 clamp, 서로 다른 두 값이 같은 길이로 뭉개지는 것(스크린샷 재현). ⚠️ **회귀 잠금이 비율이 아니라 최종 pt 까지 닿아야 한다** — 이번 증상의 두 원인 중 하나가 그 clamp 라서, 비율만 잠그면 원인 하나가 그물 밖에 남는다. 애니메이션 키는 비율이라 그대로 노출했다(pt 만 돌려주면 발화 기준이 바뀐다). 변이 9종 확인. 838 passed, Release exit 0. 인용 경로 변경 0이라 좌표 재도출은 없다.",
+          "semantic-input-binding/v1:0064:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:213bac6a012903a19e76fb25f50f3e201464a79fa27d968f01a7fbaabf0bd386:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "independently_reviewed": [
           "complete four-layer citation ranges and stage-conditional wording",
@@ -326,7 +328,9 @@
           "**좌표 회귀의 성격 확인**. 이번 red 는 코드 결함이 아니라 **저널 자기 참조**다 — epoch 0061 산문이 만든 좌표를 같은 커밋의 문서 삽입이 밀어냈다. 게이트가 산문과 근거 인용을 구분하지 않는 것은 fail-closed 쪽이라 그대로 두는 것이 맞다(구분하려면 파서가 문맥을 알아야 하고 그 자체가 새 신뢰 표면이다). 실제로 CI 가 정확히 잡아냈고, 로컬에서도 잡을 수 있었다 — 문서 변경을 별도 커밋으로 먼저 넣었다면 `coords-server` 가 비어 있지 않은 범위를 보고 같은 경고를 냈을 것이다. 커밋된 산문을 고치려 한 첫 시도는 게이트가 \"정확한 접두사\" 검사로 막고 롤백했다 — 그 차단이 옳다. 정정은 덮어쓰기가 아니라 이 append 다.",
           "semantic-input-binding/v1:0062:0d909bfaf05a6a9640718314e2a40ff74ae12f7aaefa3f08da6a986d0f499198:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:author=OpenAI Codex:reviewer=Claude Code",
           "**진단 문구 사실관계 검증**. codex 가 최종 요약의 \"타임스탬프도 같은 0.5초 곡선으로 움직인다\" 를 의심해 네 호출부를 대조했고, 타임스탬프가 오른쪽 고정 뷰라 애니메이션 대상이 아님을 확인해 문구만 정정했다(제품 코드 무변경, 대상 시험 1/1 통과, `git diff --check` 통과, 들여쓰기 정렬까지 후속 보정). 앞선 라운드에서 codex 가 \"두 버전 모두 펄스를 제거했다\" 고 쓴 것이 부정확했다는 지적도 수용했다 — 두 결과는 **같은 앱 코드 경로 하나**를 확인한 것이다. 이번 지적은 코드가 아니라 **설명의 정확성**을 본 것으로, 검사 강도를 바꾸지 않으면서 진단 가치를 되살린 좁고 정확한 개입이다.",
-          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=OpenAI Codex:reviewer=Claude Code",
+          "**fixture·검증기 결함 6건 지적**. 설계 라운드에서 캡처 지점(계산기 입력은 값 집합과 레이아웃 예산을 둘 다 필요로 하는데 ViewModel 에는 값만 있다), 무료 화면 누락, SwiftUI 재평가를 데이터 프레임으로 오인할 위험, parity 를 비율이 아닌 최종 pt 에 걸어야 함, fixture 에 pt 를 미리 박지 말 것을 짚었고 모두 반영됐다. 구현 후에는 (1) 전이가 단방향이라 분리·복귀를 잴 수 없음, (2) `Dictionary(uniqueKeysWithValues:)` 가 중복 키에서 실패가 아니라 **프로세스를 중단**해 중복을 잡으려던 검사가 스스로 파괴됨, (3) 과일반화 문구 잔존, (4) enum 도입 후 탭 검사가 **타입상 항상 참**이 된 공허 검사를 찾아 직접 고쳤다. 아울러 클로드의 Release 판정이 zsh 에 없는 `PIPESTATUS` 에 기대 **실패해도 통과로 찍히는** 상태였음을 지적했다 — 파이프 없이 재검증해 결과 자체는 유효함을 확인했다. 그리고 그 교훈이 **이미 같은 메모리 파일에 기록돼 있었다**는 점도 짚었다: 기록 부재가 아니라 적용 실패이므로 산문 중복 추가는 재발 방지가 아니다.",
+          "semantic-input-binding/v1:0064:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:213bac6a012903a19e76fb25f50f3e201464a79fa27d968f01a7fbaabf0bd386:author=OpenAI Codex:reviewer=Claude Code"
         ]
       },
       {
@@ -488,7 +492,9 @@
           "**좌표 회귀의 성격 확인**. 이번 red 는 코드 결함이 아니라 **저널 자기 참조**다 — epoch 0061 산문이 만든 좌표를 같은 커밋의 문서 삽입이 밀어냈다. 게이트가 산문과 근거 인용을 구분하지 않는 것은 fail-closed 쪽이라 그대로 두는 것이 맞다(구분하려면 파서가 문맥을 알아야 하고 그 자체가 새 신뢰 표면이다). 실제로 CI 가 정확히 잡아냈고, 로컬에서도 잡을 수 있었다 — 문서 변경을 별도 커밋으로 먼저 넣었다면 `coords-server` 가 비어 있지 않은 범위를 보고 같은 경고를 냈을 것이다. 커밋된 산문을 고치려 한 첫 시도는 게이트가 \"정확한 접두사\" 검사로 막고 롤백했다 — 그 차단이 옳다. 정정은 덮어쓰기가 아니라 이 append 다.",
           "semantic-input-binding/v1:0062:0d909bfaf05a6a9640718314e2a40ff74ae12f7aaefa3f08da6a986d0f499198:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:author=OpenAI Codex:reviewer=Claude Code",
           "**진단 문구 사실관계 검증**. codex 가 최종 요약의 \"타임스탬프도 같은 0.5초 곡선으로 움직인다\" 를 의심해 네 호출부를 대조했고, 타임스탬프가 오른쪽 고정 뷰라 애니메이션 대상이 아님을 확인해 문구만 정정했다(제품 코드 무변경, 대상 시험 1/1 통과, `git diff --check` 통과, 들여쓰기 정렬까지 후속 보정). 앞선 라운드에서 codex 가 \"두 버전 모두 펄스를 제거했다\" 고 쓴 것이 부정확했다는 지적도 수용했다 — 두 결과는 **같은 앱 코드 경로 하나**를 확인한 것이다. 이번 지적은 코드가 아니라 **설명의 정확성**을 본 것으로, 검사 강도를 바꾸지 않으면서 진단 가치를 되살린 좁고 정확한 개입이다.",
-          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=OpenAI Codex:reviewer=Claude Code",
+          "**fixture·검증기 결함 6건 지적**. 설계 라운드에서 캡처 지점(계산기 입력은 값 집합과 레이아웃 예산을 둘 다 필요로 하는데 ViewModel 에는 값만 있다), 무료 화면 누락, SwiftUI 재평가를 데이터 프레임으로 오인할 위험, parity 를 비율이 아닌 최종 pt 에 걸어야 함, fixture 에 pt 를 미리 박지 말 것을 짚었고 모두 반영됐다. 구현 후에는 (1) 전이가 단방향이라 분리·복귀를 잴 수 없음, (2) `Dictionary(uniqueKeysWithValues:)` 가 중복 키에서 실패가 아니라 **프로세스를 중단**해 중복을 잡으려던 검사가 스스로 파괴됨, (3) 과일반화 문구 잔존, (4) enum 도입 후 탭 검사가 **타입상 항상 참**이 된 공허 검사를 찾아 직접 고쳤다. 아울러 클로드의 Release 판정이 zsh 에 없는 `PIPESTATUS` 에 기대 **실패해도 통과로 찍히는** 상태였음을 지적했다 — 파이프 없이 재검증해 결과 자체는 유효함을 확인했다. 그리고 그 교훈이 **이미 같은 메모리 파일에 기록돼 있었다**는 점도 짚었다: 기록 부재가 아니라 적용 실패이므로 산문 중복 추가는 재발 방지가 아니다.",
+          "semantic-input-binding/v1:0064:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:213bac6a012903a19e76fb25f50f3e201464a79fa27d968f01a7fbaabf0bd386:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "independently_reviewed": [
           "C2 initial narrative updates and mechanical citation remap",
@@ -651,7 +657,9 @@
           "**자초한 좌표로 CI 를 빨갛게 만들었다 — epoch 0061 직후 복구** (서버 `4e2f5d7`). epoch 0061 산문에 codex 가 고친 줄을 가리키려고 `ALERT_SUBSCRIPTION_GUIDE.md` 파일명 뒤에 콜론과 956 을 붙여 적었는데, 게이트의 `_cited_lines` 는 `spec/*.json` 안의 그 형태를 전부 **좌표로 파싱**한다. 같은 커밋에서 내가 §7.3 에 supersede 블록 13행을 그 줄 **위에** 삽입했으므로 좌표가 밀렸다 — 956행은 이제 ASCII 아트이고 실제 문장(\"바 너비 변화 + 펄스 효과\")은 969행이다. **커밋된 산문은 정확한 접두사로 남아야 하므로 그 숫자는 고치지 않는다** — append-only 규칙대로 여기서 정정을 덧붙인다. 이 산문은 같은 함정을 되풀이하지 않도록 파일명과 숫자를 붙여 쓰지 않았다. ⛔ **두 절차 위반이 겹쳤다**: (1) 메모리에 박아둔 \"문서 수정은 C2 앞에 먼저 커밋\" 을 어기고 문서 변경을 C2 커밋에 함께 묶었다 — 그래서 로컬 `coords-server` 가 `pin..HEAD` 를 빈 범위로 보고 밀림을 못 봤다(미커밋 변경은 그 범위에 안 들어간다). (2) 로컬 검증에서 `tests/test_topic_c2_integration.py` 를 빼고 원장 시험 3개 파일만 돌렸다 — CI 가 실패한 바로 그 시험이다. 앞으로 C2 뒤 로컬 확인은 **preflight + `topic_c2.py verify` + 통합 시험**까지가 한 단위다. 교훈: **산문에 줄 번호를 적는 순간 그것은 유지보수 대상 좌표가 되고, 커밋되면 되돌릴 수도 없다.**",
           "semantic-input-binding/v1:0062:0d909bfaf05a6a9640718314e2a40ff74ae12f7aaefa3f08da6a986d0f499198:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:author=Claude Code:reviewer=OpenAI Codex",
           "**공용 곡선 4곳의 진단 문구 정정 — 내 라벨이 틀렸다** (iOS `69cc5a0`). 구조 잠금이 세는 `RateBarAnimation.curve(` 4곳을 나는 \"막대 폭·환율 숫자·차이값·타임스탬프\" 라고 적었는데 **타임스탬프는 그 넷에 없다**. 실제는 환율 숫자(`value: rate.rate`) · 막대 폭(`barWidthPercent`) · 차이값 영역 이동(`barWidthPercent`) · 차이값 숫자(`value: diff`) 이고, 타임스탬프는 오른쪽 벽에 고정된 뷰라 `timestampSection` 안에도 그 호출부에도 `.animation` 이 없다(참조 0건 실측). `SourceRateBarView` 도 같은 넷이다. **단언(개수 4)은 처음부터 옳았고 틀린 것은 실패 시 보이는 진단 문구뿐**이라 앱 동작·검사 강도에는 영향이 없다 — 다만 그대로 뒀으면 이 검사가 red 일 때 다음 사람이 타임스탬프 쪽을 뒤졌을 것이다. 행 수 불변(7266)이라 인용 좌표 이동은 없고 `coords` 가 \"인용 밀림 없음 · 인용 줄 내용 불변\" 으로 확인했다. ⛔ 교훈: **개수를 세는 잠금은 세는 값이 맞아도 '무엇을 세는지' 설명이 틀릴 수 있고, 그 설명은 실패한 순간에만 읽히므로 아무도 검산하지 않는다** — 목록을 적을 때는 코드에서 하나씩 되짚을 것.",
-          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=Claude Code:reviewer=OpenAI Codex",
+          "**막대 폭 재설계 1·2단계 — 동작 변화 0 체크포인트** (iOS `d53c7b3`). 두 무리로 갈린 값에서 한쪽 그룹이 구분되지 않는 문제를 고치기 전에, 후보를 같은 입력으로 비교할 fixture 와 현행 기준선을 먼저 세웠다. 알고리즘은 아직 없다. (a) `BarScaleScenario` 15종 + 전이 4방향(병합·분리·삭제·복귀) — 다만 **의미 계약은 실행하지 않는다**: 현행은 표시에 `%.2f`, 폭에 raw Double 을 써서 \"같은 표시 가격 = 같은 폭\" 을 지금 켜면 의도적으로 red 이고 `XCTSkip` 은 조용히 사라지는 검사가 된다. 대신 그 계약을 **잴 수 있는 입력**(같은 표시·다른 raw)을 지금 넣어 두었다. 그룹은 **사람이 지정한다** — 렌더 결과의 최대 단차를 경계로 되짚으면 그룹을 벌리는 알고리즘이 자기가 벌린 자리를 인정받는 순환 채점이 된다. (b) 두 막대 뷰에 복제돼 있던 폭 수식을 `LegacyBarWidthCalculator` 로 추출하고 golden 으로 현행을 있는 그대로 고정했다 — 구간표 7단 임계, 범위 2.0 통과 시 하단이 5%p 튀는 것, 최소 폭 clamp, 서로 다른 두 값이 같은 길이로 뭉개지는 것(스크린샷 재현). ⚠️ **회귀 잠금이 비율이 아니라 최종 pt 까지 닿아야 한다** — 이번 증상의 두 원인 중 하나가 그 clamp 라서, 비율만 잠그면 원인 하나가 그물 밖에 남는다. 애니메이션 키는 비율이라 그대로 노출했다(pt 만 돌려주면 발화 기준이 바뀐다). 변이 9종 확인. 838 passed, Release exit 0. 인용 경로 변경 0이라 좌표 재도출은 없다.",
+          "semantic-input-binding/v1:0064:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:213bac6a012903a19e76fb25f50f3e201464a79fa27d968f01a7fbaabf0bd386:author=Claude Code:reviewer=OpenAI Codex"
         ]
       }
     ],
@@ -820,7 +828,9 @@
           "**자초한 좌표로 CI 를 빨갛게 만들었다 — epoch 0061 직후 복구** (서버 `4e2f5d7`). epoch 0061 산문에 codex 가 고친 줄을 가리키려고 `ALERT_SUBSCRIPTION_GUIDE.md` 파일명 뒤에 콜론과 956 을 붙여 적었는데, 게이트의 `_cited_lines` 는 `spec/*.json` 안의 그 형태를 전부 **좌표로 파싱**한다. 같은 커밋에서 내가 §7.3 에 supersede 블록 13행을 그 줄 **위에** 삽입했으므로 좌표가 밀렸다 — 956행은 이제 ASCII 아트이고 실제 문장(\"바 너비 변화 + 펄스 효과\")은 969행이다. **커밋된 산문은 정확한 접두사로 남아야 하므로 그 숫자는 고치지 않는다** — append-only 규칙대로 여기서 정정을 덧붙인다. 이 산문은 같은 함정을 되풀이하지 않도록 파일명과 숫자를 붙여 쓰지 않았다. ⛔ **두 절차 위반이 겹쳤다**: (1) 메모리에 박아둔 \"문서 수정은 C2 앞에 먼저 커밋\" 을 어기고 문서 변경을 C2 커밋에 함께 묶었다 — 그래서 로컬 `coords-server` 가 `pin..HEAD` 를 빈 범위로 보고 밀림을 못 봤다(미커밋 변경은 그 범위에 안 들어간다). (2) 로컬 검증에서 `tests/test_topic_c2_integration.py` 를 빼고 원장 시험 3개 파일만 돌렸다 — CI 가 실패한 바로 그 시험이다. 앞으로 C2 뒤 로컬 확인은 **preflight + `topic_c2.py verify` + 통합 시험**까지가 한 단위다. 교훈: **산문에 줄 번호를 적는 순간 그것은 유지보수 대상 좌표가 되고, 커밋되면 되돌릴 수도 없다.**",
           "semantic-input-binding/v1:0062:0d909bfaf05a6a9640718314e2a40ff74ae12f7aaefa3f08da6a986d0f499198:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:author=Claude Code:reviewer=OpenAI Codex",
           "**공용 곡선 4곳의 진단 문구 정정 — 내 라벨이 틀렸다** (iOS `69cc5a0`). 구조 잠금이 세는 `RateBarAnimation.curve(` 4곳을 나는 \"막대 폭·환율 숫자·차이값·타임스탬프\" 라고 적었는데 **타임스탬프는 그 넷에 없다**. 실제는 환율 숫자(`value: rate.rate`) · 막대 폭(`barWidthPercent`) · 차이값 영역 이동(`barWidthPercent`) · 차이값 숫자(`value: diff`) 이고, 타임스탬프는 오른쪽 벽에 고정된 뷰라 `timestampSection` 안에도 그 호출부에도 `.animation` 이 없다(참조 0건 실측). `SourceRateBarView` 도 같은 넷이다. **단언(개수 4)은 처음부터 옳았고 틀린 것은 실패 시 보이는 진단 문구뿐**이라 앱 동작·검사 강도에는 영향이 없다 — 다만 그대로 뒀으면 이 검사가 red 일 때 다음 사람이 타임스탬프 쪽을 뒤졌을 것이다. 행 수 불변(7266)이라 인용 좌표 이동은 없고 `coords` 가 \"인용 밀림 없음 · 인용 줄 내용 불변\" 으로 확인했다. ⛔ 교훈: **개수를 세는 잠금은 세는 값이 맞아도 '무엇을 세는지' 설명이 틀릴 수 있고, 그 설명은 실패한 순간에만 읽히므로 아무도 검산하지 않는다** — 목록을 적을 때는 코드에서 하나씩 되짚을 것.",
-          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=Claude Code:reviewer=OpenAI Codex"
+          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=Claude Code:reviewer=OpenAI Codex",
+          "**막대 폭 재설계 1·2단계 — 동작 변화 0 체크포인트** (iOS `d53c7b3`). 두 무리로 갈린 값에서 한쪽 그룹이 구분되지 않는 문제를 고치기 전에, 후보를 같은 입력으로 비교할 fixture 와 현행 기준선을 먼저 세웠다. 알고리즘은 아직 없다. (a) `BarScaleScenario` 15종 + 전이 4방향(병합·분리·삭제·복귀) — 다만 **의미 계약은 실행하지 않는다**: 현행은 표시에 `%.2f`, 폭에 raw Double 을 써서 \"같은 표시 가격 = 같은 폭\" 을 지금 켜면 의도적으로 red 이고 `XCTSkip` 은 조용히 사라지는 검사가 된다. 대신 그 계약을 **잴 수 있는 입력**(같은 표시·다른 raw)을 지금 넣어 두었다. 그룹은 **사람이 지정한다** — 렌더 결과의 최대 단차를 경계로 되짚으면 그룹을 벌리는 알고리즘이 자기가 벌린 자리를 인정받는 순환 채점이 된다. (b) 두 막대 뷰에 복제돼 있던 폭 수식을 `LegacyBarWidthCalculator` 로 추출하고 golden 으로 현행을 있는 그대로 고정했다 — 구간표 7단 임계, 범위 2.0 통과 시 하단이 5%p 튀는 것, 최소 폭 clamp, 서로 다른 두 값이 같은 길이로 뭉개지는 것(스크린샷 재현). ⚠️ **회귀 잠금이 비율이 아니라 최종 pt 까지 닿아야 한다** — 이번 증상의 두 원인 중 하나가 그 clamp 라서, 비율만 잠그면 원인 하나가 그물 밖에 남는다. 애니메이션 키는 비율이라 그대로 노출했다(pt 만 돌려주면 발화 기준이 바뀐다). 변이 9종 확인. 838 passed, Release exit 0. 인용 경로 변경 0이라 좌표 재도출은 없다.",
+          "semantic-input-binding/v1:0064:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:213bac6a012903a19e76fb25f50f3e201464a79fa27d968f01a7fbaabf0bd386:author=Claude Code:reviewer=OpenAI Codex"
         ],
         "result": "pass"
       },
@@ -980,7 +990,9 @@
           "**좌표 회귀의 성격 확인**. 이번 red 는 코드 결함이 아니라 **저널 자기 참조**다 — epoch 0061 산문이 만든 좌표를 같은 커밋의 문서 삽입이 밀어냈다. 게이트가 산문과 근거 인용을 구분하지 않는 것은 fail-closed 쪽이라 그대로 두는 것이 맞다(구분하려면 파서가 문맥을 알아야 하고 그 자체가 새 신뢰 표면이다). 실제로 CI 가 정확히 잡아냈고, 로컬에서도 잡을 수 있었다 — 문서 변경을 별도 커밋으로 먼저 넣었다면 `coords-server` 가 비어 있지 않은 범위를 보고 같은 경고를 냈을 것이다. 커밋된 산문을 고치려 한 첫 시도는 게이트가 \"정확한 접두사\" 검사로 막고 롤백했다 — 그 차단이 옳다. 정정은 덮어쓰기가 아니라 이 append 다.",
           "semantic-input-binding/v1:0062:0d909bfaf05a6a9640718314e2a40ff74ae12f7aaefa3f08da6a986d0f499198:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:author=OpenAI Codex:reviewer=Claude Code",
           "**진단 문구 사실관계 검증**. codex 가 최종 요약의 \"타임스탬프도 같은 0.5초 곡선으로 움직인다\" 를 의심해 네 호출부를 대조했고, 타임스탬프가 오른쪽 고정 뷰라 애니메이션 대상이 아님을 확인해 문구만 정정했다(제품 코드 무변경, 대상 시험 1/1 통과, `git diff --check` 통과, 들여쓰기 정렬까지 후속 보정). 앞선 라운드에서 codex 가 \"두 버전 모두 펄스를 제거했다\" 고 쓴 것이 부정확했다는 지적도 수용했다 — 두 결과는 **같은 앱 코드 경로 하나**를 확인한 것이다. 이번 지적은 코드가 아니라 **설명의 정확성**을 본 것으로, 검사 강도를 바꾸지 않으면서 진단 가치를 되살린 좁고 정확한 개입이다.",
-          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=OpenAI Codex:reviewer=Claude Code"
+          "semantic-input-binding/v1:0063:8cf65887dc91d3089babeffbd9ec44bfed67d9e5f05f625ccaa41db24bc62f5a:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:author=OpenAI Codex:reviewer=Claude Code",
+          "**fixture·검증기 결함 6건 지적**. 설계 라운드에서 캡처 지점(계산기 입력은 값 집합과 레이아웃 예산을 둘 다 필요로 하는데 ViewModel 에는 값만 있다), 무료 화면 누락, SwiftUI 재평가를 데이터 프레임으로 오인할 위험, parity 를 비율이 아닌 최종 pt 에 걸어야 함, fixture 에 pt 를 미리 박지 말 것을 짚었고 모두 반영됐다. 구현 후에는 (1) 전이가 단방향이라 분리·복귀를 잴 수 없음, (2) `Dictionary(uniqueKeysWithValues:)` 가 중복 키에서 실패가 아니라 **프로세스를 중단**해 중복을 잡으려던 검사가 스스로 파괴됨, (3) 과일반화 문구 잔존, (4) enum 도입 후 탭 검사가 **타입상 항상 참**이 된 공허 검사를 찾아 직접 고쳤다. 아울러 클로드의 Release 판정이 zsh 에 없는 `PIPESTATUS` 에 기대 **실패해도 통과로 찍히는** 상태였음을 지적했다 — 파이프 없이 재검증해 결과 자체는 유효함을 확인했다. 그리고 그 교훈이 **이미 같은 메모리 파일에 기록돼 있었다**는 점도 짚었다: 기록 부재가 아니라 적용 실패이므로 산문 중복 추가는 재발 방지가 아니다.",
+          "semantic-input-binding/v1:0064:b1c4535f3970344b690445050ca440d6ed7bbf04cc0f49a5ab2807efb7fbe045:213bac6a012903a19e76fb25f50f3e201464a79fa27d968f01a7fbaabf0bd386:author=OpenAI Codex:reviewer=Claude Code"
         ],
         "result": "pass"
       }
@@ -994,21 +1006,21 @@
   "reviewed_at": "2026-08-23",
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "d5953c9a3aedf6aeefffeccc47b910901506204319856068710b4893cb5f59e7",
+    "manifest_sha256": "1548c6c92a03ddd8336d0ae0af597bc5f62041fb5acb2353d64c6b05578eb6f9",
     "baseline_sha256": "4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708",
-    "lock_sha256": "289450c092d5a8f06e3a3d3d2f5c2c4bd820bd1cdd81def8f09a2b275ba32888",
-    "server_commit": "6cbb06b7d341eb1baff07f8a842746132c17dc99",
-    "ios_commit": "69cc5a04779992c131f8b4b06ab9ccab2dd9551d"
+    "lock_sha256": "06187c339785ff60be0e2d8d57d5e0a4f32fa17092306a495c550716b6cebe79",
+    "server_commit": "4de7fcf4c0446663c7b08da4fd440aa04d55b7db",
+    "ios_commit": "d53c7b3eb327ddf68075694311f13bee1c33d822"
   },
   "documents": {
-    "ADR": "e2a10603b5caf227bc8cc30f87819eb84fae7a70ff85dd91af3cc3558ad6c66b",
-    "CLIENT": "7a07ab251fe663ffcbfb1000503662a19b89eec3389d483c7d064a7e7d63339e",
-    "CUT": "fe6a3c95aea1c932eecaeafcec00971f3ad5a90bf837ffaa2d00da06a4c30150",
-    "HAND": "5634c1e50eda7f1e79ef1cea4e4bcfc2a04191d3940e1657b578b39584fda0bd",
-    "HEALTH": "e3dea0c40f3cfdbc4cd2861d24cbc305edbf8bfa8d7d311dc8027f83b9bb6c8a",
-    "LOAD": "4bf2dd91f608ba9e6e55303c88cc8eace3309aa94bfa4184e99b4083278a3cdd"
+    "ADR": "e0372744e6946326290290e466f7b0b8760e900a1d4aa5850fe96d7bf27267ca",
+    "CLIENT": "bcc620c17c09da01986859959eac303957a510c172d9a32b0f1ec0ccc17752a5",
+    "CUT": "5b2da7d1c1719513adcfd422d2707c6fa0fa5e6f607577635d5723739ddaf658",
+    "HAND": "38fcd8ee2676cbf84f59b431e34b476e0bd2c6f34b75ea6c2249a3755c53020c",
+    "HEALTH": "84a3473dbb03fd2a1936cdd3b8eb870692cb43ac5b750ca137b72124fff80003",
+    "LOAD": "01c972fff21d61fc1f8cf2ded8aae656ddd68c056856839596d0ab4f579141f2"
   },
-  "claim_ledger_sha256": "06ce686b26b0ec1141cb5426fe021405b83a373c9cb7dd17c510b89456a4978d",
+  "claim_ledger_sha256": "b0bda2500db5fc49cf82df84298183e2e288731a14bea58840b909f6c8293778",
   "scope": {
     "manifest_output_requirements": 86,
     "claim_candidates": 68,
