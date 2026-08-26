@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "manifest_sha256": "0c6435fbe7f12078b348daff5c7202e310c3b4b3b45cc7161232da7506ff1e4c",
+  "manifest_sha256": "96830e3c9e5f1f4a6125bbdb5c4681bf904a284d65aa0e77b8f2949923c15fb6",
   "note": "⛔ 동결 manifest = 구속력·소유·관계의 정본. 이 대장 = 작업 종류·완료 상태·검증 근거의 정본. manifest 를 수정하지 말 것. 파생 부분집합(제목 34 / 참조폐쇄 40 / 합집합 56)은 탐색 힌트일 뿐이다 — active 20건이 양쪽 사각지대였다. 그래서 대장은 active 전량을 덮는다.",
   "closed_statuses": [
     "verified"
