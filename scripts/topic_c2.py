@@ -8,9 +8,10 @@
   · parent 지문을 손으로 옮겨 적었다(3회).
   · 체인이 서로를 먹여(문서 헤더 → 문서 해시 → 두 원장 → 지문) 봉인을 세 번 다시 했다.
 
-그래서 여기 검사는 전부 **0건을 실패로** 만든다. 탐색 결과 0 을 "할 일 없음" 으로 읽는
-것이 이 도구가 막으려는 실패다. 그리고 **손으로 넣는 값을 최소화**한다 — parent 지문과
-epoch 번호는 이력에서 도출하지, 사람이 옮겨 적지 않는다.
+그래서 **필수 대상을 찾는 탐색**은 0건을 실패로 만든다. 반대로 pin 치환 뒤 구 SHA 0건,
+좌표 경고 0건처럼 0이 성공인 단계도 있다. 각 단계의 0 계약을 구분하고, 탐색 결과 0을
+무조건 "할 일 없음"으로 읽지 않는다. 그리고 **손으로 넣는 값을 최소화**한다 — parent
+지문과 epoch 번호는 이력에서 도출하지, 사람이 옮겨 적지 않는다.
 
 사용:
     python3 scripts/topic_c2.py coords --ios-from <sha>      # iOS 좌표 이동 여부만
@@ -602,21 +603,45 @@ def seal_epoch(author: str, reviewer: str, *, dry_run: bool = False,
 
 # ---------------------------------------------------------------- coords
 
-def _cited_lines() -> dict[str, set[int]]:
-    pattern = re.compile(r"([A-Za-z0-9_./-]+\.(?:swift|md|py|json)):(\d+)(?:-(\d+))?")
-    cited: dict[str, set[int]] = {}
+def _citation_target_path(name: str) -> tuple[str, str]:
+    """Return the repository key and repository-relative path for a citation.
+
+    Historical semantic prose contains bare Swift basenames, while current formal
+    citations use ``ios/`` or product-relative paths. Keep basename fallback only
+    for those bare references; an explicit path must retain its path identity.
+    """
+    clean = name.removeprefix("exchange-rate/")
+    if clean.startswith("ios/"):
+        return "ios", clean.removeprefix("ios/")
+    if clean.startswith("server/"):
+        return "server", clean.removeprefix("server/")
+    if clean.startswith(("FXi/", "FXiTests/", "FXi.xcodeproj/")):
+        return "ios", clean
+    if "/" not in clean and clean.endswith(".swift"):
+        return "ios", clean
+    return "server", clean
+
+
+def _cited_lines() -> dict[str, dict[str, set[int]]]:
+    # Keep this extension-agnostic like the document citation gate. Restricting
+    # the list to source-code suffixes silently dropped nginx ``.conf`` citations.
+    pattern = re.compile(
+        r"([A-Za-z0-9_./-]+\."
+        r"[A-Za-z0-9_+-]*[A-Za-z_][A-Za-z0-9_+-]*):(\d+)(?:-(\d+))?"
+    )
+    cited: dict[str, dict[str, set[int]]] = {"ios": {}, "server": {}}
     sources = list((REPO / "spec").rglob("*.json")) + list((REPO / "spec").rglob("*.md"))
     sources.append(REPO / "DECISIONS.md")
     for path in sources:
         for match in pattern.finditer(path.read_text()):
-            name = match.group(1).split("/")[-1]
+            target, name = _citation_target_path(match.group(1))
             start = int(match.group(2))
             end = int(match.group(3)) if match.group(3) else start
             if end < start or end - start > MAX_CITED_RANGE:
                 # 뒤집힌 범위/비정상 폭은 좌표가 아니라 오탈자다. 끝점만 표시해 두고 넘어간다.
-                cited.setdefault(name, set()).update({start, end})
+                cited[target].setdefault(name, set()).update({start, end})
                 continue
-            cited.setdefault(name, set()).update(range(start, end + 1))
+            cited[target].setdefault(name, set()).update(range(start, end + 1))
     return cited
 
 
@@ -674,22 +699,31 @@ def _check_coordinates(
 
     citation 게이트는 "그 행이 파일 안에 있는가" 만 보므로 **CI 는 통과한다**(실측 12건).
     """
-    cited = _cited_lines()
+    cited = _cited_lines()[target]
     revision_range = f"{revision_from}..{revision_to}"
-    changed = _run(["git", "-C", str(root), "diff", "--name-only", revision_range]).split()
+    # Rename detection normally reports only the new path. Disabling it exposes
+    # both deletion and addition, so a citation to the old path cannot disappear
+    # as an apparently uncited new basename. It also gives pure path moves hunks.
+    changed = _run([
+        "git", "-C", str(root), "diff", "--no-renames", "--name-only", revision_range,
+    ]).splitlines()
     if not changed:
         raise C2Error(f"{target} {revision_range} 사이 변경 파일이 0 — 범위를 확인하라")
     warnings: list[str] = []
     for name in changed:
         base = name.split("/")[-1]
-        if base not in cited:
+        cited_lines = cited.get(name, set()) | cited.get(base, set())
+        if not cited_lines:
             _say("COORD", f"{target}:{name}: 인용 없음")
             continue
-        diff = _run(["git", "-C", str(root), "diff", "-U0", revision_range, "--", name])
+        diff = _run([
+            "git", "-C", str(root), "diff", "--no-renames", "-U0", revision_range,
+            "--", name,
+        ])
         hunks = parse_hunks(diff)
         if not hunks:
             continue
-        shifted, touched = coordinate_findings(cited[base], hunks)
+        shifted, touched = coordinate_findings(cited_lines, hunks)
         if shifted:
             warnings.append(
                 f"{target}:{name}: 인용 위에서 줄 수가 바뀌었다 — "

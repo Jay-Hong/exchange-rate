@@ -349,7 +349,11 @@ def test_seal_rejects_a_missing_committed_marker(monkeypatch, tmp_path):
 def test_coordinate_check_flags_an_edit_above_a_citation(monkeypatch):
     """**pin 전진 ≠ 좌표 재도출.** 인용 위쪽 삽입은 CI 를 통과하면서 12건을 조용히 밀었다."""
     monkeypatch.setattr(topic_c2, "_run", lambda *a, **k: "TOPIC_V2_RELEASE_RUNBOOK.md\n")
-    monkeypatch.setattr(topic_c2, "_cited_lines", lambda: {"TOPIC_V2_RELEASE_RUNBOOK.md": {9999}})
+    monkeypatch.setattr(
+        topic_c2,
+        "_cited_lines",
+        lambda: {"ios": {"TOPIC_V2_RELEASE_RUNBOOK.md": {9999}}, "server": {}},
+    )
     monkeypatch.setattr(
         topic_c2, "_run",
         lambda args, **k: ("TOPIC_V2_RELEASE_RUNBOOK.md\n" if "--name-only" in args
@@ -360,7 +364,11 @@ def test_coordinate_check_flags_an_edit_above_a_citation(monkeypatch):
 
 
 def test_coordinate_check_is_quiet_below_every_citation(monkeypatch):
-    monkeypatch.setattr(topic_c2, "_cited_lines", lambda: {"TOPIC_V2_RELEASE_RUNBOOK.md": {369}})
+    monkeypatch.setattr(
+        topic_c2,
+        "_cited_lines",
+        lambda: {"ios": {"TOPIC_V2_RELEASE_RUNBOOK.md": {369}}, "server": {}},
+    )
     monkeypatch.setattr(
         topic_c2, "_run",
         lambda args, **k: ("TOPIC_V2_RELEASE_RUNBOOK.md\n" if "--name-only" in args
@@ -433,8 +441,98 @@ def test_hunk_header_without_counts_means_one_line():
 def test_cited_ranges_expand_to_every_line_inside():
     """끝점만 담으면 범위 **안쪽** 줄이 바뀌어도 못 잡는다."""
     monkey = topic_c2._cited_lines()
-    runbook = monkey.get("TOPIC_V2_RELEASE_RUNBOOK.md", set())
+    runbook = monkey["ios"].get("TOPIC_V2_RELEASE_RUNBOOK.md", set())
     assert {341, 350, 362}.issubset(runbook), "341-362 범위 안쪽이 비어 있다"
+
+
+def test_citations_keep_repository_and_path_identity():
+    cited = topic_c2._cited_lines()
+    assert "CLAUDE.md" in cited["server"]
+    assert "CLAUDE.md" not in cited["ios"], "서버 CLAUDE 인용을 iOS 파일에 적용했다"
+    assert "FXi/ViewModels/GraphV2ViewModel.swift" in cited["ios"]
+    assert {19, 89, 116, 117, 118}.issubset(
+        cited["server"]["nginx/conf.d/default.conf"]
+    ), "확장자 allowlist 때문에 nginx 설정 인용이 빠졌다"
+    assert 375 in cited["ios"]["SubscriptionManager.swift"]
+    assert "...01" not in cited["server"], "시각 ...01:21:02 를 파일 인용으로 읽었다"
+
+
+@pytest.mark.parametrize(
+    ("changed", "cited_path"),
+    [
+        ("Old.swift\nNew.swift\n", "Old.swift"),
+        ("old/Foo.swift\nnew/Foo.swift\n", "old/Foo.swift"),
+    ],
+)
+def test_coordinate_check_flags_renamed_or_moved_cited_paths(
+    monkeypatch, changed, cited_path,
+):
+    """이름 변경과 순수 경로 이동 모두 옛 인용 경로의 삭제로 드러나야 한다."""
+    monkeypatch.setattr(
+        topic_c2,
+        "_cited_lines",
+        lambda: {"ios": {cited_path: {1}}, "server": {}},
+    )
+
+    def run(args, **_kwargs):
+        assert "--no-renames" in args
+        if "--name-only" in args:
+            return changed
+        if args[-1] == cited_path:
+            return "@@ -1,2 +0,0 @@\n"
+        return "@@ -0,0 +1,2 @@\n"
+
+    monkeypatch.setattr(topic_c2, "_run", run)
+    warnings = topic_c2.check_coordinates("HEAD~1")
+    assert warnings and "내용" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    ("old_name", "new_name"),
+    [
+        ("Old.swift", "New.swift"),
+        ("old/Foo.swift", "new/Foo.swift"),
+    ],
+)
+def test_coordinate_check_catches_real_git_renames_and_path_moves(
+    monkeypatch, tmp_path, old_name, new_name,
+):
+    """실제 Git rename 탐지에서도 옛 경로가 숨지 않아야 한다."""
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.com")
+    git("config", "user.name", "Test")
+    old_path = tmp_path / old_name
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text("first\nsecond\n")
+    git("add", "-A")
+    git("commit", "-qm", "old")
+    revision_from = git("rev-parse", "HEAD")
+
+    (tmp_path / new_name).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", old_name, new_name)
+    git("commit", "-qm", "new")
+    revision_to = git("rev-parse", "HEAD")
+
+    monkeypatch.setattr(
+        topic_c2,
+        "_cited_lines",
+        lambda: {"ios": {old_name: {1}}, "server": {}},
+    )
+    warnings = topic_c2._check_coordinates(
+        tmp_path,
+        revision_from,
+        revision_to,
+        target="ios",
+    )
+    assert warnings and warnings[0].startswith(f"ios:{old_name}:")
 
 
 def test_c2_still_writes_when_rederivation_is_declared(monkeypatch, tmp_path):
@@ -478,7 +576,11 @@ def test_coordinate_check_rejects_an_empty_range(monkeypatch):
 
 def test_server_coordinate_check_uses_the_server_repository(monkeypatch):
     calls: list[list[str]] = []
-    monkeypatch.setattr(topic_c2, "_cited_lines", lambda: {"main.py": {9999}})
+    monkeypatch.setattr(
+        topic_c2,
+        "_cited_lines",
+        lambda: {"ios": {}, "server": {"main.py": {9999}}},
+    )
 
     def run(args, **_kwargs):
         calls.append(args)
