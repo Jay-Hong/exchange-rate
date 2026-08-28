@@ -7117,3 +7117,88 @@ subprocess 소요시간, `memory.events`, 고아 Chrome을 함께 본다.
 - DB 스키마 변경은 없다. 운영 이상 시 이전 이미지로 롤백하면 기존 모드·trigger로 복귀한다.
 - 배포 뒤 19:00 전환과 03:00~06:02 로그를 확인하기 전에는 2차 빈도 변경의 운영 효과와
   부하를 확정하지 않는다.
+
+---
+
+## ADR-043: OUT(주말) 수집 주기 1분 상향 — 판정 기준과 롤백값을 함께 고정
+
+**날짜**: 2026-08-28
+**상태**: Accepted (실험) — 구현 완료, 커밋·배포 전
+**관련**: [ADR-042](#adr-042-야간-은행-고시-연장-대응과-dxy-정책-시계-분리) 후속. 은행 모드 경계는 불변.
+
+### 맥락
+
+OUT(토 07:00~월 06:00)은 investing·kb·hana가 10분, bs·nh·shinhan이 60분 주기였다.
+사용자는 전부 1분으로 올리기를 원했다.
+
+운영 DB 실측(최근 30일 OUT 구간 변경행)은 다음과 같았다.
+
+| source | 변경행 | 당시 주기 |
+|--------|-------|----------|
+| hana | 18 | 10분 |
+| shinhan | 6 | 60분 |
+| investing | 1 | 10분 |
+| kb / bs / nh | 0 | 10분 / 60분 / 60분 |
+
+이 수치는 **판단을 확정하지 못한다.** `bank_exchange_rates`는 change-only 저장이라
+"변경행 0"은 "고시 없음"이 아니고, bs·nh·shinhan은 60분 폴링이라 표본이 성기다.
+kb만 10분 폴링에서 0이라 상대적으로 강한 신호다(고시는 다음 고시까지 유지되는 계단 함수이므로
+10분 안에 변했다 되돌아가야만 놓친다).
+
+### 결정
+
+1. OUT의 6개 소스(investing·kb·hana·bs·nh·shinhan)를 **1분 주기**로 올린다.
+   DXY는 이미 1분이므로 주기 변경 없음.
+2. 이번 주말을 **판정 실험**으로 삼는다. 다음 주 초에 소스별 수확을 재측정한다.
+3. 고정 시작초를 분산한다 — `investing :08 / nh :10 / dxy :21 / kb :28 / shinhan :30 /
+   hana :38 / bs :51`. 회피 대상은 `:00`(분 경계 rollup) · `:01`(control_job·일일 cleanup) ·
+   `:03/:23/:43`(chrome cleanup·worker health, graph cache는 `:03`만) · `:12`(intraday) ·
+   `:19`(free snapshot) · `:45`(RSS 뉴스) · **`:06/:16/…/:56`(USDT legacy polling)**.
+   마지막 항목은 평시 미등록이지만 `USDT_LEGACY_REST_POLLING_ENABLED=true` 롤백 시
+   5-거래소 fan-out이 그 초에 몰리므로 **동일 시작초를** 미리 피한다. 최소 간격은 2초라
+   롤백 polling의 실행시간과 겹치지 않는다고 보장하지는 않는다.
+4. 주기가 바뀐 6개 job의 `misfire_grace_time`을 30초로 맞춘다. 구 값 300/1800은
+   10분/60분 주기 전제였다. 장시간 늦은 실행을 복구해 다음 정상 슬롯과 가깝게 붙이기보다
+   해당 실행을 버리고 다음 슬롯을 택하는 부하 보호 정책이다. DXY는 주기가 바뀌지 않았고
+   scheduler 기본 `coalesce=True`가 최신 catch-up 1회만 남기므로 기존 120초를 유지한다.
+
+⚠️ 이 배치가 보장하는 것은 broadcast를 제외한 **위에 열거된 고정 cron과 동일 시작초
+0개**이지 "동시 실행 0개"가 아니다. broadcast는 의도대로 매초 발화한다. 실행시간은
+겹칠 수 있고, IntervalTrigger job(`queue_status`·`monitoring_stats`·
+`atomic_write_mode_poll`·latest mirror·KRX reconcile·USDT supervisor 등)은 프로세스
+기동 시각에 묶여 초가 부동이라 이 격자 밖이다.
+
+### 판정 기준 (다음 주 초)
+
+주말 종료 후 OUT 구간 변경행을 소스별로 재측정한다.
+
+- **유지**: 1분 전환으로 변경행이 유의하게 늘어난 소스
+- **축소 후보**: 1분 폴링에서도 변경행이 0에 가까운 소스 — 특히 **nh·shinhan은 subprocess라
+  비용이 크다**(launch당 import ~2.2초 wall, 시간당 120회). 수확이 없으면 되돌린다.
+- 비용 축: 체크포인트 구간의 `Δnr_throttled / Δnr_periods` · `memory.events` 증가분 ·
+  고아 Chrome 프로세스 수
+
+⚠️ 재측정도 change-only DB 위에서 이뤄지므로 "0"이 "고시 없음"을 증명하지 않는다.
+1분 폴링에서도 0이면 **그 주말의 1분 해상도에서 추가 변경을 관측하지 못했다**까지가
+말할 수 있는 전부다.
+
+### 롤백값 (되돌릴 때 쓸 구 설정)
+
+| job | 구 trigger | 구 grace |
+|-----|-----------|---------|
+| investing | `minute='7,17,27,37,47,57', second='45'` | 300 |
+| kb | `minute='5,15,25,35,45,55', second='45'` | 300 |
+| hana | `minute='0,10,20,30,40,50', second='45'` | 300 |
+| bs | `minute='33', second='45'` | 1800 |
+| nh | `minute='3', second='45'` | 1800 |
+| shinhan | `minute='13', second='45'` | 1800 |
+| dxy | `minute='*', second='15'` | 120 |
+
+이미지 롤백(`exchange-rate-fastapi:rollback-2026-08-28`)으로도 되돌아가지만, 그 이미지는
+ADR-042 이전이라 은행 모드 경계까지 함께 되돌아간다. **OUT만 되돌리려면 위 표를 쓴다.**
+
+### 범위 밖
+
+KB·하나 10초, 우리 30초, 선언적 스케줄 표, IN/BREAK 전체 레인 재배치는 이 결정에 없다.
+IN/BREAK1/BREAK2 블록은 이번 변경에서 **git diff 블록 대조상 바이트 단위 불변**이다.
+기존 창 테스트는 로스터와 경계 발화를 잠그지만 git HEAD와의 바이트 동일성 자체를 검사하지는 않는다.

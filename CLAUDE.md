@@ -309,6 +309,8 @@ sent_at           DATETIME
 
 > 💡 **최신 아키텍처:** 4단계 모드 + 환율 고시 스케줄 기반 최적화 (2025-11-16)
 > 📖 **상세 기록:**
+> - [ADR-043](DECISIONS.md#adr-043-out주말-수집-주기-1분-상향--판정-기준과-롤백값을-함께-고정) - OUT 6개 소스 1분 canary + 고정 시작초 분산
+> - [ADR-042](DECISIONS.md#adr-042-야간-은행-고시-연장-대응과-dxy-정책-시계-분리) - 2026-08-28 은행 모드 경계·야간 수집창 변경
 > - [ADR-013](DECISIONS.md#adr-013-4단계-모드---환율-고시-스케줄-기반-최적화) - 4단계 모드 도입 (IN, BREAK1, BREAK2, OUT). **2026-08-28 경계 변경**: IN 08:00~18:59 / BREAK1 19:00~06:00 / BREAK2 06:00~08:00 (아래 참조)
 > - [ADR-010](DECISIONS.md#adr-010-websocket-broadcasting-스케줄링-방식) - Broadcasting APScheduler cron job 전환
 > - [ADR-009](DECISIONS.md#adr-009-3-tier-스케줄링-아키텍처-t3smallmedium-최적화) - 3-Tier 크롤러 스케줄링
@@ -353,7 +355,17 @@ sent_at           DATETIME
   - Broadcasting: 다른 모드와 같은 runtime cadence 설정 적용
   - 제외: woori, ibk, sc, citi (주말 고시 없음)
   - 유지: investing, dxy, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
-  - 크롤러: cron 시간 단위 (완전 분산, 동시 실행 0개)
+  - **2026-08-28 배포 2A**: 6개 소스(investing·kb·hana·bs·nh·shinhan) **10분/60분 → 1분**,
+    초 분산 `investing :08 / nh :10 / dxy :21 / kb :28 / shinhan :30 / hana :38 / bs :51`.
+    dxy는 주기와 기존 catch-up grace 120초를 유지하고 초만 `:15`→`:21`
+    (KB 뉴스 */5분 `:15`과 고정 시작초 분리).
+    ⚠️ 회피 대상에 **USDT legacy polling 초(`:06`/`:16`/…/`:56`)** 포함 — 평시 미등록이지만
+    `USDT_LEGACY_REST_POLLING_ENABLED=true` 롤백 시 5-거래소 fan-out이 그 초에 몰린다.
+    ⚠️ 이 배치가 보장하는 것은 broadcast를 제외한 **열거된 고정 cron과 동일 시작초 0개**이지
+    '동시 실행 0개'가 아니다. broadcast는 의도대로 매초 발화한다.
+    ⚠️ 주말 관측 실측(최근 30일 OUT 변경행)은 hana 18 / shinhan 6 / investing 1 / kb·bs·nh 0이었다.
+    bs·nh·shinhan은 60분 폴링이라 표본이 성겼고 change-only DB라 '변경 없음'이 '고시 없음'이 아니다
+    → **이번 주말이 그 판정 실험**이며, 다음 주에 소스별 수확을 재측정해 유지/축소를 정한다.
 
 ### 은행별 환율 고시 스케줄
 
@@ -404,15 +416,15 @@ scheduler.add_job(
 - **DXY 선물 (`instrument='dxy_futures'`)**: 환율과 함께 `#sb_last_8827`(exchange-rates-table)을 추출. 셀렉터 실패 시 `dxy.py`의 `/currencies/us-dollar-index` 폴백 (60초 쿨다운, Yahoo 미사용)
 - **IN/BREAK1/BREAK2**: 10초마다 (고정 초 레인)
   - `cron(second='7,17,27,37,47,57')`
-- **OUT**: 10분마다
-  - `cron(minute='7,17,27,37,47,57', second='45')`
+- **OUT**: **1분마다** — 배포 2A
+  - `cron(minute='*', second='8')`
 
 **Tier A2 — dxy_spot (`task_dxy`)**: DXY 현물/운영 피드 독립 크롤러
 - **DXY 현물 (`instrument='dxy'`)**: `/indices/usdollar` `__NEXT_DATA__` → 같은 페이지 CSS → 외부 chain (CNBC `.DXY` → Yahoo `DX-Y.NYB`). 외부 chain은 주간 세션 / market mode 보존 / fresh-age diff guard 적용
 - **IN/BREAK1/BREAK2**: 10초마다 (investing과 6초 엇갈림)
   - `cron(second='1,11,21,31,41,51')`
-- **OUT**: 매분 수집 유지 (investing보다 10× 빈도)
-  - `cron(minute='*', second='15')`
+- **OUT**: 매분 수집 유지 (배포 2A에서 주기는 그대로, 고정 시작초만 이동)
+  - `cron(minute='*', second='21')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
@@ -427,7 +439,7 @@ scheduler.add_job(
   (`OrTrigger([hour='19-23,0-4', hour='5' minute='0-4'])` **단일 job `task_woori`** —
   별 job으로 나누면 `max_instances=1`이 배타가 아니라 지연 시 중복 실행 위험)
 - **BREAK2**: kb, hana, bs, citi 유지 (woori는 05:05 종료)
-- **OUT**: bs만 유지 (60분마다, 33분 45초)
+- **OUT**: kb(`:28`)·hana(`:38`)·bs(`:51`) 모두 **1분마다** (배포 2A)
 
 **Tier C (shinhan, ibk, nh, sc):** Selenium, 순차 처리
 - **특징**: 메모리 집약적, Request→Selenium 폴백으로 부하 감소
@@ -443,7 +455,7 @@ scheduler.add_job(
   sc는 19:00 진입과 함께 종료
 - **BREAK2**: nh(54초) 유지 + `task_ibk_terminal`(06:00:34·06:01:34, 화~토).
   shinhan(03:00 종료) / woori(05:05 종료) / sc(19:00 종료) 제외
-- **OUT**: nh(3분 45초), shinhan(13분 45초) 유지 (주말 중 가끔 변동)
+- **OUT**: nh(`:10`)·shinhan(`:30`) **1분마다** (배포 2A). 두 Selenium enqueue는 20초 간격
 
 **Selenium Queue 관리:**
 - **Request 우선 전략**: Queue 압력 대폭 감소 (대부분 Request 성공)
@@ -502,7 +514,8 @@ scheduler.add_job(
 - **Broadcasting 독립성**: 운영 broadcast가 매초이므로 크롤러 슬롯은 부하 분산만 기준으로 선택
 - **Request 우선 전략**: Selenium 크롤러도 Request(mibank) 먼저 시도 → Queue 압력 감소
 - **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
-- **리소스 분산**: OUT 모드 동시 실행 0개 → CPU 스파이크 제거
+- **리소스 분산**: OUT 모드의 알려진 고정 시작초 중복 제거. 네트워크 실행시간과
+  `IntervalTrigger` 위상에 따른 실제 실행 중첩은 가능하므로 배포 후 별도 관측
 - **예측 가능성**: cron 절대 시간 → 매시간 같은 패턴
 - **자동 복구**: Worker stuck 시 자동 재시작, 실패 작업 자동 재시도
 

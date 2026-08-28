@@ -105,18 +105,18 @@ queue_status_cache = {
 # A Group: investing + dxy_spot (순수 Request, 둘 다 4모드 전부 등록)
 #   - 가장 중요한 기준 환율
 #   - IN/BREAK1/BREAK2: 10초마다 (고정 초 레인으로 부하 분산)
-#   - OUT: investing 10분마다, dxy_spot 매분
+#   - OUT: investing·dxy_spot 모두 매분 (배포 2A — investing :08, dxy :21)
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
 #     - IN/BREAK1/BREAK2: 20초마다 (서로 10초 엇갈림)
-#     - OUT: 10분마다 (kb: 5,15,25..., hana: 0,10,20...)
+#     - OUT: 1분마다 (kb :28, hana :38) — 배포 2A
 #   - woori, bs, citi: 일반, 빈도 낮음
 #     - IN: 60초마다 (우선순위: woori(53초) > bs(33초) > citi(13초))
 #       * woori 우선순위 높음: 같은 1분 내 늦게 크롤링 → 사용자 표시 시간이 실제 변경 시간과 유사
 #     - BREAK1: woori(53초), bs(33초), citi(13초) 유지
 #     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 05:05 수집 종료)
-#     - OUT: bs만 유지 (60분마다, 33분)
+#     - OUT: bs도 1분마다 (:51) — 배포 2A
 #   - 하이브리드: hana, woori는 Request → Selenium 폴백. bs/citi는 순수 Request
 #
 # C Group: Selenium 기반 (Queue 순차 처리)
@@ -129,7 +129,7 @@ queue_status_cache = {
 #   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
 #   - BREAK1: shinhan(18초, ~02:59:18), ibk(34초, ~05:59:34), nh(54초) 유지 (sc는 19:00 진입과 함께 제외)
 #   - BREAK2: nh(54초) + task_ibk_terminal(06:00:34·06:01:34, 화~토). shinhan/woori/sc 제외
-#   - OUT: nh(매시 03분 45초), shinhan(매시 13분 45초) 유지 (주말 중 가끔 변동)
+#   - OUT: nh(:10), shinhan(:30) 모두 1분마다 (배포 2A, 20초 간격)
 #
 # BREAK1/BREAK2/OUT 모드 크롤러 축소 근거:
 #   - 환율 고시 종료 시간 이후 크롤러 제거 (리소스 절약)
@@ -579,7 +579,7 @@ def switch_jobs(mode: str):
     - IN 모드: cron 절대 시간 동기화 - 월~금 08:00~18:59 (2026-08-28 ADR-042: 20:59 → 18:59)
     - BREAK1 모드: 19시~익일 06시 - IN과 동일 스케줄에서 sc 제외 + shinhan/woori 은행별 cutoff
     - BREAK2 모드: 06:00~07:59 - shinhan/woori/sc 제외, ibk는 terminal capture(화~토)만
-    - OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개) - 토 07:00 ~ 월 05:59
+    - OUT 모드: 1분 주기 + 고정 시작초 분산 - 토 07:00 ~ 월 05:59
     - Queue: C Group만 사용 (Selenium 전용)
 
     [2025-11-27 Phase 1.8: 크롤러 토글]
@@ -988,16 +988,42 @@ def switch_jobs(mode: str):
         # 유지 크롤러: investing, dxy, kb, hana, bs, shinhan, nh (7개)
         # - hana, shinhan: 주말 중 가끔 변동
         # - bs, nh: 일요일 넘어갈 때 가끔 고시
-        # 완전 분산 스케줄 (동시 실행 0개, 리소스 최소화)
+        #
+        # 2026-08-28 (배포 2A): 6개 소스를 **1분 주기**로 상향 + 초 분산.
+        #   근거 — 주말 관측(최근 30일 OUT 구간 변경행): hana 18 / shinhan 6 /
+        #   investing 1 / kb·bs·nh 0. 다만 bs·nh·shinhan은 60분 폴링이라 표본이 성기고
+        #   change-only DB라 "변경 없음"이 "고시 없음"을 뜻하지 않는다 → 실측 확대.
+        #   ⚠️ 이번 주말이 그 판정 실험이다. 다음 주 초에 소스별 수확을 재측정해 유지/축소 결정.
+        #
+        # 초 분산 — investing :08 / nh :10 / dxy :21 / kb :28 / shinhan :30 / hana :38 / bs :51
+        #   - dxy :15 → :21  — KB 뉴스(*/5분 :15)와 시간당 12회 충돌 제거 (주기는 1분 유지)
+        #   - kb·hana 구 :45 — RSS 뉴스(*/5분 :45)와 충돌하던 것이 1분 전환+분산으로 해소
+        #   - nh :10 / shinhan :30 — Selenium subprocess 2개를 20초 벌려 버스트 중첩 회피
+        #   - 회피 대상 초:
+        #       :00        분 경계 job (dxy rollup hourly 매시 :05:00 / daily 00:05:00)
+        #       :01        control_job · 일일 cleanup 5종(03:20~03:32)
+        #       :03/:23/:43 chrome cleanup + worker health (:03은 graph_cache_refresh도)
+        #       :12        graph v2 intraday precompute (*/10분)
+        #       :15        KB 뉴스 (*/5분)
+        #       :19        free snapshot (매시 :30)
+        #       :45        RSS 뉴스 (*/5분)
+        #       :06/:16/:26/:36/:46/:56  USDT legacy REST polling — **평시 미등록**이지만
+        #                  `USDT_LEGACY_REST_POLLING_ENABLED=true` 롤백 시 5-거래소 fan-out이
+        #                  이 초에 몰린다. 실행시간 비중첩은 보장하지 않고 동일 시작초만 피한다.
+        #
+        # ⚠️ 이 배치가 보장하는 것은 broadcast를 제외한 **위에 열거한 고정 cron과 동일
+        #    시작초 0개**이지 "동시 실행 0개"가 아니다. broadcast는 의도대로 매초 발화한다.
+        #    실행시간이 겹칠 수 있고, IntervalTrigger job(queue_status 등)은 프로세스 기동
+        #    시각에 묶여 초가 부동이라 격자 밖이다.
 
-        # A Group: investing (10분마다)
+        # A Group: investing (1분마다)
         if crawler_manager.is_enabled('investing'):
             scheduler.add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
-                CronTrigger(minute='7,17,27,37,47,57', second='45', timezone=KST),
+                CronTrigger(minute='*', second='8', timezone=KST),
                 id='task_investing',
                 max_instances=1,
-                misfire_grace_time=300
+                misfire_grace_time=30   # 1분 주기 → grace를 주기 이하로 (구 300은 10분 주기 전제)
             )
         else:
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
@@ -1005,22 +1031,24 @@ def switch_jobs(mode: str):
         if crawler_manager.is_enabled('dxy'):
             scheduler.add_job(
                 make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
-                CronTrigger(minute='*', second='15', timezone=KST),
+                CronTrigger(minute='*', second='21', timezone=KST),
                 id='task_dxy',
                 max_instances=1,
+                # DXY는 주기 변경이 없으므로 기존 120 유지. scheduler 기본 coalesce=True라
+                # 누적 backlog가 아니라 최신 catch-up 1회만 실행된다.
                 misfire_grace_time=120
             )
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (10분마다)
+        # B Group: kb, hana (각 1분마다)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-                CronTrigger(minute='5,15,25,35,45,55', second='45', timezone=KST),
+                CronTrigger(minute='*', second='28', timezone=KST),
                 id='task_kb',
                 max_instances=1,
-                misfire_grace_time=300
+                misfire_grace_time=30
             )
         else:
             logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
@@ -1028,34 +1056,34 @@ def switch_jobs(mode: str):
         if crawler_manager.is_enabled('hana'):
             scheduler.add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),
-                CronTrigger(minute='0,10,20,30,40,50', second='45', timezone=KST),
+                CronTrigger(minute='*', second='38', timezone=KST),
                 id='task_hana',
                 max_instances=1,
-                misfire_grace_time=300
+                misfire_grace_time=30
             )
         else:
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: woori, bs, citi (60분마다)
+        # B Group: OUT에는 bs만 등록 (1분마다)
         if crawler_manager.is_enabled('bs'):
             scheduler.add_job(
                 make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
-                CronTrigger(minute='33', second='45', timezone=KST),
+                CronTrigger(minute='*', second='51', timezone=KST),
                 id='task_bs',
                 max_instances=1,
-                misfire_grace_time=1800
+                misfire_grace_time=30
             )
         else:
             logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
 
-        # C Group: Selenium (60분마다)
+        # C Group: Selenium enqueue (각 1분마다)
         if crawler_manager.is_enabled('nh'):
             scheduler.add_job(
                 make_selenium_job_wrapper('nh'),
-                CronTrigger(minute='3', second='45', timezone=KST),
+                CronTrigger(minute='*', second='10', timezone=KST),
                 id='task_nh',
                 max_instances=1,
-                misfire_grace_time=1800
+                misfire_grace_time=30
             )
         else:
             logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
@@ -1063,10 +1091,10 @@ def switch_jobs(mode: str):
         if crawler_manager.is_enabled('shinhan'):
             scheduler.add_job(
                 make_selenium_job_wrapper('shinhan'),
-                CronTrigger(minute='13', second='45', timezone=KST),
+                CronTrigger(minute='*', second='30', timezone=KST),
                 id='task_shinhan',
                 max_instances=1,
-                misfire_grace_time=1800
+                misfire_grace_time=30
             )
         else:
             logger.info("⏸️ [shinhan] 비활성화 상태 - job 등록 스킵")
@@ -1645,7 +1673,7 @@ def start_scheduler():
         precompute_free_snapshots,
         # minute/second를 free_snapshot 공유 상수로 — refresh_not_before 계산이 이 타이밍을 기준(ETC, codex).
         # second=19: 정각 :30:00대의 알려진 동시-시작(cleanup_old_bank_data 03:30:01 / kb crawler
-        # second 15,35,55 / KB news 5분마다 :15 / OUT DXY :15)과 겹치지 않는 초 선택(codex 2026-07-18 —
+        # second 15,35,55 / KB news 5분마다 :15 / OUT DXY :21)과 겹치지 않는 초 선택(codex 2026-07-18 —
         # 동시 시작 감소 목적, cleanup 완료 보장은 아님). as_of는 basis_as_of(HH:30)라 발화 초와 무관.
         CronTrigger(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=FREE_SNAPSHOT_PRECOMPUTE_SECOND, timezone=KST),
         id="free_snapshot_precompute",

@@ -322,7 +322,7 @@
   - OUT: 1분마다
 - **DXY 선물**: investing 크롤러와 동일 주기로 실행
   - IN/BREAK1/BREAK2: investing 10초마다 실행 시 선물도 함께 추출
-  - OUT: investing 10분마다 실행 시 선물도 함께 추출
+  - OUT: investing **매분**(`:08`) 실행 시 선물도 함께 추출 (배포 2A)
 - **보관기간**: `dxy`, `dxy_futures` realtime 원본은 30일 보관, hourly/daily rollup은 3m/1y 그래프 보존을 위해 정리 대상에서 제외
 
 **dxy_futures 현재 상태:**
