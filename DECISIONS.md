@@ -6528,10 +6528,10 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `4e009ff1777a6d2d4b60a861eb411d4be1c9a288`
+- server 기준 commit: `8cf9da324252035351691cd20557eb2dfda9749a`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5bac4fe37004b8aa42ea30e9b83fa999d50c3f57512aa37d6143328941a8eb8a`
+- manifest SHA: `9c507045e8bed6bea01eda38bee9652e78acecfd13d65369ef9039da4cd754d8`
 - baseline SHA: `4cc944e333789fb4a2ff08217d2dbd3469f29c9f09826946bb1776d43c27d708`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -6730,7 +6730,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1402-1412` · `app/main.py:947-970`). 따라서 현재 경로에는
+  (`app/scheduler.py:1441-1447` · `app/main.py:947-970`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.
@@ -7043,3 +7043,77 @@ health 결과를 클라에 전달하는 status signal 이 필요하다(후속).
 <!-- relation: references target=R-OPEN-1 -->
 - references: [R-OPEN-1](#r-open-1)
 <!-- /rid: R-OPEN-4 -->
+
+---
+
+## ADR-042: 야간 은행 고시 연장 대응과 DXY 정책 시계 분리
+
+**날짜**: 2026-08-28
+**상태**: Accepted — 코드 `8cf9da3` 로컬 land, 미푸시·미배포
+**범위**: 1차 변경(모드 경계·은행별 종료·DXY 정책 분리). 빈도·레인 재배치는 후속.
+
+### 맥락
+
+한국 외환시장 운영시간 연장 뒤 우리은행은 익일 05:00경, IBK는 익일 06:00 직전까지
+고시하는 것을 사용자가 각 은행 환율고시 페이지에서 직접 확인했다. IBK는 05:59:55에
+마지막 고시한 날도 있었다. 기존 BREAK1은 03:00에 끝났기 때문에 03:00~06:00의 변경을
+즉시 수집하지 못하고 다음 활성 구간까지 지연시켰다.
+
+SC는 change-only DB의 최근 30일·22영업일 표본에서 18:00 이후 포착된 변경이 0건이고
+마지막 포착은 17:49였다. 이 관측은 **우리 수집 경로에서 변경을 포착하지 못했다는 증거**이지,
+SC의 공식 고시 종료시각을 증명하지 않는다.
+
+은행 모드는 DXY 외부 fallback 정책에도 사용되고 있었다. 은행 BREAK1 시작을 19:00으로
+당기면서 DXY까지 같은 경계를 쓰면 평일 19:00~21:00의 fallback 보호가 ACTIVE의
+15분·3회에서 QUIET의 30분·5회로 바뀐다. 이를 정당화할 DXY 고유 근거는 없다.
+
+### 결정
+
+1. 은행 스케줄 모드를 다음과 같이 변경한다. OUT 경계는 유지한다.
+   - `IN`: 평일 08:00~18:59
+   - `BREAK1`: 평일 19:00~익일 05:59
+   - `BREAK2`: 06:00~07:59
+   - `OUT`: 토요일 07:00~월요일 05:59
+2. 은행별 종료를 전역 모드 하나로 과도하게 표현하지 않고 job trigger에 명시한다.
+   - SC: IN에만 등록, 마지막 정규 실행 18:59:58
+   - 신한: BREAK1에서 02:59:18까지(기존 발화 집합 유지)
+   - 우리: 단일 `OrTrigger` job으로 05:04:53까지
+   - IBK: BREAK1 정규 실행 05:59:34까지, BREAK2에서 화~토 06:00:34·06:01:34
+     terminal capture를 두 번 추가한다. 이는 05:59:55 고시 뒤 수집 기회를 제공하지만
+     네트워크·사이트 장애까지 포함한 포착 보장은 아니다.
+3. 우리은행 tail은 별도 job 두 개가 아니라 하나의 `OrTrigger`로 구성한다. 그래야
+   `max_instances=1`이 04:59와 05:00 경계 양쪽에 공통으로 적용된다.
+4. DXY는 은행 모드와 분리한 `ACTIVE` / `QUIET` / `WEEKEND_PRESERVE` 정책 시계를 사용하고
+   기존 시간 경계를 보존한다. 알 수 없는 상태는 DB 조회 전에 명시적으로 실패시키며,
+   상위 request wrapper가 실패 통계를 기록한 뒤 스케줄러 자체는 계속 동작한다.
+
+### 이번 결정에 포함하지 않는 것
+
+다음은 사용자가 원하는 전체 스케줄 최적화의 **후속 단계**이며 `8cf9da3`에는 아직 없다.
+
+- KB국민은행·하나은행 20초 → 10초
+- 우리은행 60초 → 30초
+- OUT의 investing·KB·하나·BS·NH·신한 → 1분
+- 선언적 스케줄 표와 전체 초 레인 재배치
+- CPU 상한 변경
+
+이 항목들은 1차 변경의 야간 부하와 terminal capture를 먼저 분리 관측한 뒤 별도 변경으로
+적용한다. 특히 OUT의 subprocess 크롤러와 IBK 03:00~06:00 실행은 worker 대기,
+subprocess 소요시간, `memory.events`, 고아 Chrome을 함께 본다.
+
+### 기각한 대안
+
+- **은행별 종료를 모두 전역 모드 경계로 표현**: 은행마다 고시 종료가 달라 불필요한 실행 또는
+  수집 공백이 생기므로 기각한다.
+- **DXY도 19:00부터 QUIET로 전환**: 은행 근거를 DXY 정책 변경 근거로 전용하므로 기각한다.
+- **우리은행 tail을 별도 job으로 추가**: 경계 지연 시 두 job이 동시에 실행될 수 있어 기각한다.
+- **IBK를 06:00 정각까지만 실행**: 05:59:55 고시 뒤 실제 실행 기회가 부족해 기각한다.
+
+### 검증과 롤백
+
+- 일주일 10,080분 전 구간에서 새 DXY 정책 상태가 기존 정책과 동등한지 비교한다.
+- 네 모드의 실제 job 등록, 은행별 마지막 발화, 비활성 gate, 06:00:20 재시작을
+  APScheduler trigger로 검증한다.
+- DB 스키마 변경은 없다. 운영 이상 시 이전 이미지로 롤백하면 기존 모드·trigger로 복귀한다.
+- 배포 뒤 19:00 전환과 03:00~06:02 로그를 확인하기 전에는 2차 빈도 변경의 운영 효과와
+  부하를 확정하지 않는다.

@@ -70,7 +70,7 @@
 
 ## 4. Cadence — `collection_expected` ⊥ `market_expected` (2 별개 축)
 
-**두 의미를 분리해야 한다** (codex Medium): `collection_expected`(스케줄러상 수집이 실행돼야 하는가 — **collection_success 판정을 gate**)와 `market_expected`(시장·고시 값이 움직일 수 있는가 — **value_changed 진단만** 마스킹). **시장 휴장만으로 collection 판정을 skip하면 주말에도 도는 crawler의 장애를 은폐**한다 — investing과 hana/shinhan/bs/nh는 OUT에도 등록된다([scheduler.py:983](app/scheduler.py#L983)).
+**두 의미를 분리해야 한다** (codex Medium): `collection_expected`(스케줄러상 수집이 실행돼야 하는가 — **collection_success 판정을 gate**)와 `market_expected`(시장·고시 값이 움직일 수 있는가 — **value_changed 진단만** 마스킹). **시장 휴장만으로 collection 판정을 skip하면 주말에도 도는 crawler의 장애를 은폐**한다 — investing과 hana/shinhan/bs/nh는 OUT에도 등록된다([scheduler.py:983-1072](app/scheduler.py#L983)).
 
 | source군 | collection_expected (수집 실행 스케줄) | market_expected (값 변화 가능) |
 |---|---|---|
@@ -105,7 +105,7 @@
 1. **per-asset 유효-수집 성공 기준 정의 (선행)** — "예외 없이 반환"이 아니라 "해당 (source,asset)의 **유효 데이터**를 실제로 받았나"(통화별 부분 실패 은닉 해소). **이 정의 없이는 아래 success/partial/failure를 분류할 수 없다**(codex — validity가 결과 계약보다 먼저).
 2. **실행 결과를 3계층으로 분리하는 계약 설계**(codex — 사건 발생 위치가 달라 collector 결과 하나로 못 묶음):
    - **eligibility**(스케줄러 등록 전): `enabled` / `scheduled_off`(mode) / `admin_disabled`(`crawler_config`) — collector 안 돎.
-   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:485](app/scheduler.py) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
+   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:485](app/scheduler.py#L485) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
    - **run**(collector 실행): `success` / `partial` / `failure`(`failure_reason`=timeout 등) / `skipped`(`skip_reason`=transition_window, IBK 00:00-05 self-return [ibk.py:88](app/crawlers/ibk.py)). **timeout은 skip 아니라 run failure**(계획 skip과 재혼입 금지).
    collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 전 collector가 총실패를 삼킴(§2.1)이라 이 계약 선행 없이 shadow 무의미. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
 3. **collection_expected(eligibility + interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected = eligibility(`scheduled_off`/`admin_disabled`)이며 timing은 Bool 아닌 **`expected_interval`/`next_due_at + grace`**(IN 10-60s vs OUT 10-60min). **dispatch(queue_full/misfire)·run(timeout/transition) 결과는 collection_expected가 아니라 §6-2 3계층** — queue 포화는 억제가 아니라 health 영향(§4·§6-2 정합). market_mode(eligibility 파생) + kr_holidays(market_expected) realtime 연결.
