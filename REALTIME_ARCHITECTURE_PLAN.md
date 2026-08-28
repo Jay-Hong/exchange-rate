@@ -66,7 +66,7 @@ USDT 수집 완료 후 → changed_rates 기반 → 같은 트랜잭션에서 pr
 
 ### 핵심 코드 참조
 
-- 크롤러 cron: [app/scheduler.py:591](app/scheduler.py#L591) (investing), [app/scheduler.py:1428](app/scheduler.py#L1428) (USDT)
+- 크롤러 cron: [app/scheduler.py:604](app/scheduler.py#L604) (investing), [app/scheduler.py:1431](app/scheduler.py#L1431) (USDT)
 - Broadcasting: [app/main.py:348](app/main.py#L348) `broadcast_rates_once`, [app/main.py:202](app/main.py#L202) `build_rates_payload`
 - Connection 관리: [app/main.py:156](app/main.py#L156) `ConnectionManager`, [app/main.py:172](app/main.py#L172) 순차 broadcast
 - Graph 결합: [app/main.py:361-365](app/main.py#L361-L365) (broadcast 변경 시 graph_buckets 결합)

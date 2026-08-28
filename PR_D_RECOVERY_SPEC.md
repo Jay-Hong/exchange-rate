@@ -12,7 +12,7 @@
 - **legacy fx hook**: [main.py:754](app/main.py#L754) `safe_publish_all_fx_snapshots(db)` — broadcast `is_changed` 블록 안에서 **3 fx 토픽 전체** 재발행. 캐시 SET([main.py:733](app/main.py#L733))이 hook **이전**.
 - **C1 direct**: SET 성공분만 trigger → `safe_publish_fx_snapshot(asset)` (per-asset). funnel = `topic_trigger_bridge.schedule_on_loop(_run_topic_emission)` ([crud.py:321](app/crud.py#L321)) → `request_fx_topic_trigger`.
 - **mirror**: 3s interval, [`_mirror_all_latest`](app/latest_rates_cache.py) DB→Redis **unconditional `_set_latest`**, trigger 없음.
-- **broadcast**: normal 모드 실질 10s ([scheduler.py:1407](app/scheduler.py#L1407) `second='*'` + mode/second early-return).
+- **broadcast**: normal 모드 실질 10s ([scheduler.py:1471](app/scheduler.py#L1471) `second='*'` + mode/second early-return).
 - **fx builder**: [`load_and_build_fx_topic_payload`](app/fx_topic_payload.py) per-source Redis-first, `is_stale`(시간만, 6s) 시에만 DB fallback ([:211-222](app/fx_topic_payload.py#L211)).
 - **subscribe**: [`topic_dispatcher`](app/topic_dispatcher.py) `register`는 **registry 등록만**, 즉시 snapshot 미전송. 실패 send ws는 **즉시 registry 제거**([:136-137](app/topic_dispatcher.py#L136)).
 - **DB 최신 정렬**: `(timestamp DESC, id DESC)` ([crud.py:201/508/544](app/crud.py#L201), 주석 "동일 초 중복 방지").

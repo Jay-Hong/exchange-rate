@@ -711,7 +711,7 @@ DXY/DXY_futures가 노출되는 탭(USD + Tether)에서만 KRW/Index axis_group 
 - **v2 tab**: `graph_v2:tab:{tab}:{period}` (TTL 60s)
 - **v2 series (Later)**: `graph_v2:series:{series_id}:{period}` (TTL 60s)
 
-**Invalidation** (Phase 2e 구현 시 도입 예정): scheduler가 새 bucket flush 시점에 v2 tab key 무효화 패턴 추가 — legacy v1 (`refresh_graph_cache`, [scheduler.py:1602](app/scheduler.py#L1602))과 동일 방식. catalog는 자산 추가/제거 시점에만 갱신 — 정상 운영 중에는 TTL 만료까지 유지.
+**Invalidation** (Phase 2e 구현 시 도입 예정): scheduler가 새 bucket flush 시점에 v2 tab key 무효화 패턴 추가 — legacy v1 (`refresh_graph_cache`, [scheduler.py:1630](app/scheduler.py#L1630))과 동일 방식. catalog는 자산 추가/제거 시점에만 갱신 — 정상 운영 중에는 TTL 만료까지 유지.
 
 **클라이언트 HTTP 캐시 정책 (서버 Redis 캐시와 별개 레이어)**: `GET /api/v2/graph/tab` 성공 응답은 **`Cache-Control: no-store`** ([main.py](app/main.py) `get_v2_graph_tab`). 라이브 데이터(1d 10min 진행봉 + `in_progress` seed, 3m/1y/1w도 매일/매시 갱신)라 클라가 HTTP 캐시하면 cold-launch 시 stale 응답을 씀 — iOS `URLSession.shared`가 cache 헤더 없는 200 GET을 휴리스틱 캐싱해 직전 세션 그래프(닫힌 봉+seed 둘 다)를 ~2-3분 내주던 문제 대응. 속도는 서버 Redis 캐시가 담당하므로 클라 캐시 불필요. iOS 클라도 그래프 fetch를 `.reloadIgnoringLocalCacheData`로 캐시 우회(방어). `/api/v2/topics/snapshot` no-store 정책과 일관. catalog은 정적(version 기반)이라 no-store 미적용.
 
