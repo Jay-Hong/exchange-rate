@@ -81,7 +81,7 @@
 
 ```text
 [개발/테스트]
-크롤러(11개) → Scheduler → SQLite → WebSocket(10초) → 클라이언트
+크롤러(11개) → Scheduler → SQLite → WebSocket(설정에 따라 1초/10초) → 클라이언트
 
 [서비스 환경]
 크롤러(11개) → Scheduler → RDS PostgreSQL → WebSocket(1초) → 클라이언트
@@ -130,7 +130,7 @@
 
 - **프로토콜**: WebSocket Secure (wss://)
 - **도메인**: https://fxi.kr
-- **브로드캐스트**: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
+- **브로드캐스트**: scheduler는 매초 기동. `normal`은 10초 슬롯, `fast`/fast window는 매초
 - **하트비트**: Ping/Pong (30초)
 - **암호화**: TLS 1.2 & 1.3
 
@@ -309,7 +309,7 @@ sent_at           DATETIME
 
 > 💡 **최신 아키텍처:** 4단계 모드 + 환율 고시 스케줄 기반 최적화 (2025-11-16)
 > 📖 **상세 기록:**
-> - [ADR-011](DECISIONS.md#adr-011-4단계-모드-환율-고시-스케줄-기반-최적화) - 4단계 모드 도입 (IN, BREAK1, BREAK2, OUT)
+> - [ADR-013](DECISIONS.md#adr-013-4단계-모드---환율-고시-스케줄-기반-최적화) - 4단계 모드 도입 (IN, BREAK1, BREAK2, OUT). **2026-08-28 경계 변경**: IN 08:00~18:59 / BREAK1 19:00~06:00 / BREAK2 06:00~08:00 (아래 참조)
 > - [ADR-010](DECISIONS.md#adr-010-websocket-broadcasting-스케줄링-방식) - Broadcasting APScheduler cron job 전환
 > - [ADR-009](DECISIONS.md#adr-009-3-tier-스케줄링-아키텍처-t3smallmedium-최적화) - 3-Tier 크롤러 스케줄링
 > - [ADR-008](DECISIONS.md#adr-008-queue-압력-완화-전략-실시간성-vs-완전성) - Queue 압력 완화 + 실시간성 강화
@@ -320,26 +320,39 @@ sent_at           DATETIME
 
 ### 4단계 모드 자동 전환
 
-- **IN 모드**: 월~금 08:00~20:59 (영업시간, 전체 크롤러 활성)
-  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
-  - 크롤러: cron 절대 시간 동기화 (Broadcasting 기준)
-  - 10개 은행 전체 크롤링 (DXY는 investing 크롤러에서 동시 추출)
+> ⚠️ **2026-08-28 경계 변경.** BREAK1 시작 21:00 → **19:00**(SC 18시 이후 포착 변경 0건 실측),
+> BREAK1 종료 03:00 → **06:00**(우리 05:00 / IBK 06:00 연장 고시 — 사용자 은행 페이지 실측).
+> **DXY 외부 fallback 정책은 이 경계를 따라가지 않는다** — `market_mode.get_dxy_policy_state()`로
+> 분리되어 구 경계(ACTIVE 평일 08:00~20:59)를 보존한다. 두 시계의 등가성·분리는
+> `tests/test_market_mode_policy.py`가 구 로직 동결 사본과 일주일 전 구간 대조로 잠근다.
 
-- **BREAK1 모드**: 월~금 21:00 ~ 익일 02:59 (심야, 9개 크롤러)
-  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
-  - 제외: sc
-  - 유지: investing, kb, hana, woori, shinhan, bs, citi, ibk, nh
-  - ibk는 00:00~00:05 스킵 (자정 전환기), 00:05부터 Selenium만 사용
+- **IN 모드**: 월~금 08:00~18:59 (영업시간, 전체 크롤러 활성)
+  - 크롤러: cron 절대 시간 동기화
+  - 11개 crawler job: 은행 9 + investing + dxy_spot
+  - sc는 이 모드에서만 활성 → 마지막 실행 **18:59:58**
 
-- **BREAK2 모드**: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, 6개 크롤러)
-  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
-  - 제외: woori (02:45 종료), ibk (02:05 종료), shinhan (02:30 종료), sc (20:30 종료)
-  - 유지: investing, kb, hana, bs, citi, nh
+- **BREAK1 모드**: 월~금 19:00 ~ 익일 06:00 (야간, 10개 크롤러)
+  - 제외: sc (18시 이후 포착 변경 0건을 근거로 19시부터 미등록)
+  - 유지: investing, dxy, kb, hana, woori, shinhan, bs, citi, ibk, nh
+  - **은행별 종료 시각**(cron 시간 범위로 표현, 별도 런타임 게이트 없음):
+    - shinhan `hour='19-23,0-2'` → 마지막 **02:59:18** (고시 02:45 + 14분 여유)
+    - woori `hour='19-23,0-4'` + tail `hour='5', minute='0-4'` → 마지막 **05:04:53** (고시 05:00 + 여유)
+    - ibk → 마지막 **05:59:34** (고시 06:00, 이후는 BREAK2 terminal capture가 담당)
+  - ibk는 00:00~00:05 스킵(자정 전환기). 자정~고시 전 구간은 공식 requests가 빈 표로 실패해
+    Selenium이 날짜를 되감아 조회 → 실측 ≈10.2초(주간 ≈3.2초)
 
-- **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 6개 크롤러)
-  - Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (동일)
+- **BREAK2 모드**: 06:00~07:59 (고시 마무리, 7개 크롤러)
+  - 제외: woori(05:05 종료), shinhan(03:00 종료), sc(19:00 종료)
+  - 유지: investing, dxy, kb, hana, bs, citi, nh
+  - **`task_ibk_terminal`**: `hour=6, minute='0,1', second='34', day_of_week='tue-sat'`
+    → IBK 최종 고시(05:59:55 관측)를 위한 **추가 수집 시도 2회**(포착 보장 아님).
+    화~토인 이유는 IBK 세션이 평일 08:30 → 익일 06:00이라
+    **화~토 아침에만** 종료되기 때문(월 06:00은 일요일 세션이 없어 무의미)
+
+- **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 7개 크롤러)
+  - Broadcasting: 다른 모드와 같은 runtime cadence 설정 적용
   - 제외: woori, ibk, sc, citi (주말 고시 없음)
-  - 유지: investing, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
+  - 유지: investing, dxy, kb, hana, bs, shinhan, nh (주말 중 가끔 변동)
   - 크롤러: cron 시간 단위 (완전 분산, 동시 실행 0개)
 
 ### 은행별 환율 고시 스케줄
@@ -349,11 +362,11 @@ sent_at           DATETIME
 | **investing** | 월 06:00 | 토 06:00 | 외환 시장 글로벌 운영 |
 | **kb** | 평일 08:30 | 익일 05:00 | - |
 | **hana** | 평일 08:30 | 익일 06:00 | 주말 중 가끔 변동 |
-| **shinhan** | 평일 08:19 | 익일 02:30 | 주말 중 가끔 변동 |
-| **woori** | 평일 08:30 | 익일 02:45 | - |
-| **ibk** | 평일 08:30 | 익일 02:05 | 00:00~00:05 스킵 (자정 전환기), 00:05부터 Selenium만 사용 |
+| **shinhan** | 평일 08:19 | 익일 02:45 | 주말 중 가끔 변동. 수집 종료 02:59:18 |
+| **woori** | 평일 08:30 | 익일 05:00 | 24시간 외환시장 전환으로 연장(사용자 실측). 수집 종료 05:04:53 |
+| **ibk** | 평일 08:30 | 익일 06:00 | 연장(사용자 실측, **05:59:55** 관측). 00:00~00:05 스킵. 고시 전엔 requests가 빈 표로 실패 → Selenium 날짜 되감기. terminal capture 06:00:34·06:01:34(화~토) |
 | **nh** | 평일 08:40 | 당일 24:00 | 자정 이후/주말 가끔 고시 |
-| **sc** | 평일 09:00 | 당일 20:30 | - |
+| **sc** | 평일 09:00 | 당일 ~17:50 (관측) | 30일 22영업일 실측 최종 17:49, 18:00 이후 0건. 여유 두고 18:59:58까지 수집 |
 | **bs** | 평일 08:10 | 당일 24:00 | 일요일 넘어갈 때 가끔 고시 |
 | **citi** | 평일 09:00 | 익일 06:00 | - |
 
@@ -363,20 +376,22 @@ sent_at           DATETIME
 
 #### 1. WebSocket Broadcasting
 
-**실행 시점:** 매분 00, 10, 20, 30, 40, 50초 (정확한 시간, 모든 모드 동일)
+**실행 시점:** APScheduler는 매초 호출하고 `main.py`가 runtime mode로 실제 실행 여부를 결정한다.
+`normal`은 00/10/20/30/40/50초, `fast` 또는 `window`의 fast hour 안은 매초다.
+현재 운영 설정(`BROADCAST_MODE=window`, `BROADCAST_FAST_HOURS=0-24`)은 24시간 매초 실행이다.
 
 ```python
 # scheduler.py
 scheduler.add_job(
     broadcast_rates_once,  # async 함수 직접 등록
-    CronTrigger(second='0,10,20,30,40,50', timezone=KST),
+    CronTrigger(second='*', timezone=KST),
     id="websocket_broadcast"
 )
 ```
 
 **설계 원칙:**
-- APScheduler cron job으로 정확한 시간 보장
-- 크롤러 동기화의 기준 시간
+- APScheduler는 매초 wake-up하고 DB read 전에 runtime gate로 즉시 return
+- 크롤러 초 슬롯은 broadcast 정렬이 아니라 크롤러·정기 작업 간 부하 분산 기준
 - 변경사항 있을 때만 실제 전송 — trigger 조건: `rates` 또는 `indices.dxy` (DXY live tick) 변화 어느 쪽이든 발화 (`build_rates_payload()`의 JSON 전체 비교)
 
 #### 2. 3-Tier 크롤러 아키텍처 (4단계 모드)
@@ -387,29 +402,31 @@ scheduler.add_job(
 
 **Tier A1 — investing (`task_investing`)**: 은행/통화 기준 환율 + DXY 선물 동반 추출
 - **DXY 선물 (`instrument='dxy_futures'`)**: 환율과 함께 `#sb_last_8827`(exchange-rates-table)을 추출. 셀렉터 실패 시 `dxy.py`의 `/currencies/us-dollar-index` 폴백 (60초 쿨다운, Yahoo 미사용)
-- **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 3초 전)
+- **IN/BREAK1/BREAK2**: 10초마다 (고정 초 레인)
   - `cron(second='7,17,27,37,47,57')`
 - **OUT**: 10분마다
   - `cron(minute='7,17,27,37,47,57', second='45')`
 
 **Tier A2 — dxy_spot (`task_dxy`)**: DXY 현물/운영 피드 독립 크롤러
 - **DXY 현물 (`instrument='dxy'`)**: `/indices/usdollar` `__NEXT_DATA__` → 같은 페이지 CSS → 외부 chain (CNBC `.DXY` → Yahoo `DX-Y.NYB`). 외부 chain은 주간 세션 / market mode 보존 / fresh-age diff guard 적용
-- **IN/BREAK1/BREAK2**: 10초마다 (Broadcasting 9초 전, investing과 6초 엇갈림)
+- **IN/BREAK1/BREAK2**: 10초마다 (investing과 6초 엇갈림)
   - `cron(second='1,11,21,31,41,51')`
 - **OUT**: 매분 수집 유지 (investing보다 10× 빈도)
   - `cron(minute='*', second='15')`
 
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
-- **실행 방식**: Request 기반 (하이브리드 폴백: Request → Selenium)
-- **IN/BREAK1/BREAK2**: 20-60초마다 (Broadcasting 3-7초 전, 엇갈림)
+- **실행 방식**: kb/bs/citi는 순수 Request, hana/woori는 Request → Selenium 하이브리드
+- **IN/BREAK1/BREAK2**: 20-60초마다 (고정 초 레인으로 엇갈림)
   - kb: `cron(second='15,35,55')`
   - hana: `cron(second='5,25,45')`
   - woori: `cron(minute='*', second='53')` (우선순위 높음, 늦게 크롤링)
   - bs: `cron(minute='*', second='33')`
   - citi: `cron(minute='*', second='13')`
-- **BREAK1**: woori, bs, citi 유지 (kb, hana도 유지)
-- **BREAK2**: bs, citi만 유지 (woori 02:45 종료)
+- **BREAK1**: kb, hana, bs, citi 유지 + woori는 **05:04:53까지**
+  (`OrTrigger([hour='19-23,0-4', hour='5' minute='0-4'])` **단일 job `task_woori`** —
+  별 job으로 나누면 `max_instances=1`이 배타가 아니라 지연 시 중복 실행 위험)
+- **BREAK2**: kb, hana, bs, citi 유지 (woori는 05:05 종료)
 - **OUT**: bs만 유지 (60분마다, 33분 45초)
 
 **Tier C (shinhan, ibk, nh, sc):** Selenium, 순차 처리
@@ -417,10 +434,15 @@ scheduler.add_job(
 - **실행 방식**: AsyncIO PriorityQueue 순차 실행
 - **부하 감소 전략**: Request(mibank) 먼저 시도 → 실패 시 Selenium 폴백
   - shinhan, nh, sc: 항상 Request 우선
-  - ibk: IN 모드(08:30~20:59) Request 우선, 00:00~00:05 스킵 (자정 전환기), 00:05~02:59 Selenium만 사용
-- **IN**: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
-- **BREAK1**: ibk(34초), nh(54초), shinhan(18초) 유지 (sc는 20:30에 크롤링 중단)
-- **BREAK2**: nh(54초)만 유지 (ibk는 02:05 종료, shinhan은 02:30 종료, sc는 20:30 종료)
+  - ibk: **모든 시간대에서 공식 requests를 먼저 시도한다** (시간 게이트 없음).
+    자정~당일 고시 전에는 표가 비어 `False` 반환 → Selenium이 날짜를 되감아 조회.
+    시간 게이트가 걸린 건 3차 폴백 mibank(`is_mibank_rate_reliable` = 평일 10:00~23:59)뿐.
+    00:00~00:05는 자정 전환기라 크롤러 자체가 스킵.
+- **IN**: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초 — sc는 18:59:58이 마지막)
+- **BREAK1**: ibk(34초, ~05:59:34), nh(54초), shinhan(18초, `hour='19-23,0-2'` → ~02:59:18) 유지.
+  sc는 19:00 진입과 함께 종료
+- **BREAK2**: nh(54초) 유지 + `task_ibk_terminal`(06:00:34·06:01:34, 화~토).
+  shinhan(03:00 종료) / woori(05:05 종료) / sc(19:00 종료) 제외
 - **OUT**: nh(3분 45초), shinhan(13분 45초) 유지 (주말 중 가끔 변동)
 
 **Selenium Queue 관리:**
@@ -434,34 +456,30 @@ scheduler.add_job(
 - **압력 완화**: 80% (20/25) 초과 시 새 작업 거부
 - **헬스체크**: 매분 03/23/43초 (20초 간격), 60초 stuck 시 자동 재시작
 
-### IN 모드 타임라인 (1분 기준)
+### IN 모드 크롤러 타임라인 (1분 기준)
+
+현재 운영 broadcast는 매초 별도로 실행되므로 아래에는 크롤러 시작 슬롯만 표시한다.
 
 ```
-00초: Broadcasting
 01초: dxy_spot (DXY 현물)
 05초: hana
 07초: investing (+ DXY 선물 동반 추출)
-10초: Broadcasting
 11초: dxy_spot (DXY 현물)
 13초: citi
 15초: kb
 17초: investing (+ DXY 선물 동반 추출)
 18초: shinhan (Selenium Queue)
-20초: Broadcasting
 21초: dxy_spot (DXY 현물)
 25초: hana
 27초: investing (+ DXY 선물 동반 추출)
-30초: Broadcasting
 31초: dxy_spot (DXY 현물)
 33초: bs
 34초: ibk (Selenium Queue)
 35초: kb
 37초: investing (+ DXY 선물 동반 추출)
-40초: Broadcasting
 41초: dxy_spot (DXY 현물)
 45초: hana
 47초: investing (+ DXY 선물 동반 추출)
-50초: Broadcasting
 51초: dxy_spot (DXY 현물)
 53초: woori (우선순위 높음)
 54초: nh (Selenium Queue)
@@ -471,7 +489,8 @@ scheduler.add_job(
 ```
 
 **특징:**
-- Broadcasting 직전(3-7초)에 Request 크롤러 실행 → 최신 데이터 반영
+- Request/Selenium 크롤러가 서로 다른 초 레인을 사용해 동시 시작을 줄임
+- 저장 완료 뒤 다음 매초 broadcast에서 최신 Redis 값을 반영
 - woori는 citi보다 우선순위 높음: 53초 실행 → 사용자 표시 시간이 실제 변경 시간과 유사
 - Selenium 크롤러는 Queue 순차 처리 (Request 먼저 시도)
 - 최대 동시 실행: 1-2개 (Request 기반 크롤러만)
@@ -480,7 +499,7 @@ scheduler.add_job(
 
 - **환율 고시 스케줄 기반**: 은행별 실제 운영 시간에 맞춰 크롤러 활성화/비활성화
 - **mibank 딜레이 고려**: 은행 고시 종료 후에도 mibank 반영 지연 대비 (마지막 고시 누락 방지)
-- **Broadcasting 동기화**: 크롤러가 Broadcasting X초 전에 실행 → 실시간 반영
+- **Broadcasting 독립성**: 운영 broadcast가 매초이므로 크롤러 슬롯은 부하 분산만 기준으로 선택
 - **Request 우선 전략**: Selenium 크롤러도 Request(mibank) 먼저 시도 → Queue 압력 감소
 - **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
 - **리소스 분산**: OUT 모드 동시 실행 0개 → CPU 스파이크 제거
@@ -498,7 +517,7 @@ scheduler.add_job(
 
 ### WebSocket
 
-- `WS /ws` - 실시간 환율 스트리밍 (매분 00, 10, 20, 30, 40, 50초)
+- `WS /ws` - 실시간 환율 스트리밍 (운영 매초, `normal` 설정은 10초 슬롯)
 
 **Payload 구조** (`build_rates_payload()` 기반):
 
@@ -923,7 +942,7 @@ exchange-rate/
 
 **중복 방지 INSERT**: 마지막 레코드와 비교, 변경 시에만 저장 (`crud.py`)
 
-**WebSocket 브로드캐스트**: 매분 00, 10, 20, 30, 40, 50초 정확한 시간, APScheduler cron job, 변경사항 있을 때만 전송 (`main.py`, `scheduler.py`)
+**WebSocket 브로드캐스트**: APScheduler는 매초 호출하고 runtime mode가 매초/10초 cadence를 선택하며, 변경사항이 있을 때만 전송 (`main.py`, `scheduler.py`)
 
 **브로드캐스트 통계**: 성공률, 평균 주기, 건강 상태 추적 (`admin/stats.py`)
 

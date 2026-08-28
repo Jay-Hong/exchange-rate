@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Optional
 # 서드파티 라이브러리
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from pytz import timezone
 
@@ -81,48 +82,53 @@ queue_status_cache = {
 # 환율 고시 스케줄 기반 최적화 + 시스템 부하 분산
 #
 # 모드 분류:
-#   - IN: 월~금 08:00~20:59 (영업시간, 전체 크롤러 활성)
-#   - BREAK1: 월~금 21:00~23:59, 화~토 00:00~02:59 (심야, sc 제외)
-#   - BREAK2: 월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59 (고시 마무리, woori/ibk/shinhan/sc 제외)
-#   - OUT: 토 07:00 ~ 월 05:59 (주말, 6개 은행만 유지)
+#   - IN: 월~금 08:00~18:59 (영업시간, 전체 크롤러 활성)
+#   - BREAK1: 월~금 19:00 ~ 익일 05:59 (야간, sc 제외 + 은행별 cutoff)
+#   - BREAK2: 06:00~07:59 (고시 마무리, woori/shinhan/sc 제외 + ibk terminal만)
+#   - OUT: 토 07:00 ~ 월 05:59 (주말, 7개 크롤러: 은행 5 + investing/dxy)
+#
+#   ⚠️ 2026-08-28 (ADR-042): BREAK1 시작 21:00→19:00, 종료 03:00→06:00.
+#      DXY fallback 정책은 이 경계를 따라가지 않는다 — market_mode.get_dxy_policy_state() 참조.
 #
 # 각 은행 환율 고시 스케줄 (실제 운영 시간):
 #   - investing: 월 06:00 ~ 토 06:00 (외환 시장 글로벌 운영)
 #   - kb: 평일 08:30 ~ 익일(토 포함) 05:00
 #   - hana: 평일 08:30 ~ 익일(토 포함) 06:00 (주말 중 가끔 변동)
-#   - shinhan: 평일 08:19 ~ 익일 02:30 (주말 중 가끔 변동)
-#   - woori: 평일 08:30 ~ 익일 02:45
-#   - ibk: 평일 08:30 ~ 익일 02:05
+#   - shinhan: 평일 08:19 ~ 익일 02:45 (주말 중 가끔 변동) → 수집 02:59:18까지
+#   - woori: 평일 08:30 ~ 익일 05:00 (24시간 외환시장 전환으로 연장) → 수집 05:04:53까지
+#   - ibk: 평일 08:30 ~ 익일 06:00 (연장, 05:59:55 관측) → BREAK1 05:59:34 + BREAK2 terminal 2회
 #   - nh: 평일 08:40 ~ 당일 24:00 (자정 이후/주말 가끔 고시)
-#   - sc: 평일 09:00 ~ 당일 20:30
+#   - sc: 평일 09:00 ~ 당일 포착 변경 약 17:50까지 → 수집 18:59:58까지
 #   - bs: 평일 08:10 ~ 당일 24:00 (일요일 넘어갈 때 가끔 고시)
 #   - citi: 평일 09:00 ~ 익일(토 포함) 06:00
 #
-# A Group: investing (순수 Request)
+# A Group: investing + dxy_spot (순수 Request, 둘 다 4모드 전부 등록)
 #   - 가장 중요한 기준 환율
-#   - IN/BREAK1/BREAK2: 10초마다 (Broadcasting 3초 전)
-#   - OUT: 10분마다 (매시간 7,17,27,37,47,57분)
+#   - IN/BREAK1/BREAK2: 10초마다 (고정 초 레인으로 부하 분산)
+#   - OUT: investing 10분마다, dxy_spot 매분
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
-#     - IN/BREAK1/BREAK2: 20초마다 (Broadcasting 5초 전, 서로 10초 엇갈림)
+#     - IN/BREAK1/BREAK2: 20초마다 (서로 10초 엇갈림)
 #     - OUT: 10분마다 (kb: 5,15,25..., hana: 0,10,20...)
 #   - woori, bs, citi: 일반, 빈도 낮음
 #     - IN: 60초마다 (우선순위: woori(53초) > bs(33초) > citi(13초))
 #       * woori 우선순위 높음: 같은 1분 내 늦게 크롤링 → 사용자 표시 시간이 실제 변경 시간과 유사
 #     - BREAK1: woori(53초), bs(33초), citi(13초) 유지
-#     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 02:45 고시 종료)
+#     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 05:05 수집 종료)
 #     - OUT: bs만 유지 (60분마다, 33분)
-#   - 하이브리드: hana, woori, bs, citi는 Request → Selenium 폴백
+#   - 하이브리드: hana, woori는 Request → Selenium 폴백. bs/citi는 순수 Request
 #
 # C Group: Selenium 기반 (Queue 순차 처리)
 #   - shinhan, ibk, nh, sc
 #   - 시스템 부하 감소 전략: Request(mibank) → Selenium 폴백 순서
 #     * shinhan, nh, sc: 항상 Request 먼저 시도 (mibank 실패 시 Selenium 폴백)
-#     * ibk: IN 모드(08:30~20:59) Request 우선, 00:00~02:59 Selenium만 사용 (날짜 변경 필요)
+#     * ibk: **모든 시간대에서 공식 requests를 먼저 시도**(시간 게이트 없음).
+#            당일 고시 전에는 표가 비어 False → Selenium이 날짜를 되감아 조회(실측 ≈10.2초).
+#            시간 게이트는 3차 폴백 mibank에만 있다(평일 10:00~23:59).
 #   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
-#   - BREAK1: shinhan(18초), ibk(34초), nh(54초) 유지 (sc는 20:30 종료로 제외)
-#   - BREAK2: nh(54초)만 유지 (ibk는 02:05 종료, shinhan은 02:30 종료, sc는 20:30 종료)
+#   - BREAK1: shinhan(18초, ~02:59:18), ibk(34초, ~05:59:34), nh(54초) 유지 (sc는 19:00 진입과 함께 제외)
+#   - BREAK2: nh(54초) + task_ibk_terminal(06:00:34·06:01:34, 화~토). shinhan/woori/sc 제외
 #   - OUT: nh(매시 03분 45초), shinhan(매시 13분 45초) 유지 (주말 중 가끔 변동)
 #
 # BREAK1/BREAK2/OUT 모드 크롤러 축소 근거:
@@ -570,9 +576,9 @@ def switch_jobs(mode: str):
     모드에 따라 작업 재등록 (4단계 세분화 + 크롤러 토글 통합)
 
     [2025-11-16 재설계]
-    - IN 모드: cron 절대 시간 동기화 (Broadcasting 동기화) - 월~금 08:00~20:59
-    - BREAK1 모드: 21~02시 (월~금 21:00~23:59, 화~토 00:00~02:59) - IN과 동일 스케줄에서 sc만 제외
-    - BREAK2 모드: 03~07시 (월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59) - ibk/shinhan/sc/woori 제외
+    - IN 모드: cron 절대 시간 동기화 - 월~금 08:00~18:59 (2026-08-28 ADR-042: 20:59 → 18:59)
+    - BREAK1 모드: 19시~익일 06시 - IN과 동일 스케줄에서 sc 제외 + shinhan/woori 은행별 cutoff
+    - BREAK2 모드: 06:00~07:59 - shinhan/woori/sc 제외, ibk는 terminal capture(화~토)만
     - OUT 모드: cron 시간 단위 (완전 분산, 동시 실행 0개) - 토 07:00 ~ 월 05:59
     - Queue: C Group만 사용 (Selenium 전용)
 
@@ -589,10 +595,10 @@ def switch_jobs(mode: str):
 
     if mode == "IN":
         # ═════════════════════════════════════════════════════════════
-        # IN 모드: cron 절대 시간 동기화 (Broadcasting 00, 10, 20초)
+        # IN 모드: cron 절대 시간 기반 초 레인 분산
         # ═════════════════════════════════════════════════════════════
 
-        # A Group: investing (3초 전)
+        # A Group: investing
         if crawler_manager.is_enabled('investing'):
             scheduler.add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
@@ -615,7 +621,7 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (5초 전, 10초 엇갈림)
+        # B Group: kb, hana (10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
@@ -727,13 +733,14 @@ def switch_jobs(mode: str):
 
     elif mode == "BREAK1":
         # ═════════════════════════════════════════════════════════════
-        # BREAK1 모드: 심야 시간대 (월~금 21:00~23:59, 화~토 00:00~02:59)
+        # BREAK1 모드: 야간 시간대 (월~금 19:00 ~ 익일 05:59)
         # ═════════════════════════════════════════════════════════════
-        # 제외 크롤러: sc (20:30 종료)
-        # 유지 크롤러: investing, kb, hana, woori, bs, citi, ibk, nh, shinhan (9개)
-        # ibk는 00:00부터 Selenium만 사용 (날짜 변경 필요, Request 불가)
+        # 제외 크롤러: sc (18시 이후 포착 변경 0건, 여유 두고 18:59:58까지만 수집)
+        # 유지 크롤러: investing, dxy, kb, hana, woori, bs, citi, ibk, nh, shinhan (10개)
+        # ibk는 자정~당일 고시 전 구간에서 requests가 빈 표로 실패해 Selenium 경로를 탄다
+        # (requests 자체는 항상 시도된다 — 'Request 불가'가 아니다)
 
-        # A Group: investing (3초 전)
+        # A Group: investing
         if crawler_manager.is_enabled('investing'):
             scheduler.add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
@@ -756,7 +763,7 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (5초 전, 10초 엇갈림)
+        # B Group: kb, hana (10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
@@ -780,10 +787,19 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
+        # woori: 고시가 새벽 05:00경까지 연장됨 (사용자 은행 페이지 실측).
+        # <05:05 를 정확히 표현하려면 본구간(19-23,0-4시)과 보정구간(5시 0-4분)이 필요한데,
+        # ⛔ **두 개의 job으로 나누면 안 된다** — max_instances=1은 job 단위라 서로 배타가
+        #    아니고, 04:59:53 실행이 지연되면(최악: requests 10s → Selenium 45s → mibank 10s)
+        #    05:00:53 tail과 겹쳐 Chrome 2개가 동시에 뜰 수 있다.
+        #    OrTrigger로 묶어 **단일 job**으로 두면 max_instances=1이 전 구간에 적용된다.
         if crawler_manager.is_enabled('woori'):
             scheduler.add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-                CronTrigger(minute='*', second='53', timezone=KST),
+                OrTrigger([
+                    CronTrigger(hour='19-23,0-4', minute='*', second='53', timezone=KST),
+                    CronTrigger(hour='5', minute='0-4', second='53', timezone=KST),  # 마지막 05:04:53
+                ]),
                 id='task_woori',
                 max_instances=1,
                 misfire_grace_time=30
@@ -818,7 +834,8 @@ def switch_jobs(mode: str):
             scheduler.add_job(
                 make_selenium_job_wrapper('shinhan'),
                 # IntervalTrigger(seconds=38.3, timezone=KST),
-                CronTrigger(minute='*', second='18', timezone=KST),
+                # 신한 고시는 02:45경 종료 → 02:59:18이 마지막 (현행 동작 고정, 변화 0)
+                CronTrigger(hour='19-23,0-2', minute='*', second='18', timezone=KST),
                 id='task_shinhan',
                 max_instances=1,
                 # misfire_grace_time=25
@@ -855,13 +872,14 @@ def switch_jobs(mode: str):
 
     elif mode == "BREAK2":
         # ═════════════════════════════════════════════════════════════
-        # BREAK2 모드: 고시 마무리 시간대 (월 06:00~07:59, 화~금 03:00~07:59, 토 03:00~06:59)
+        # BREAK2 모드: 고시 마무리 시간대 (06:00~07:59, 모든 요일 공통)
         # ═════════════════════════════════════════════════════════════
-        # 제외 크롤러: woori (02:45 종료), ibk (02:05 종료), shinhan (02:30 종료), sc (20:30 종료)
-        # 유지 크롤러: investing, kb, hana, bs, citi, nh (6개)
+        # 제외 크롤러: woori (05:05 수집 종료), shinhan (03:00 수집 종료), sc (19:00 종료)
+        #             ibk는 정규 job 없음 — task_ibk_terminal만 06:00:34·06:01:34 (화~토)
+        # 유지 크롤러: investing, dxy, kb, hana, bs, citi, nh (7개) + task_ibk_terminal(화~토)
         # 08:00~09:00부터 은행 개장 준비하며 새 환율 고시 시작
 
-        # A Group: investing (3초 전)
+        # A Group: investing
         if crawler_manager.is_enabled('investing'):
             scheduler.add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
@@ -884,7 +902,7 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (5초 전, 10초 엇갈림)
+        # B Group: kb, hana (10초 엇갈림)
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
@@ -944,12 +962,30 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
 
+        # IBK terminal capture — 06:00 경계 이후 **추가 수집 시도 2회**
+        # IBK는 05:59:55에 마지막 고시한 날이 관측됐는데(사용자 은행 페이지 실측),
+        # BREAK1(~06:00)의 마지막 정규 실행이 05:59:34라 그 사이 고시를 놓칠 수 있다.
+        # ⚠️ 포착을 보장하지는 않는다 — 06:00:34·06:01:34 두 차례 더 시도할 뿐이다.
+        # day_of_week='tue-sat': IBK 세션은 평일 08:30 → 익일 06:00이므로 화~토 아침에만 종료된다.
+        #   월 06:00은 일요일 세션이 없어 무의미, 토 06:00은 금요일 세션 종료라 필요.
+        # ⚠️ task_ prefix 필수 — switch_jobs()가 모드 전환 시 task_* 를 제거한다.
+        if crawler_manager.is_enabled('ibk'):
+            scheduler.add_job(
+                make_selenium_job_wrapper('ibk'),
+                CronTrigger(hour=6, minute='0,1', second='34', day_of_week='tue-sat', timezone=KST),
+                id='task_ibk_terminal',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [ibk] 비활성화 상태 - terminal capture job 등록 스킵")
+
     elif mode == "OUT":
         # ═════════════════════════════════════════════════════════════
         # OUT 모드: 주말 시간대 (토 07:00 ~ 월 05:59)
         # ═════════════════════════════════════════════════════════════
         # 제외 크롤러: woori, ibk, sc, citi (주말 환율 고시 없음)
-        # 유지 크롤러: investing, kb, hana, bs, shinhan, nh (6개)
+        # 유지 크롤러: investing, dxy, kb, hana, bs, shinhan, nh (7개)
         # - hana, shinhan: 주말 중 가끔 변동
         # - bs, nh: 일요일 넘어갈 때 가끔 고시
         # 완전 분산 스케줄 (동시 실행 0개, 리소스 최소화)
@@ -1390,13 +1426,11 @@ def start_scheduler():
         db.close()
 
     # ═════════════════════════════════════════════════════════════
-    # WebSocket Broadcasting: 매분 00, 10, 20, 30, 40, 50초 (정확한 시간)
+    # WebSocket Broadcasting: scheduler는 매초 wake-up, main.py가 실행 cadence를 결정
     # ═════════════════════════════════════════════════════════════
-    # [2025-11-16] 4단계 모드 크롤러 동기화 기준 시간
-    # - IN/BREAK1/BREAK2 모드 크롤러들은 Broadcasting 기준으로 스케줄링됨
-    # - A Group: 3초 전 (07,17,27,37,47,57초)
-    # - B Group: 5초 또는 7초 전
-    # - C Group: Broadcasting 독립 (interval)
+    # - normal: 00/10/20/30/40/50초, fast 또는 fast window 안: 매초
+    # - 운영 BROADCAST_MODE=window + BROADCAST_FAST_HOURS=0-24에서는 24시간 매초 실행
+    # - 크롤러 초 슬롯은 broadcast 직전 정렬이 아니라 상호 부하 분산용
     # ─────────────────────────────────────────────────────────────
     # Note: AsyncIOScheduler는 async 함수를 직접 등록 가능
     from app.main import broadcast_rates_once  # 순환 import 방지 (함수 내부 import)
@@ -1470,7 +1504,7 @@ def start_scheduler():
         )
 
     # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
-    # - 모드 전환 시점: 21:00 (BREAK1), 03:00 (BREAK2), 08:00 (IN), 토 07:00 (OUT 시작), 월 06:00 (OUT 종료 → BREAK2)
+    # - 모드 전환 시점: 19:00 (BREAK1), 06:00 (BREAK2), 08:00 (IN), 토 07:00 (OUT 시작), 월 06:00 (OUT 종료 → BREAK2)
     scheduler.add_job(
         control_job,
         CronTrigger(second='1', timezone=KST),
@@ -1656,7 +1690,7 @@ def start_scheduler():
     # ═════════════════════════════════════════════════════════════
     # - 모드 무관 (24시간 동일)
     # - ETag/Last-Modified 조건부 GET → 변경 없으면 304 (부하 최소)
-    # - :45초 실행: 브로드캐스트(:00)와 충돌 방지
+    # - :45초 실행: 다른 정기 작업과 초 슬롯 분산
     # ─────────────────────────────────────────────────────────────
     from app.news.fetcher import fetch_all_news  # 순환 import 방지
 

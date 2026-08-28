@@ -12,11 +12,11 @@ Fallback2 (외부 chain): CNBC `.DXY` (1순위) → Yahoo Finance `DX-Y.NYB` (�
 - 일요일 18:00 ET 이전, 금요일 17:00 ET 이후, 토요일 전체
 - 화~금 일일 휴장(17:00~20:00 ET)은 아직 차단하지 않음
 
-외부 fallback 보존 정책 (market mode 기반):
-- OUT 모드 (주말): 72h 이내 Investing DB 값 존재 시 외부 chain 차단
-- IN/BREAK 모드: 아래 두 조건이 모두 충족될 때만 외부 chain 차단 (하나라도 깨지면 허용)
-  - fresh 성공이 grace 이내 (IN: 15분, BREAK: 30분)
-  - 연속 실패가 임계값 미만 (IN: 3회, BREAK: 5회)
+외부 fallback 보존 정책 (DXY 전용 정책 시계 기반 — 은행 모드와 분리, market_mode.py 참조):
+- WEEKEND_PRESERVE: 72h 이내 Investing DB 값 존재 시 외부 chain 차단
+- ACTIVE/QUIET: 아래 두 조건이 모두 충족될 때만 외부 chain 차단 (하나라도 깨지면 허용)
+  - fresh 성공이 grace 이내 (ACTIVE: 15분, QUIET: 30분)
+  - 연속 실패가 임계값 미만 (ACTIVE: 3회, QUIET: 5회)
 
 외부 chain 허용 경로:
 - hard failure: 연속 실패 >= 임계값 → 즉시 허용 (fresh age 무관, ~30초)
@@ -45,7 +45,13 @@ except Exception:
 # 로컬 애플리케이션
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
 from app.crawlers.dxy import fetch_dxy_from_cnbc, fetch_dxy_from_yahoo
-from app.market_mode import get_market_mode, KST
+from app.market_mode import (
+    DXY_ACTIVE,
+    DXY_QUIET,
+    DXY_WEEKEND_PRESERVE,
+    KST,
+    get_dxy_policy_state,
+)
 
 # 크롤러 이름
 CRAWLER_NAME = "dxy"
@@ -72,12 +78,12 @@ SAFARI_UA_POOL = [
 # --- 외부 fallback 보존 정책 상수 (CNBC/Yahoo chain 공용) ---
 NY = ZoneInfo("America/New_York")
 
-IN_SUCCESS_GRACE_SECONDS = 15 * 60       # IN 모드: 15분
-BREAK_SUCCESS_GRACE_SECONDS = 30 * 60    # BREAK 모드: 30분
-OUT_PRESERVE_SECONDS = 72 * 3600         # OUT 모드: 72시간
+IN_SUCCESS_GRACE_SECONDS = 15 * 60       # ACTIVE: 15분 (legacy 이름 유지)
+BREAK_SUCCESS_GRACE_SECONDS = 30 * 60    # QUIET: 30분 (legacy 이름 유지)
+OUT_PRESERVE_SECONDS = 72 * 3600         # WEEKEND_PRESERVE: 72시간 (legacy 이름 유지)
 
-IN_FAILURE_THRESHOLD = 3                 # IN 모드: 연속 3회 실패
-BREAK_FAILURE_THRESHOLD = 5              # BREAK 모드: 연속 5회 실패
+IN_FAILURE_THRESHOLD = 3                 # ACTIVE: 연속 3회 실패 (legacy 이름 유지)
+BREAK_FAILURE_THRESHOLD = 5              # QUIET: 연속 5회 실패 (legacy 이름 유지)
 DXY_YAHOO_DIFF_THRESHOLD = 0.07          # 외부 chain(CNBC/Yahoo) 저장 전 마지막 fresh Investing 값과 허용 차이 (이름은 Yahoo 단일 시기 하위호환)
 
 # --- 프로세스 메모리 상태 변수 ---
@@ -87,6 +93,10 @@ _last_investing_fetch_ok_at: Optional[datetime] = None       # 마지막 Investi
 
 # 로거 설정
 logger = logging.getLogger("exchange_rate.crawler.dxy_spot")
+
+
+class InvalidDxyPolicyStateError(ValueError):
+    """DXY 정책 시계와 소비자 분기가 서로 어긋났을 때 발생하는 프로그래밍 오류."""
 
 
 def _emit_dxy_direct_latest(db) -> None:
@@ -209,10 +219,24 @@ def _is_dxy_weekly_session_open(now_utc: datetime) -> bool:
         return False
     return True
 
+def _validate_policy_state(policy_state: str) -> None:
+    """정책 상태를 crash-early로 검증해 DB 조회나 fallback 실행보다 먼저 실패시킨다."""
+    if policy_state not in (DXY_ACTIVE, DXY_QUIET, DXY_WEEKEND_PRESERVE):
+        raise InvalidDxyPolicyStateError(f"알 수 없는 DXY 정책 상태: {policy_state!r}")
+
+
+def _grace_seconds_for(policy_state: str) -> int:
+    """정책 상태별 grace 시간. ⛔ 알 수 없는 값을 조용히 BREAK로 처리하지 않는다."""
+    _validate_policy_state(policy_state)
+    if policy_state == DXY_ACTIVE:
+        return IN_SUCCESS_GRACE_SECONDS
+    return BREAK_SUCCESS_GRACE_SECONDS
+
+
 def _should_use_yahoo_fallback(
     *,
     now_utc: datetime,
-    mode: str,
+    policy_state: str,
     latest_investing_ts: Optional[datetime],
 ) -> Tuple[bool, dict]:
     """
@@ -221,13 +245,14 @@ def _should_use_yahoo_fallback(
     함수명은 하위 호환을 위해 유지(원래 Yahoo 단일 fallback 시기 명명).
     실제 동작은 chain 전체에 대한 게이트.
 
-    IN/BREAK 판정 기준은 _last_investing_fetch_ok_at (fresh success만 갱신).
+    ACTIVE/QUIET 판정 기준은 _last_investing_fetch_ok_at (fresh success만 갱신).
     stale(주말 페이지 열림)는 실패 카운터만 리셋하고 이 시각은 갱신하지 않으므로,
     월요일 장 개시 후 Investing 장애 시 즉시 grace period가 만료된 상태로 시작.
 
     Returns:
         (허용 여부, 로그용 메타데이터)
     """
+    _validate_policy_state(policy_state)
     failures = _consecutive_investing_failures
     last_fresh = _last_investing_fetch_ok_at
 
@@ -240,7 +265,8 @@ def _should_use_yahoo_fallback(
         effective_last_fresh = ts
 
     meta = {
-        "mode": mode,
+        "mode": policy_state,
+        "policy_state": policy_state,
         "consecutive_failures": failures,
         "last_fresh_source": "memory" if last_fresh is not None else ("db" if effective_last_fresh is not None else "none"),
     }
@@ -260,7 +286,7 @@ def _should_use_yahoo_fallback(
             ts = ts.replace(tzinfo=timezone.utc)
         meta["investing_rate_age_seconds"] = int((now_utc - ts).total_seconds())
 
-    if mode == "OUT":
+    if policy_state == DXY_WEEKEND_PRESERVE:
         # 주말: 72h DB 가드 (기존 정책)
         if latest_investing_ts is not None:
             ts = latest_investing_ts
@@ -273,7 +299,7 @@ def _should_use_yahoo_fallback(
         meta["reason"] = "OUT_expired_or_no_data"
         return True, meta
 
-    elif mode == "IN":
+    elif policy_state == DXY_ACTIVE:
         # 장중: 15분 이내 fresh 성공 AND 연속 실패 3회 미만일 때만 보호
         # - hard failure: failures >= 3 → 외부 chain 허용
         # - silent stale: age >= 15분 → 외부 chain 허용
@@ -283,13 +309,15 @@ def _should_use_yahoo_fallback(
         meta["reason"] = "IN_stale_or_failure"
         return True, meta
 
-    else:
-        # BREAK1/BREAK2: 30분 이내 fresh 성공 AND 연속 실패 5회 미만일 때만 보호
+    elif policy_state == DXY_QUIET:
+        # 평일 야간·새벽: 30분 이내 fresh 성공 AND 연속 실패 5회 미만일 때만 보호
         if age < BREAK_SUCCESS_GRACE_SECONDS and failures < BREAK_FAILURE_THRESHOLD:
             meta["reason"] = "BREAK_protected"
             return False, meta
         meta["reason"] = "BREAK_stale_or_failure"
         return True, meta
+
+    raise AssertionError("검증된 DXY 정책 상태가 처리되지 않음")
 
 
 # --- 외부 fallback 실행 (공용 헬퍼) ---
@@ -297,7 +325,7 @@ def _should_use_yahoo_fallback(
 # 외부 fallback chain: (source 이름, fetch 함수)
 # 우선순위: CNBC(신선) > Yahoo(10분 stale, 최후 보루)
 # 정책:
-#   - 시간 가드 / mode 보존 정책 / fresh-age diff guard 모두 공통 적용
+#   - 시간 가드 / DXY 정책 상태 / fresh-age diff guard 모두 공통 적용
 #   - chain 내 한 source가 fetch 성공 + diff guard 차단 → 이후 source도 차단
 #     (fresh Investing 기준 outlier 신호로 간주)
 #   - chain 내 한 source가 fetch 실패 → 다음 source로 진행
@@ -311,7 +339,7 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
     """
     외부 fallback chain 시도 (CNBC > Yahoo).
 
-    market mode 기반 보존 정책 + 시간 가드 + fresh-age 기반 diff guard 적용.
+    DXY 전용 정책 상태 기반 보존 정책 + 시간 가드 + fresh-age 기반 diff guard 적용.
     hard failure 경로와 silent stale 경로에서 공용으로 호출.
     """
     from app import models
@@ -328,7 +356,8 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
         return
 
     now_kst = now_utc.astimezone(KST)
-    mode = get_market_mode(now_kst)
+    policy_state = get_dxy_policy_state(now_kst)
+    _validate_policy_state(policy_state)
 
     latest_investing = (
         db.query(models.MarketIndexRate)
@@ -343,7 +372,7 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
 
     use_yahoo, meta = _should_use_yahoo_fallback(
         now_utc=now_utc,
-        mode=mode,
+        policy_state=policy_state,
         latest_investing_ts=latest_investing.timestamp if latest_investing else None,
     )
 
@@ -363,7 +392,7 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
         return
 
     diff_guard_grace_seconds = (
-        IN_SUCCESS_GRACE_SECONDS if mode == "IN" else BREAK_SUCCESS_GRACE_SECONDS
+        _grace_seconds_for(policy_state)
     )
 
     for source_name, fetch_fn in _FALLBACK_CHAIN:
@@ -391,7 +420,7 @@ def _try_external_fallback(db, now_utc: datetime) -> None:
                         f"🛡️ DXY {source_name} 임계값 초과 — chain 전체 저장 보류 "
                         f"(rate={rate}, inv={latest_investing.rate}, "
                         f"diff={round(diff, 4)}, threshold={DXY_YAHOO_DIFF_THRESHOLD}, "
-                        f"inv_age={investing_age_seconds}s, mode={mode})",
+                        f"inv_age={investing_age_seconds}s, mode={policy_state})",
                         extra={
                             **meta,
                             "fallback_source": source_name,
@@ -529,8 +558,8 @@ def crawl_and_save_dxy_spot() -> None:
 
     - Primary 성공 시 lastUpdateTime 동일 여부로 stale 판정
     - Primary 실패 시 같은 페이지 CSS selector 폴백 (source는 'investing')
-    - 최종 실패 시 외부 fallback chain (CNBC → Yahoo, market mode 기반 보존 정책 적용)
-    - Silent stale 시 IN/BREAK 모드에서 grace 초과하면 외부 chain 진입
+    - 최종 실패 시 외부 fallback chain (CNBC → Yahoo, DXY 전용 정책 적용)
+    - Silent stale 시 ACTIVE/QUIET 상태에서 grace 초과하면 외부 chain 진입
     """
     global _last_source_ts_ms
     from app.database import SessionLocal
@@ -549,17 +578,17 @@ def crawl_and_save_dxy_spot() -> None:
                     # stale: 페이지는 열리지만 데이터 변화 없음
                     _mark_investing_fetch_ok()  # 실패 카운터만 리셋
 
-                    # IN/BREAK에서 silent stale이 grace 초과하면 외부 chain 판정
+                    # ACTIVE/QUIET에서 silent stale이 grace 초과하면 외부 chain 판정
                     now_kst = now_utc.astimezone(KST)
-                    mode = get_market_mode(now_kst)
-                    if mode != "OUT":
+                    policy_state = get_dxy_policy_state(now_kst)
+                    if policy_state != DXY_WEEKEND_PRESERVE:
                         fresh_age = _fresh_age_seconds(now_utc, db=db)
-                        grace = IN_SUCCESS_GRACE_SECONDS if mode == "IN" else BREAK_SUCCESS_GRACE_SECONDS
+                        grace = _grace_seconds_for(policy_state)
                         if fresh_age >= grace:
                             logger.warning(
                                 "⚠️ DXY silent stale 감지 (외부 fallback 판정 진행)",
                                 extra={
-                                    "mode": mode,
+                                    "mode": policy_state,
                                     "fresh_age_seconds": int(fresh_age),
                                     "source_ts_ms": source_ts_ms,
                                 },
@@ -589,6 +618,8 @@ def crawl_and_save_dxy_spot() -> None:
                     extra={"rate": rate, "source": "investing", "source_ts_ms": source_ts_ms},
                 )
                 return
+            except InvalidDxyPolicyStateError:
+                raise
             except Exception:
                 logger.warning("⚠️ DXY spot primary 파싱 실패", exc_info=True)
 
@@ -602,6 +633,8 @@ def crawl_and_save_dxy_spot() -> None:
             )
             logger.info("📦 DXY spot CSS 폴백 저장", extra={"rate": rate, "source": "investing"})
             return
+        except InvalidDxyPolicyStateError:
+            raise
         except Exception:
             failures = _mark_investing_failure()
             logger.warning(
@@ -613,6 +646,8 @@ def crawl_and_save_dxy_spot() -> None:
         # Hard failure → 외부 fallback chain (CNBC → Yahoo, 보존 정책 적용)
         _try_yahoo_fallback(db, now_utc)
 
+    except InvalidDxyPolicyStateError:
+        raise
     except Exception:
         logger.warning("⚠️ DXY spot 전체 fallback 실패 (무시)", extra={"crawler": CRAWLER_NAME}, exc_info=True)
     finally:

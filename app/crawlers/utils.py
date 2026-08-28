@@ -214,8 +214,8 @@ def is_mibank_rate_reliable() -> bool:
     제공하므로, 해당 시간대에는 부정확한 데이터로 간주합니다.
 
     Returns:
-        True: 평일 09:00 ~ 24:00 (MIBANK 환율 신뢰 가능)
-        False: 평일 00:00 ~ 09:00, 주말 (MIBANK 환율 부정확)
+        True: 평일 10:00 ~ 23:59 (MIBANK 환율 신뢰 가능)
+        False: 평일 00:00 ~ 09:59, 주말 (MIBANK 환율 부정확)
 
     Notes:
         - 주말이 아닌 일반 공휴일은 고려하지 못함

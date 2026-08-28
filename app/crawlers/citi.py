@@ -88,7 +88,7 @@ def crawl_and_save_citi_bank_exchange_rates():
             if is_mibank_rate_reliable():
                 try:
                     logger.info(
-                        "MIBANK_CITI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)",
+                        "MIBANK_CITI_URL 시도 (평일 10:00 ~ 23:59 / 00:00~09:59,주말 제외)",
                         extra={"bank": BANK_NAME},
                     )
                     rates, eval_result = _crawl_mibank_citi(db)

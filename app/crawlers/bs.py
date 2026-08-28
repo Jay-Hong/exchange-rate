@@ -78,7 +78,7 @@ def crawl_and_save_bs_bank_exchange_rates():
         if is_mibank_rate_reliable():
             try:
                 logger.info(
-                    "MIBANK_BS_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)",
+                    "MIBANK_BS_URL 시도 (평일 10:00 ~ 23:59 / 00:00~09:59,주말 제외)",
                     extra={"bank": BANK_NAME},
                 )
                 rates, eval_result = _crawl_mibank_bs(db)
@@ -145,4 +145,3 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
         return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
     else:
         raise Exception(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception")
-

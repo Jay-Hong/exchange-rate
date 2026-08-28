@@ -47,10 +47,10 @@
 
 ### 2.1 crawler_stats가 신뢰 불가한 이유 (codex High 1, 코드 검증됨)
 
-`crawler_stats.record_success`는 크롤러 wrapper가 **예외 없이 반환**하면 호출된다([scheduler.py:263](app/scheduler.py) Request / [:314](app/scheduler.py) subprocess exit 0). 그러나 **모든 scheduled collector의 top-level 함수가 총실패를 로그만 남기고 정상 반환**한다:
+`crawler_stats.record_success`는 크롤러 wrapper가 **예외 없이 반환**하면 호출된다([scheduler.py:269](app/scheduler.py#L269) Request / [scheduler.py:319](app/scheduler.py#L319) subprocess exit 0). 그러나 **scheduled collector의 일반적인 총 source 실패 경로는 로그만 남기고 정상 반환**한다:
 - Request: KB([kb.py:93-96](app/crawlers/kb.py)), Investing([investing.py:186-206](app/crawlers/investing.py)) — 전 URL 실패/403도 None 정상 반환.
 - **Selenium**([runner.py:74](app/crawlers/runner.py)가 `crawler_func()` 후 `sys.exit(0)` — 함수가 raise해야만 exit 1): shinhan([shinhan.py:118-122](app/crawlers/shinhan.py)) / nh([nh.py:104-107](app/crawlers/nh.py)) / sc([sc.py:120-123](app/crawlers/sc.py)) / ibk([ibk.py:145-148](app/crawlers/ibk.py)) — "모든 URL 실패" 로그 후 `finally: db.close()`로 **raise 없이 return** → subprocess exit 0 → false success.
-- DXY([dxy_spot.py:509](app/crawlers/dxy_spot.py)) — fallback chain 총실패도 삼킴.
+- DXY([dxy_spot.py:451](app/crawlers/dxy_spot.py#L451)) — fallback chain이 모두 실패해도 warning 후 정상 반환. 단 정책 상태 불일치는 전용 예외로 전파한다.
 
 → **subprocess returncode 0 = "top-level 함수가 raise 안 함"이지 "크롤 성공"이 아니다.** crawler_stats.last_success_at은 전 소스에서 장애 중에도 갱신될 수 있어 그대로는 collection-success 신호로 부적합. (초기 오해: "Selenium은 returncode 기반이라 신뢰"는 틀림 — 함수가 삼키면 returncode도 0.)
 
@@ -70,18 +70,18 @@
 
 ## 4. Cadence — `collection_expected` ⊥ `market_expected` (2 별개 축)
 
-**두 의미를 분리해야 한다** (codex Medium): `collection_expected`(스케줄러상 수집이 실행돼야 하는가 — **collection_success 판정을 gate**)와 `market_expected`(시장·고시 값이 움직일 수 있는가 — **value_changed 진단만** 마스킹). **시장 휴장만으로 collection 판정을 skip하면 주말에도 도는 crawler의 장애를 은폐**한다 — investing은 OUT/주말에도 수집([scheduler.py:101](app/scheduler.py) OUT 모드 등록), hana/shinhan/bs/nh도 주말 가끔 수집·변동.
+**두 의미를 분리해야 한다** (codex Medium): `collection_expected`(스케줄러상 수집이 실행돼야 하는가 — **collection_success 판정을 gate**)와 `market_expected`(시장·고시 값이 움직일 수 있는가 — **value_changed 진단만** 마스킹). **시장 휴장만으로 collection 판정을 skip하면 주말에도 도는 crawler의 장애를 은폐**한다 — investing과 hana/shinhan/bs/nh는 OUT에도 등록된다([scheduler.py:983](app/scheduler.py#L983)).
 
 | source군 | collection_expected (수집 실행 스케줄) | market_expected (값 변화 가능) |
 |---|---|---|
-| 은행 9종 | 4-모드가 소스별 등록/제거([scheduler.py:590-1036](app/scheduler.py) — BREAK2/OUT 일부 off) | 고시 window (kb 08:30~익일05:00 / hana ~06:00 / shinhan ~02:30 / woori ~02:45 / ibk ~02:05 / nh ~24:00 / sc 09:00~20:30 / bs 08:10~24:00 / citi 09:00~익일06:00), 주말·**공휴일** off |
+| 은행 9종 | 4-모드가 소스별 등록/제거 + **은행별 cutoff**(shinhan ~02:59:18 / woori ~05:04:53 / ibk BREAK1 ~05:59:34 + terminal 2회 / sc ~18:59:58) — ⚠️ **`get_market_mode()`만으로 `collection_expected`를 계산하면 false stall이 난다**(BREAK1 안이어도 해당 은행 job이 없는 구간이 있음). cutoff를 함께 봐야 한다 | 고시 window (kb 08:30~익일05:00 / hana ~06:00 / shinhan ~02:45 / woori ~05:00 / ibk ~06:00 / nh ~24:00 / sc 09:00~약17:50 / bs 08:10~24:00 / citi 09:00~익일06:00 — **2026-08-28 갱신**(우리/IBK 연장 고시 반영)), 주말·**공휴일** off |
 | investing | 상시(전 모드 등록, OUT 10min) | 월06:00~토06:00(글로벌 FX), FX 휴일 off |
 | 거래소5 | 24/7(lifespan collector) | 24/7(단 소스별 sparse 상이, gopax 평상 ~180s) |
 | dxy | dxy_spot 상시 / dxy_futures=investing 종속 | investing과 동조 |
 
 - **collection_success 판정은 `collection_expected`일 때만** 수행(휴장이라도 crawler가 도는 창이면 stall=실장애). `market_expected=false`는 **value_changed 진단만** 마스킹(값 안 변함이 정상).
 - **collection_expected는 eligibility + interval-aware** (codex): eligibility(`scheduled_off`/`admin_disabled`)이며 stall 임계는 모드별 주기(IN 10-60s / OUT 10-60min)에 맞춘 **`expected_interval`/`next_due_at + grace`**. dispatch·run 결과(queue_full=dispatch health / timeout=run failure / transition=run skip)는 collection_expected가 아니라 **§6-2 3계층 계약**에서 분리(사건 계층이 다름).
-- **재사용**: [market_mode.get_market_mode](app/market_mode.py)로 collection_expected 파생("설계상 off" vs "사망" 구분), [kr_holidays](app/calendars/kr_holidays.py)(realtime 연결 시)로 market_expected 공휴일 마스크.
+- **재사용**: [market_mode.get_market_mode](app/market_mode.py)와 source별 실제 등록 trigger/cutoff를 함께 사용해 collection_expected를 파생한다. 모드만 단독 사용하면 BREAK1 안의 신한·우리 종료 뒤를 false stall로 오판한다. [kr_holidays](app/calendars/kr_holidays.py)는 realtime 연결 시 market_expected 공휴일 마스크로 사용한다.
 
 ---
 
@@ -105,7 +105,7 @@
 1. **per-asset 유효-수집 성공 기준 정의 (선행)** — "예외 없이 반환"이 아니라 "해당 (source,asset)의 **유효 데이터**를 실제로 받았나"(통화별 부분 실패 은닉 해소). **이 정의 없이는 아래 success/partial/failure를 분류할 수 없다**(codex — validity가 결과 계약보다 먼저).
 2. **실행 결과를 3계층으로 분리하는 계약 설계**(codex — 사건 발생 위치가 달라 collector 결과 하나로 못 묶음):
    - **eligibility**(스케줄러 등록 전): `enabled` / `scheduled_off`(mode) / `admin_disabled`(`crawler_config`) — collector 안 돎.
-   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:479](app/scheduler.py) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
+   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:485](app/scheduler.py) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
    - **run**(collector 실행): `success` / `partial` / `failure`(`failure_reason`=timeout 등) / `skipped`(`skip_reason`=transition_window, IBK 00:00-05 self-return [ibk.py:88](app/crawlers/ibk.py)). **timeout은 skip 아니라 run failure**(계획 skip과 재혼입 금지).
    collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 전 collector가 총실패를 삼킴(§2.1)이라 이 계약 선행 없이 shadow 무의미. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
 3. **collection_expected(eligibility + interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected = eligibility(`scheduled_off`/`admin_disabled`)이며 timing은 Bool 아닌 **`expected_interval`/`next_due_at + grace`**(IN 10-60s vs OUT 10-60min). **dispatch(queue_full/misfire)·run(timeout/transition) 결과는 collection_expected가 아니라 §6-2 3계층** — queue 포화는 억제가 아니라 health 영향(§4·§6-2 정합). market_mode(eligibility 파생) + kr_holidays(market_expected) realtime 연결.

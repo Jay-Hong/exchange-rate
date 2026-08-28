@@ -102,7 +102,7 @@ def crawl_and_save_woori_bank_exchange_rates():
             if is_mibank_rate_reliable():
                 try:
                     logger.info(
-                        "MIBANK_WOORI_URL 시도 (평일 09:00 ~ 24:00 / 자정,주말 제외)",
+                        "MIBANK_WOORI_URL 시도 (평일 10:00 ~ 23:59 / 00:00~09:59,주말 제외)",
                         extra={"bank": BANK_NAME},
                     )
                     rates, eval_result = _crawl_mibank_woori(db)

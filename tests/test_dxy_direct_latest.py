@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import app.latest_rates_cache as lrc
 import app.crawlers.dxy_spot as dxy_spot
+from app.market_mode import DXY_ACTIVE, DXY_QUIET, DXY_WEEKEND_PRESERVE
 
 
 class TestDxyDirectWriter(unittest.TestCase):
@@ -202,34 +203,66 @@ class TestS2bSilentStaleHeartbeat(unittest.TestCase):
     def tearDown(self):
         dxy_spot._last_source_ts_ms = self._orig_last
 
-    def _run_stale(self, mode, fresh_age=0.0):
+    def _run_stale(self, policy_state, fresh_age=0.0):
         mock_db = MagicMock()
         with patch("app.database.SessionLocal", return_value=mock_db), \
              patch.object(dxy_spot, "_fetch_spot_page", return_value=MagicMock()), \
              patch.object(dxy_spot, "_extract_next_data_price", return_value=(104.5, 999)), \
              patch.object(dxy_spot, "_mark_investing_fetch_ok"), \
              patch.object(dxy_spot, "_fresh_age_seconds", return_value=fresh_age), \
-             patch.object(dxy_spot, "get_market_mode", return_value=mode), \
+             patch.object(dxy_spot, "get_dxy_policy_state", return_value=policy_state), \
              patch("app.crud.insert_dxy_rate_into_db") as mock_insert, \
+             patch.object(dxy_spot, "_try_yahoo_fallback") as mock_external, \
              patch.object(dxy_spot, "_emit_dxy_direct_latest") as mock_emit:
             dxy_spot._last_source_ts_ms = 999  # == source_ts_ms → stale 분기
             dxy_spot.crawl_and_save_dxy_spot()
-        return mock_emit, mock_db, mock_insert
+        return mock_emit, mock_external, mock_db, mock_insert
 
-    def test_out_mode_silent_stale_calls_emit(self):
-        # OUT(주말): grace/yahoo 분기 skip → silent-stale return 경로 → _emit (heartbeat 효과 최대 구간)
-        mock_emit, mock_db, mock_insert = self._run_stale("OUT")
+    def test_weekend_preserve_silent_stale_calls_emit(self):
+        # WEEKEND_PRESERVE(구 OUT): grace/yahoo 분기 skip → silent-stale return 경로 → _emit
+        # (heartbeat 효과 최대 구간). ⛔ 이 계약이 깨지면 주말 read-path is_stale 방어가 사라진다 —
+        # DXY 정책 시계를 2상태(ACTIVE/QUIET)로 줄이면 정확히 여기가 무너진다.
+        mock_emit, mock_external, mock_db, mock_insert = self._run_stale(DXY_WEEKEND_PRESERVE)
         mock_emit.assert_called_once_with(mock_db)
+        mock_external.assert_not_called()
         mock_insert.assert_not_called()  # silent-stale = "insert 없는 heartbeat" 계약 (codex)
 
-    def test_in_mode_grace_not_exceeded_calls_emit(self):
-        # IN + fresh_age < grace → yahoo fallback 미진입 → silent-stale 경로 → _emit
-        mock_emit, mock_db, mock_insert = self._run_stale("IN", fresh_age=0.0)
+    def test_active_grace_not_exceeded_calls_emit(self):
+        # ACTIVE + fresh_age < grace → yahoo fallback 미진입 → silent-stale 경로 → _emit
+        mock_emit, mock_external, mock_db, mock_insert = self._run_stale(DXY_ACTIVE, fresh_age=0.0)
         mock_emit.assert_called_once_with(mock_db)
+        mock_external.assert_not_called()
         mock_insert.assert_not_called()
 
-    def test_in_mode_grace_exceeded_yahoo_path_no_silent_emit(self):
-        # no-double-SET (codex): IN + fresh_age >= grace → _try_yahoo_fallback 후 즉시 return →
+    def test_quiet_grace_not_exceeded_calls_emit(self):
+        # QUIET(구 BREAK1/2)도 동일 계약 — 구 테스트에 없던 경로 보강.
+        mock_emit, mock_external, mock_db, mock_insert = self._run_stale(DXY_QUIET, fresh_age=0.0)
+        mock_emit.assert_called_once_with(mock_db)
+        mock_external.assert_not_called()
+        mock_insert.assert_not_called()
+
+    def test_active_and_quiet_use_their_exact_production_grace_boundaries(self):
+        # ACTIVE는 정확히 15분에 fallback, QUIET은 30분 직전까지 heartbeat를 유지한다.
+        active_emit, active_external, _, _ = self._run_stale(
+            DXY_ACTIVE, fresh_age=15 * 60
+        )
+        active_external.assert_called_once()
+        active_emit.assert_not_called()
+
+        quiet_emit, quiet_external, quiet_db, _ = self._run_stale(
+            DXY_QUIET, fresh_age=30 * 60 - 1
+        )
+        quiet_external.assert_not_called()
+        quiet_emit.assert_called_once_with(quiet_db)
+
+        quiet_emit, quiet_external, _, _ = self._run_stale(
+            DXY_QUIET, fresh_age=30 * 60
+        )
+        quiet_external.assert_called_once()
+        quiet_emit.assert_not_called()
+
+    def test_active_grace_exceeded_yahoo_path_no_silent_emit(self):
+        # no-double-SET (codex): ACTIVE + fresh_age >= grace → _try_yahoo_fallback 후 즉시 return →
         # silent-stale _emit 미도달 (yahoo 경로는 외부 chain이 자체 _emit, 중복 방지).
         mock_db = MagicMock()
         with patch("app.database.SessionLocal", return_value=mock_db), \
@@ -237,7 +270,7 @@ class TestS2bSilentStaleHeartbeat(unittest.TestCase):
              patch.object(dxy_spot, "_extract_next_data_price", return_value=(104.5, 999)), \
              patch.object(dxy_spot, "_mark_investing_fetch_ok"), \
              patch.object(dxy_spot, "_fresh_age_seconds", return_value=10**9), \
-             patch.object(dxy_spot, "get_market_mode", return_value="IN"), \
+             patch.object(dxy_spot, "get_dxy_policy_state", return_value=DXY_ACTIVE), \
              patch.object(dxy_spot, "_try_yahoo_fallback") as mock_yahoo, \
              patch.object(dxy_spot, "_emit_dxy_direct_latest") as mock_emit:
             dxy_spot._last_source_ts_ms = 999
