@@ -340,15 +340,20 @@ sent_at           DATETIME
     - shinhan `hour='19-23,0-2'` → 마지막 **02:59:18** (고시 02:45 + 14분 여유)
     - woori `hour='19-23,0-4'` + tail `hour='5', minute='0-4'` → 마지막 **05:04:53** (고시 05:00 + 여유)
     - ibk → 마지막 **05:59:34** (고시 06:00, 이후는 BREAK2 terminal capture가 담당)
-  - ibk는 00:00~00:05 스킵(자정 전환기). 자정~고시 전 구간은 공식 requests가 빈 표로 실패해
-    Selenium이 날짜를 되감아 조회 → 실측 ≈10.2초(주간 ≈3.2초)
+  - ibk는 매분 주기를 유지한다. 08:00 이후는 조회 당일 GET → **공식 날짜 지정
+    POST**, 08:00 전은 빈 당일 GET을 생략하고 전 조회기준일 POST로 바로 시작한다. 공식 상세
+    화면에서 주간 1회차가 08:26:29에도 관측되어 08:30 경계의 잠재 누락을 피했다. 주말
+    조회기준일은 건너뛰며 공식 무고시 코드일 때만 더 이전 평일을 조회한 뒤,
+    필요할 때만 Selenium → 조건부 MIBANK로 fallback한다. 00:00~00:05에는 날짜 POST는
+    실행하되 실패하면 불안정한 Selenium UI만 억제해 기존값을 유지한다.
+    변경 전 야간 Selenium 기준선은 ≈10.2초/회이며 새 Request 경로의 메모리·큐 효과는 배포 후 검증한다.
 
 - **BREAK2 모드**: 06:00~07:59 (고시 마무리, 7개 크롤러)
   - 제외: woori(05:05 종료), shinhan(03:00 종료), sc(19:00 종료)
   - 유지: investing, dxy, kb, hana, bs, citi, nh
   - **`task_ibk_terminal`**: `hour=6, minute='0,1', second='34', day_of_week='tue-sat'`
     → IBK 최종 고시(05:59:55 관측)를 위한 **추가 수집 시도 2회**(포착 보장 아님).
-    화~토인 이유는 IBK 세션이 평일 08:30 → 익일 06:00이라
+    화~토인 이유는 IBK 평일 세션이 익일 06:00에
     **화~토 아침에만** 종료되기 때문(월 06:00은 일요일 세션이 없어 무의미)
 
 - **OUT 모드**: 토 07:00 ~ 월 06:00 전 (주말, 7개 크롤러)
@@ -376,7 +381,7 @@ sent_at           DATETIME
 | **hana** | 평일 08:30 | 익일 06:00 | 주말 중 가끔 변동 |
 | **shinhan** | 평일 08:19 | 익일 02:45 | 주말 중 가끔 변동. 수집 종료 02:59:18 |
 | **woori** | 평일 08:30 | 익일 05:00 | 24시간 외환시장 전환으로 연장(사용자 실측). 수집 종료 05:04:53 |
-| **ibk** | 평일 08:30 | 익일 06:00 | 연장(사용자 실측, **05:59:55** 관측). 00:00~00:05 스킵. 고시 전엔 requests가 빈 표로 실패 → Selenium 날짜 되감기. terminal capture 06:00:34·06:01:34(화~토) |
+| **ibk** | 평일 약 08:26~08:30 | 익일 06:00 | 연장(사용자 실측, **05:59:55** 관측). 코드의 조회기준일 전환은 안전한 공백인 08:00. 00시 이후 고시는 전 조회기준일을 공식 날짜 지정 POST로 조회. 00:00~00:05에도 날짜 POST는 실행하고 실패 시에만 Selenium 억제. terminal capture 06:00:34·06:01:34(화~토) |
 | **nh** | 평일 08:40 | 당일 24:00 | 자정 이후/주말 가끔 고시 |
 | **sc** | 평일 09:00 | 당일 ~17:50 (관측) | 30일 22영업일 실측 최종 17:49, 18:00 이후 0건. 여유 두고 18:59:58까지 수집 |
 | **bs** | 평일 08:10 | 당일 24:00 | 일요일 넘어갈 때 가끔 고시 |
@@ -441,15 +446,19 @@ scheduler.add_job(
 - **BREAK2**: kb, hana, bs, citi 유지 (woori는 05:05 종료)
 - **OUT**: kb(`:28`)·hana(`:38`)·bs(`:51`) 모두 **1분마다** (배포 2A)
 
-**Tier C (shinhan, ibk, nh, sc):** Selenium, 순차 처리
-- **특징**: 메모리 집약적, Request→Selenium 폴백으로 부하 감소
+**Tier C (shinhan, ibk, nh, sc):** subprocess queue, Request-first / Selenium fallback
+- **특징**: 브라우저 fallback은 메모리 집약적이므로 Queue에서 직렬화한다. IBK 정상 야간 경로는
+  공식 날짜 지정 Request를 우선하고 Selenium은 네트워크/응답 계약 변경 시 안전망으로 남긴다.
 - **실행 방식**: AsyncIO PriorityQueue 순차 실행
-- **부하 감소 전략**: Request(mibank) 먼저 시도 → 실패 시 Selenium 폴백
-  - shinhan, nh, sc: 항상 Request 우선
-  - ibk: **모든 시간대에서 공식 requests를 먼저 시도한다** (시간 게이트 없음).
-    자정~당일 고시 전에는 표가 비어 `False` 반환 → Selenium이 날짜를 되감아 조회.
-    시간 게이트가 걸린 건 3차 폴백 mibank(`is_mibank_rate_reliable` = 평일 10:00~23:59)뿐.
-    00:00~00:05는 자정 전환기라 크롤러 자체가 스킵.
+- **부하 감소 전략**:
+  - shinhan, nh, sc: MIBANK Request 우선 → 실패 시 Selenium
+  - ibk: 08:00 이후는 공식 당일 GET → `inDate` POST, 08:00 전은 전 조회기준일
+    `inDate` POST로 바로 시작 → 필요 시 Selenium 3회 → 조건부 MIBANK.
+    날짜 POST는 요청일 `#inDate` readback, 표 caption/header, USD·JPY·EUR 완전성/범위,
+    고시완료시각을 검증한다. 완료시각의 미래 허용과 과거 후보의 DB 회귀 판정에는 각각
+    120초 오차를 둔다. 정확한 `ECBKFEX01589` 무고시 응답에서만 lookback하고, 응답 이상은
+    즉시 Selenium 안전망으로 넘긴다. 00:00~00:05는 크롤러 전체가 아니라 날짜 POST 실패 뒤
+    **Selenium만** 억제한다.
 - **IN**: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초 — sc는 18:59:58이 마지막)
 - **BREAK1**: ibk(34초, ~05:59:34), nh(54초), shinhan(18초, `hour='19-23,0-2'` → ~02:59:18) 유지.
   sc는 19:00 진입과 함께 종료
@@ -512,7 +521,8 @@ scheduler.add_job(
 - **환율 고시 스케줄 기반**: 은행별 실제 운영 시간에 맞춰 크롤러 활성화/비활성화
 - **mibank 딜레이 고려**: 은행 고시 종료 후에도 mibank 반영 지연 대비 (마지막 고시 누락 방지)
 - **Broadcasting 독립성**: 운영 broadcast가 매초이므로 크롤러 슬롯은 부하 분산만 기준으로 선택
-- **Request 우선 전략**: Selenium 크롤러도 Request(mibank) 먼저 시도 → Queue 압력 감소
+- **Request 우선 전략**: shinhan/nh/sc는 MIBANK, ibk는 공식 당일/날짜 지정 Request를 먼저 시도
+  → 정상 응답에서는 브라우저 기동 회피
 - **실시간성 > 완전성**: 타임아웃 엄격화로 빠른 실패 → Queue 정체 방지
 - **리소스 분산**: OUT 모드의 알려진 고정 시작초 중복 제거. 네트워크 실행시간과
   `IntervalTrigger` 위상에 따른 실제 실행 중첩은 가능하므로 배포 후 별도 관측
@@ -1362,6 +1372,7 @@ logger.exception("크롤링 실패", extra={"bank": "kb"})  # except 블록
 **검사 표면**: API 요청/응답 계약 · DB/schema · env/config/default · scheduler/운영 절차/rollback · 아키텍처/ADR · crawler/source 동작 · 사용자/클라이언트 계약.
 
 **방법**: 변경된 route/config/symbol/필드명을 `rg`로 **전체 `*.md`** 검색 (3-doc 한정 금지).
+크롤러의 **수집 경로·폴백 순서·시간 게이트**를 바꿨다면 `rg <crawler_name> app/scheduler.py`도 함께 확인한다 — scheduler.py는 크롤러별 디스패치 계약을 산문 주석으로 중복 서술하는 것이 확인된 코드 파일이라 `*.md` 스윕을 구조적으로 빠져나간다 (2026-08-29 IBK POST-first 전환에서 실측: CRAWLERS/CLAUDE의 같은 문장은 고쳤으나 scheduler.py 사본 2곳이 남음).
 
 **보고 (둘 중 하나 필수)**:
 - `Docs impact: none` + 근거

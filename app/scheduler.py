@@ -96,7 +96,7 @@ queue_status_cache = {
 #   - hana: 평일 08:30 ~ 익일(토 포함) 06:00 (주말 중 가끔 변동)
 #   - shinhan: 평일 08:19 ~ 익일 02:45 (주말 중 가끔 변동) → 수집 02:59:18까지
 #   - woori: 평일 08:30 ~ 익일 05:00 (24시간 외환시장 전환으로 연장) → 수집 05:04:53까지
-#   - ibk: 평일 08:30 ~ 익일 06:00 (연장, 05:59:55 관측) → BREAK1 05:59:34 + BREAK2 terminal 2회
+#   - ibk: 평일 약 08:26~08:30 ~ 익일 06:00 (연장, 05:59:55 관측) → BREAK1 05:59:34 + BREAK2 terminal 2회
 #   - nh: 평일 08:40 ~ 당일 24:00 (자정 이후/주말 가끔 고시)
 #   - sc: 평일 09:00 ~ 당일 포착 변경 약 17:50까지 → 수집 18:59:58까지
 #   - bs: 평일 08:10 ~ 당일 24:00 (일요일 넘어갈 때 가끔 고시)
@@ -119,13 +119,14 @@ queue_status_cache = {
 #     - OUT: bs도 1분마다 (:51) — 배포 2A
 #   - 하이브리드: hana, woori는 Request → Selenium 폴백. bs/citi는 순수 Request
 #
-# C Group: Selenium 기반 (Queue 순차 처리)
+# C Group: subprocess Queue 순차 처리 (Request 우선 / Selenium 안전망)
 #   - shinhan, ibk, nh, sc
-#   - 시스템 부하 감소 전략: Request(mibank) → Selenium 폴백 순서
-#     * shinhan, nh, sc: 항상 Request 먼저 시도 (mibank 실패 시 Selenium 폴백)
-#     * ibk: **모든 시간대에서 공식 requests를 먼저 시도**(시간 게이트 없음).
-#            당일 고시 전에는 표가 비어 False → Selenium이 날짜를 되감아 조회(실측 ≈10.2초).
-#            시간 게이트는 3차 폴백 mibank에만 있다(평일 10:00~23:59).
+#   - 시스템 부하 감소 전략: Request → Selenium 폴백 순서
+#     * shinhan, nh, sc: 항상 Request(mibank) 먼저 시도 (실패 시 Selenium 폴백)
+#     * ibk: 08:00 이후는 조회 당일 GET → 실패 시 공식 날짜 지정 POST.
+#            08:00 전은 당일 GET을 생략하고 전 조회기준일 POST로 바로 시작한다
+#            (00시 이후 고시가 전 조회기준일 화면에 누적 → 정상 경로는 Chrome 미기동).
+#            응답 이상일 때만 Selenium 3회 → 조건부 mibank(**4차**, 평일 10:00~23:59).
 #   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
 #   - BREAK1: shinhan(18초, ~02:59:18), ibk(34초, ~05:59:34), nh(54초) 유지 (sc는 19:00 진입과 함께 제외)
 #   - BREAK2: nh(54초) + task_ibk_terminal(06:00:34·06:01:34, 화~토). shinhan/woori/sc 제외
@@ -737,8 +738,8 @@ def switch_jobs(mode: str):
         # ═════════════════════════════════════════════════════════════
         # 제외 크롤러: sc (18시 이후 포착 변경 0건, 여유 두고 18:59:58까지만 수집)
         # 유지 크롤러: investing, dxy, kb, hana, woori, bs, citi, ibk, nh, shinhan (10개)
-        # ibk는 자정~당일 고시 전 구간에서 requests가 빈 표로 실패해 Selenium 경로를 탄다
-        # (requests 자체는 항상 시도된다 — 'Request 불가'가 아니다)
+        # ibk는 자정~08:00 구간에서 당일 GET을 생략하고 전 조회기준일을 공식 날짜 지정
+        # POST로 조회한다 (정상 경로는 Chrome 미기동). Selenium은 응답 이상 시 안전망.
 
         # A Group: investing
         if crawler_manager.is_enabled('investing'):

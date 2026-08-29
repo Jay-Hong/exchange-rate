@@ -1,9 +1,10 @@
 # 크롤러 특수 로직 가이드
 
-> 📅 **마지막 업데이트**: 2026-04-27
+> 📅 **마지막 업데이트**: 2026-08-29
 > 📚 **관련 문서**: [CLAUDE.md](CLAUDE.md), [DECISIONS.md](DECISIONS.md)
 > 📌 **범위**: 이 문서는 환율 크롤러(`app/crawlers/`)만 다룹니다. 뉴스 수집(`app/news/`)은 코드 + [CLAUDE.md](CLAUDE.md) Phase 1B 섹션 참고.
 > 🆕 **최근 변경**:
+> - IBK 공식 날짜 지정 Request fast path: `inDate` POST + 응답 계약 검증, Selenium은 장애 안전망으로 격하
 > - MIBANK URL/DOM 변경 대응: `exchange.mibank.me/bank?bank_cd=` 형식 + `table.main_table.content` 파싱 ([MAINTENANCE_2026-04-27.md](MAINTENANCE_2026-04-27.md))
 > - DXY 수집 분리: 현물(`instrument='dxy'`) `dxy_spot.py` 독립 크롤러 (`/indices/usdollar` `__NEXT_DATA__` → CSS → CNBC → Yahoo) + 선물(`instrument='dxy_futures'`) `investing.py` 동반 추출 (`#sb_last_8827` → `/currencies/us-dollar-index`). `dxy.py`는 양쪽 외부 폴백 유틸 모듈
 > - Investing 크롤러 Cloudflare 403 차단 대응: curl_cffi TLS 지문 위장 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))
@@ -28,7 +29,7 @@
 ### 왜 통합하지 않았나?
 
 각 크롤러마다 **고유한 특수 로직**이 있어 통합 시 복잡도가 급증합니다:
-- NH: 클릭 이동, IBK: 날짜 input 입력
+- NH: 클릭 이동, IBK: 공식 날짜 지정 POST + Selenium 날짜 input fallback
 - Woori/SC: AJAX 응답 감지, Hana: iframe 전환
 - → **독립성 유지 + 공통 부분만 중앙화** 전략 채택
 
@@ -45,7 +46,7 @@
 | **hana** | 평일 08:30 | 익일 06:00 | ✅ | ⚠️ 등록 유지(고시 window 밖) | ✅ (주말 중 가끔 변동) |
 | **shinhan** | 평일 08:19 | 익일 02:45 | ✅ (~02:59:18) | ❌ | ✅ (주말 중 가끔 변동) |
 | **woori** | 평일 08:30 | 익일 05:00 | ✅ (~05:04:53) | ❌ | ❌ |
-| **ibk** | 평일 08:30 | 익일 06:00 | ✅ (~05:59:34) | ⚠️ terminal capture만 (06:00:34·06:01:34, 화~토) | ❌ |
+| **ibk** | 평일 약 08:26~08:30 | 익일 06:00 | ✅ (~05:59:34) | ⚠️ terminal capture만 (06:00:34·06:01:34, 화~토) | ❌ |
 | **nh** | 평일 08:40 | 당일 24:00 | ✅ | ⚠️ 등록 유지(고시 window 밖) | ✅ (가끔 고시) |
 | **sc** | 평일 09:00 | 당일 ~17:50 (관측) | ❌ (19:00 진입과 함께 종료) | ❌ | ❌ |
 | **bs** | 평일 08:10 | 당일 24:00 | ✅ | ⚠️ 등록 유지(고시 window 밖) | ✅ (일요일 가끔) |
@@ -56,7 +57,15 @@
 >   마지막 고시한 날도 관측됨 → BREAK1(~06:00)의 마지막 정규 실행 05:59:34로는 놓치므로
 >   BREAK2에 `task_ibk_terminal`(06:00:34·06:01:34, `day_of_week='tue-sat'`) 추가 —
 >   **추가 수집 시도 2회이지 포착 보장은 아니다.**
->   화~토인 이유: IBK 세션이 평일 08:30 → 익일 06:00이라 **화~토 아침에만** 종료된다.
+>   화~토인 이유: IBK 평일 세션이 익일 06:00에 **화~토 아침에만** 종료된다.
+> - **IBK 05시 이후 실제 변동 재확인(2026-08-29)**: 공식 일자별 화면의 2026-08-18~27 표본에서
+>   야간 꼬리 고시가 있었던 8개 세션 모두 05시 이후 USD 매매기준율이 실제로 1회 이상 변했다
+>   (총 39회, 마지막 실제 변경은 세션별 05:06:55~05:58:41). 따라서 수집 주기는 1분을 유지한다.
+>   토·일 조회기준일과 8/17 대체공휴일은 공식 무고시였지만, 금요일 조회기준일의 고시는 토요일
+>   새벽까지 이어질 수 있으므로 토요일 이른 시각 수집과 terminal capture는 유지한다.
+> - **IBK 주간 시작 경계 보강(2026-08-29)**: 같은 공식 상세 화면에서 1회차가 08:26:29에도
+>   시작한 세션을 확인했다. 따라서 코드의 조회기준일 전환은 08:30이 아니라 안전한 공백 경계
+>   **08:00**으로 둔다. 08:00~첫 고시 전에는 당일 무고시를 확인한 뒤 전 조회기준일을 보존한다.
 > - **신한 02:45**: 사용자 확인. BREAK1 cron을 `hour='19-23,0-2'`로 제한 → 02:59:18이 마지막(현행 동작 고정).
 > - **SC ~17:50**: 운영 DB 실측(최근 30일 22영업일, usd/jpy/eur 전 통화). 최종 변경 **17:49:00**,
 >   18:00 이후 변경행 **0건**(18:00~20:59에 3,960회 폴링). 단 SC는 mibank 우선 경로라 이 수치는
@@ -119,25 +128,33 @@
 | **신한** | `app/crawlers/shinhan.py` | Request(mibank) → Selenium subprocess | 조건 없음 (항상 시도) |
 | **NH** | `app/crawlers/nh.py` | Request(mibank) → Selenium subprocess | 조건 없음 (항상 시도) |
 | **SC** | `app/crawlers/sc.py` | Request(mibank) → Selenium subprocess | 조건 없음 (항상 시도) |
-| **IBK** | `app/crawlers/ibk.py` | 공식 Request → Selenium subprocess → mibank(조건부) | 평일 10:00~23:59만 허용 |
+| **IBK** | `app/crawlers/ibk.py` | 08:00 이후 공식 당일 GET / 이전은 날짜 POST 직행 → Selenium subprocess(3회) → mibank(조건부) | 평일 10:00~23:59만 허용 |
 
 **공통점**:
-- **Request(mibank) 우선**: 2025-11-16 변경, 시스템 부하 대폭 감소
+- **Request 우선**: 신한/NH/SC는 MIBANK, IBK는 시간대에 맞는 공식 GET/날짜 POST를 우선
 - **Selenium 폴백**: Request 실패 시 자동 전환
 - **AsyncIO Queue**: 순차 실행 (메모리 제어)
 - **subprocess 격리**: 모든 Selenium 실행이 subprocess로 격리
-- **영업시간 외 날짜 변경**: IBK, SC, Woori는 날짜 변경 로직 필요
+- **영업시간 외 날짜 변경**: IBK 정상 경로는 공식 POST, Selenium 날짜 input은 fallback. SC/Woori는 기존 날짜 변경 로직 사용
 - **MAX_DAYS_LOOKBACK**: 최대 10일 과거 조회 (constants.py 중앙 관리)
 
 **mibank 조건부 사용 (IBK):**
-- `is_mibank_rate_reliable()`는 **3차 폴백(mibank)에만** 걸린 시간 게이트다
+- `is_mibank_rate_reliable()`는 **4차 폴백(mibank)에만** 걸린 시간 게이트다
   (`weekday in 0..4 and hour > 9` → 실제 허용 구간은 **평일 10:00~23:59**).
-- ⚠️ **1차 공식 requests에는 시간 게이트가 없다.** `try_crawl_with_requests()`는 야간에도
-  항상 먼저 시도되며, 당일 고시 전에는 표가 비어 있어 `False`를 반환할 뿐이다
-  (구 서술 "Selenium만 사용 / Request 불가"는 부정확했다 — 2026-08-28 정정).
-- **결과적 경로**: 자정~고시 전에는 requests가 빈 표로 실패 → Selenium이 날짜를 되감아 조회.
-  운영 실측(2026-08-28 야간) 00:05~02:59 175회가 사실상 전량 **≈10.2초**(주간 ≈3.2초, 대조군
-  nh/shinhan은 밤새 ≈2.5초로 평탄) → 그 구간은 매 실행 Chrome이 뜬다.
+- 공식 Request에는 시간 게이트가 없다. 08:00 이후는 당일 GET을 먼저 시도하고,
+  08:00 전에는 빈 당일 GET을 생략해 `try_crawl_with_dated_requests()`가 전 조회기준일부터
+  확인한다. 주말 조회기준일은 건너뛰고, 요청 날짜 readback이
+  일치한 정확한 `ECBKFEX01589` 무고시 응답에서만 이전 평일 후보로 진행한다. timeout/WAF/DOM
+  계약 이상은 과거값으로 오인하지 않고 즉시 Selenium 안전망으로 넘긴다.
+- 날짜 응답은 표 caption/header, USD·JPY·EUR 완전성/범위, 고시완료시각을 검증한다. 완료시각은
+  서버·은행 시계 차이를 고려해 조회시각보다 최대 120초 앞선 값만 허용한다. 무고시 뒤 찾은
+  과거 후보는 공식 완료시각이 DB 저장시각보다 뒤일 때 놓친 최종 고시 catch-up으로 저장한다.
+  통화별 DB 저장시각이 공식 완료시각보다 120초 넘게 최근이고 값도 다르면 그 통화만 보존해
+  회귀를 막고, 누락되거나 안전한 통화는 계속 채운다. 모든 후보가 공식 무고시일 때도 DB의
+  3개 통화 값·시각이 모두 있을 때만 보존하고, 빈/부분 DB는 bootstrap 안전망으로 fallback한다.
+- **변경 전 운영 기준선**: 2026-08-28 야간 00:05~02:59의 175회가 사실상 전량 ≈10.2초였고
+  매 실행 Chrome이 떴다(주간 ≈3.2초). 정상 날짜 POST 성공 시 브라우저 함수는 호출되지 않지만
+  기존 subprocess queue와 800M 상한은 불변이며, 실제 메모리·큐 개선은 배포 후 측정한다.
 - **BREAK1 (19:00~06:00)**: 매분 `:34` 실행, 마지막 05:59:34.
 - **BREAK2 (06:00~08:00)**: 정규 job 없음. `task_ibk_terminal`만 06:00:34·06:01:34(화~토) 실행.
 - **OUT(주말)**: 비활성.
@@ -404,33 +421,42 @@
 #### IBK 기업은행 (`app/crawlers/ibk.py`) ⭐⭐⭐
 
 **핵심 로직:**
-- **자정 전환기 스킵**: 00:00~00:05에 크롤링 완전 스킵 (2025-12-10 추가)
-- **3단계 폴백**: requests → Selenium (3회 재시도) → MIBANK (조건부)
+- **자정 전환기 Selenium 억제**: 00:00~00:05에도 공식 날짜 POST는 실행하고, 실패한 경우에만 UI Selenium을 억제
+- **조건부 폴백**: 08:00 이후 당일 GET → 날짜 POST / 08:00 전 날짜 POST 직행 → Selenium (3회) → MIBANK(조건부)
+- **공식 POST 계약**: `pageId=SM03020100`, `inDate=YYYY.MM.DD`, `ecrtInqyDscd=01`.
+  `#inDate` readback, `일반고시환율 표` caption, `매매기준율` header, USD/JPY/EUR 완전성·범위,
+  고시완료시각과 미래시각 여부를 검증한다. 날짜 lookback은 새 후보 요청 시작을
+  12초 이내로 제한하는 soft budget을 쓴다(`requests` connect/read inactivity timeout이므로
+  이미 시작한 단일 요청의 엄밀한 wall-clock hard deadline은 아니다).
 - **Selenium 재시도**: 날짜 변경 실패 시 최대 3회 재시도 (2초 대기)
 - **날짜 input 직접 입력**: `send_keys()` + `Keys.ENTER`
 - **MIBANK 조건부 실행**: 평일 10:00~23:59만 허용 (00:00~09:59/주말 차단)
 
-**자정 전환기 스킵 (00:00~00:05):**
+**자정 전환기 Selenium 억제 (00:00~00:05):**
 > 🚨 **문제**: 자정 직후 Selenium 날짜 변경 시 UI 불안정
 > - 캘린더가 랜덤한 날짜까지 이동하여 잘못된 환율 수집
 > - 45초 타임아웃 발생
 
-> ✅ **해결**: 가장 불안정한 5분간 크롤링 스킵
-> - 이 시간대 환율 변경 가능성 ≈ 0%
-> - 마지막 정상 환율 유지 (클라이언트가 재사용)
-> - 00:05부터 정상 크롤링 재개
+> ✅ **해결**: 공식 날짜 지정 POST는 계속 실행한다. 성공하면 즉시 저장하고,
+> 실패한 경우에만 00:00~00:04:59 Selenium UI를 띄우지 않고 마지막 정상값을 유지한다.
+> 00:05부터는 Request 장애 시 기존 Selenium fallback을 허용한다.
 
 **주의사항:**
-- 평일 영업시간: requests (빠름, 1차 시도)
-- 자정/주말: Selenium (날짜 변경, 2차 시도)
-- **00:00~00:05**: 크롤링 스킵 (자정 전환기 불안정)
-- Selenium 3회 재시도로 성공률 99.9% (일시적 네트워크 오류 극복)
+- 08:00 이후: 조회 당일 공식 GET, 실패 시 같은 날짜 POST부터 재검증. 첫 고시 전 공식 무고시면
+  전 조회기준일을 확인해 기존값을 유지한다
+- 08:00 이전: 빈 당일 GET 생략 후 전 조회기준일 공식 POST. 주말 조회기준일은 skip하지만 금요일 세션의 토요일
+  새벽 고시는 금요일 날짜 화면에서 읽으므로 손실되지 않는다
+- 공식 무고시 코드에서만 이전 평일을 조회하며, 응답 이상은 즉시 Selenium으로 전환
+- **00:00~00:05**: 날짜 POST는 실행, 실패 시 Selenium만 억제
+- Selenium 3회 재시도는 공식 Request 네트워크/응답 계약 장애의 안전망
 - MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
 - MAX_DAYS_LOOKBACK 10일 (공휴일 연휴 대응, constants.py 중앙 관리)
 
-**상세 코드:** `app/crawlers/ibk.py:51-76` (자정 전환기 스킵), `ibk.py:78-140` (폴백 로직)
+**상세 코드:** `crawl_and_save_ibk_bank_exchange_rates`, `try_crawl_with_dated_requests`,
+`_fetch_ibk_rates_for_date`, `crawl_and_save_ibk_routine_selenium`
 **최근 리팩토링:**
-- 2025-12-10: 자정 전환기 스킵 추가 (00:00~00:05)
+- 2026-08-29: 공식 날짜 지정 POST fast path 추가. 자정 전환기 완전 스킵을 Request 유지 + Selenium 억제로 축소
+- 2025-12-10: 자정 전환기 완전 스킵 추가 (2026-08-29에 위 정책으로 대체)
 - 2025-10-26: Selenium 3회 재시도 추가, MIBANK 조건부 실행
 
 ---
@@ -573,7 +599,7 @@ def evaluate_rate_deviation(rates: dict, last_rates_info: dict, now) -> dict:
   - `True`: 평일 10:00 ~ 23:59 (MIBANK 신뢰 가능)
   - `False`: 평일 00:00 ~ 09:59, 주말 (MIBANK 부정확)
 - **사용 이유**: MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확한 데이터
-- **한계**: 일반 공휴일은 고려 못함 (Selenium 재시도 로직으로 보완)
+- **한계**: 일반 공휴일은 고려 못함. 단 IBK는 MIBANK 전에 공식 무고시 코드 기반 날짜 lookback으로 보완
 - **사용 크롤러**: BS, CITI, IBK, WOORI (4개)
   - 이유: 자정 이후/주말에 MIBANK 환율이 실제 은행 환율과 다른 경우가 많음
 - **미사용 크롤러**: KB, HANA, SC, SHINHAN, NH (조건 없이 항상 mibank 시도)
@@ -635,7 +661,7 @@ def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
 | **신한** | ChromeDriver 버전 호환성 | 분기 1회 |
 | **하나** | iframe 구조 변경 | 월 1회 |
 | **NH** | 메인 페이지 링크 변경 | 월 1회 |
-| **IBK** | 날짜 input 형식 변경 | 월 1회 |
+| **IBK** | 공식 POST 파라미터/pageId, `#inDate` readback, 표 caption/`매매기준율` header, `ECBKFEX01589`, 고시완료시각. Selenium 날짜 input은 fallback으로 별도 확인 | 월 1회 |
 | **Woori** | select 박스 value 형식 | 월 1회 |
 | **SC** | Alert 메시지 내용 변경 | 월 1회 |
 | **DXY 현물** (`dxy_spot.py`) | `/indices/usdollar` `__NEXT_DATA__` 스키마 변경, 같은 페이지 CSS selector 변경, CNBC quote endpoint 응답 형식, Yahoo `DX-Y.NYB` API 변경 | 월 1회 |
@@ -664,7 +690,10 @@ def _crawl_mibank_sc(db: Session) -> tuple[dict, dict]:
 - [ ] 날짜 변경 방식 확인 (input, select, datepicker 등)
 - [ ] AJAX 사용 여부 확인 (페이지 갱신 없이 데이터 로드)
 
-### 2️⃣ 그룹 분류
+### 2️⃣ 구현 난이도 그룹 분류
+
+> 아래 분류는 새 크롤러를 만들 때의 **구현 난이도** 기준이다. 위 운영 아키텍처의
+> Request/Selenium 실행 경로 Group A/B/C와 이름만 같고, 런타임 로스터 분류가 아니다.
 
 | 그룹 | 조건 | 템플릿 |
 |------|------|--------|
