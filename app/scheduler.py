@@ -151,11 +151,13 @@ queue_status_cache = {
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
-#     - IN/BREAK1/BREAK2: 20초마다 (서로 10초 엇갈림)
+#     - IN: 10초마다 (kb :09/:19/:29/:39/:49/:59,
+#                     hana :02/:12/:22/:32/:42/:52)
+#     - BREAK1/BREAK2: 기존 20초마다 유지 (kb :15/:35/:55, hana :05/:25/:45)
 #     - OUT: 1분마다 (kb :28, hana :38) — 배포 2A
 #   - woori, bs, citi: 일반, 빈도 낮음
 #     - IN: woori 30초마다(:14/:44), bs·citi 60초마다(bs :33 / citi :13)
-#       * woori만 단계적으로 상향. KB·hana 주기와 다른 모드는 이 단계에서 불변
+#       * 배포 2 본단계는 세 은행을 IN에서만 함께 상향. 다른 모드는 불변
 #     - BREAK1: woori(53초), bs(33초), citi(13초) 유지
 #     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 05:05 수집 종료)
 #     - OUT: bs도 1분마다 (:51) — 배포 2A
@@ -664,11 +666,16 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (10초 엇갈림)
+        # B Group: kb, hana — 배포 2 본단계에서 IN만 10초로 상향.
+        # KB는 짧은 순수 Request라 Selenium 실행 꼬리와 겹치는 residue 9를 맡고,
+        # Selenium 폴백 가능성이 있는 hana는 residue 2로 분리한다.
+        # 매초 websocket broadcast를 제외한 고정 작업과 같은 시작초는
+        # KB/free snapshot 시간당 1회, hana/graph precompute 시간당 6회다.
+        # 부동 IntervalTrigger는 smoke에서 별도 관측한다.
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-                CronTrigger(second='15,35,55', timezone=KST),
+                CronTrigger(second='9,19,29,39,49,59', timezone=KST),
                 id='task_kb',
                 max_instances=1,
                 misfire_grace_time=10
@@ -679,7 +686,7 @@ def switch_jobs(mode: str):
         if crawler_manager.is_enabled('hana'):
             scheduler.add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-                CronTrigger(second='5,25,45', timezone=KST),
+                CronTrigger(second='2,12,22,32,42,52', timezone=KST),
                 id='task_hana',
                 max_instances=1,
                 misfire_grace_time=10
@@ -688,7 +695,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi
-        # woori는 배포 2 본단계 1에서 IN만 30초(:14/:44)로 상향.
+        # woori는 배포 2 본단계에서 IN만 30초(:14/:44)로 상향.
         # 열거된 고정 IN job과 동일 시작초는 없고, 재기동 위상에 묶인 IntervalTrigger는
         # 고정 레인으로 회피할 수 없으므로 scheduler_event와 smoke에서 별도 관측한다.
         if crawler_manager.is_enabled('woori'):
@@ -1718,9 +1725,11 @@ def start_scheduler():
     scheduler.add_job(
         precompute_free_snapshots,
         # minute/second를 free_snapshot 공유 상수로 — refresh_not_before 계산이 이 타이밍을 기준(ETC, codex).
-        # second=19: 정각 :30:00대의 알려진 동시-시작(cleanup_old_bank_data 03:30:01 / kb crawler
-        # second 15,35,55 / KB news 5분마다 :15 / OUT DXY :21)과 겹치지 않는 초 선택(codex 2026-07-18 —
-        # 동시 시작 감소 목적, cleanup 완료 보장은 아님). as_of는 basis_as_of(HH:30)라 발화 초와 무관.
+        # second=19: 정각 :30:00대의 유지보수/뉴스 job과 분리된 기존 초를 유지한다.
+        # 배포 2 IN canary의 KB(:09/:19/.../:59)와는 매시 30분에 1회 같은 초에 시작하므로,
+        # KB 응답시간과 scheduler_event를 smoke에서 관측한다. OUT DXY(:21)와는 겹치지 않는다.
+        # 동시 시작 감소 목적이며 다른 job 완료를 보장하지 않는다. as_of는
+        # basis_as_of(HH:30)라 발화 초와 무관하다.
         CronTrigger(minute=FREE_SNAPSHOT_BASIS_MINUTE, second=FREE_SNAPSHOT_PRECOMPUTE_SECOND, timezone=KST),
         id="free_snapshot_precompute",
         max_instances=1,

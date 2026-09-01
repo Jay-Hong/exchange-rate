@@ -85,7 +85,7 @@ class TestBankCollectionWindows(_SwitchJobsCase):
         self.assertEqual(f"{fires[-1]:%H:%M:%S}", "02:59:18")
 
     def test_woori_in_fires_every_30_seconds_at_14_and_44(self):
-        """배포 2 본단계 1은 IN의 우리은행 주기만 바꾼다."""
+        """배포 2 본단계의 우리은행 IN 30초 레인을 잠근다."""
         jobs = self._jobs("IN")
         job = jobs["task_woori"]
         self.assertEqual(job.max_instances, 1)
@@ -99,6 +99,72 @@ class TestBankCollectionWindows(_SwitchJobsCase):
         self.assertEqual(
             [f"{fire:%H:%M:%S}" for fire in fires],
             ["10:00:14", "10:00:44", "10:01:14", "10:01:44"],
+        )
+
+    def test_kb_hana_in_fire_every_10_seconds_and_other_modes_are_unchanged(self):
+        """KB·하나 10초 상향은 IN에만 적용한다."""
+        cases = {
+            "IN": {
+                "start": KST.localize(datetime(2026, 9, 1, 10, 0, 0)),
+                "kb": [9, 19, 29, 39, 49, 59],
+                "hana": [2, 12, 22, 32, 42, 52],
+            },
+            "BREAK1": {
+                "start": KST.localize(datetime(2026, 9, 1, 20, 0, 0)),
+                "kb": [15, 35, 55],
+                "hana": [5, 25, 45],
+            },
+            "BREAK2": {
+                "start": KST.localize(datetime(2026, 9, 2, 7, 0, 0)),
+                "kb": [15, 35, 55],
+                "hana": [5, 25, 45],
+            },
+            "OUT": {
+                "start": KST.localize(datetime(2026, 9, 5, 10, 0, 0)),
+                "kb": [28],
+                "hana": [38],
+            },
+        }
+        for mode, expected in cases.items():
+            jobs = self._jobs(mode)
+            end = expected["start"] + timedelta(seconds=59)
+            for bank in ("kb", "hana"):
+                job = jobs[f"task_{bank}"]
+                fires = _fires(job, expected["start"], end)
+                self.assertEqual(
+                    [fire.second for fire in fires],
+                    expected[bank],
+                    f"{mode}/{bank}: 모드별 주기가 달라졌다",
+                )
+                self.assertEqual(job.max_instances, 1)
+                self.assertEqual(job.misfire_grace_time, 10 if mode != "OUT" else 30)
+
+    def test_in_canary_lanes_do_not_share_crawler_start_seconds(self):
+        """세 대상과 나머지 IN 크롤러는 같은 시작초를 쓰지 않는다."""
+        jobs = self._jobs("IN")
+        start = KST.localize(datetime(2026, 9, 1, 10, 0, 0))
+        end = start + timedelta(seconds=59)
+        seconds_by_job = {
+            job_id: {fire.second for fire in _fires(job, start, end)}
+            for job_id, job in jobs.items()
+        }
+        target_ids = {"task_kb", "task_hana", "task_woori"}
+        target_seconds = set()
+        for job_id in target_ids:
+            self.assertEqual(
+                target_seconds & seconds_by_job[job_id],
+                set(),
+                f"{job_id}: 대상 은행끼리 같은 시작초를 쓰면 안 된다",
+            )
+            target_seconds |= seconds_by_job[job_id]
+
+        other_seconds = set().union(
+            *(seconds for job_id, seconds in seconds_by_job.items() if job_id not in target_ids)
+        )
+        self.assertEqual(
+            target_seconds & other_seconds,
+            set(),
+            "IN의 다른 크롤러와 같은 시작초를 쓰면 안 된다",
         )
 
     def test_woori_is_one_job_and_runs_through_050453(self):

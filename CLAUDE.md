@@ -434,16 +434,17 @@ scheduler.add_job(
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
 - **실행 방식**: kb/bs/citi는 순수 Request, hana/woori는 Request → Selenium 하이브리드
-- **IN**: 20-60초마다 (고정 초 레인으로 엇갈림)
-  - kb: `cron(second='15,35,55')`
-  - hana: `cron(second='5,25,45')`
-  - woori: `cron(minute='*', second='14,44')` (**IN만 30초**, 배포 2 본단계 1)
+- **IN**: 10-60초마다 (고정 초 레인으로 엇갈림)
+  - kb: `cron(second='9,19,29,39,49,59')` (**IN만 10초**)
+  - hana: `cron(second='2,12,22,32,42,52')` (**IN만 10초**)
+  - woori: `cron(minute='*', second='14,44')` (**IN만 30초**)
   - bs: `cron(minute='*', second='33')`
   - citi: `cron(minute='*', second='13')`
-- **BREAK1**: kb, hana, bs, citi 유지 + woori는 **05:04:53까지**
+- **BREAK1**: kb(`:15/:35/:55`)·hana(`:05/:25/:45`)의 기존 20초 주기와
+  bs·citi 유지 + woori는 **05:04:53까지**
   (`OrTrigger([hour='19-23,0-4', hour='5' minute='0-4'])` **단일 job `task_woori`** —
   별 job으로 나누면 `max_instances=1`이 배타가 아니라 지연 시 중복 실행 위험)
-- **BREAK2**: kb, hana, bs, citi 유지 (woori는 05:05 종료)
+- **BREAK2**: kb·hana 기존 20초 주기와 bs·citi 유지 (woori는 05:05 종료)
 - **OUT**: kb(`:28`)·hana(`:38`)·bs(`:51`) 모두 **1분마다** (배포 2A)
 
 **Tier C (shinhan, ibk, nh, sc):** subprocess queue, Request-first / Selenium fallback
@@ -483,37 +484,43 @@ scheduler.add_job(
 
 ```
 01초: dxy_spot (DXY 현물)
-05초: hana
+02초: hana
 07초: investing (+ DXY 선물 동반 추출)
+09초: kb
 11초: dxy_spot (DXY 현물)
+12초: hana
 13초: citi
 14초: woori
-15초: kb
 17초: investing (+ DXY 선물 동반 추출)
 18초: shinhan (Selenium Queue)
+19초: kb
 21초: dxy_spot (DXY 현물)
-25초: hana
+22초: hana
 27초: investing (+ DXY 선물 동반 추출)
+29초: kb
 31초: dxy_spot (DXY 현물)
+32초: hana
 33초: bs
 34초: ibk (Selenium Queue)
-35초: kb
 37초: investing (+ DXY 선물 동반 추출)
+39초: kb
 41초: dxy_spot (DXY 현물)
+42초: hana
 44초: woori
-45초: hana
 47초: investing (+ DXY 선물 동반 추출)
+49초: kb
 51초: dxy_spot (DXY 현물)
+52초: hana
 54초: nh (Selenium Queue)
-55초: kb
 57초: investing (+ DXY 선물 동반 추출)
 58초: sc (Selenium Queue)
+59초: kb
 ```
 
 **특징:**
 - Request/Selenium 크롤러가 서로 다른 초 레인을 사용해 동시 시작을 줄임
 - 저장 완료 뒤 다음 매초 broadcast에서 최신 Redis 값을 반영
-- woori는 IN에서 :14/:44 두 번 실행한다. BREAK1은 기존 :53과 05:04:53 종료를 유지한다
+- kb·hana는 IN에서 10초, woori는 30초로 상향한다. BREAK1/BREAK2/OUT은 기존 주기를 유지한다
 - Selenium 크롤러는 Queue 순차 처리 (Request 먼저 시도)
 - 최대 동시 실행: 1-2개 (Request 기반 크롤러만)
 
