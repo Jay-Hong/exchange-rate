@@ -1534,6 +1534,7 @@ def get_crawler_stats():
                 "bank": "investing",
                 "success_count": 150,
                 "fail_count": 2,
+                "consecutive_failures": 0,
                 "total_duration": 245.3,
                 "avg_duration": 1.6,
                 "success_rate": 98.7,

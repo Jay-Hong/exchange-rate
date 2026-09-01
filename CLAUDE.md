@@ -581,7 +581,9 @@ scheduler.add_job(
 - `GET /admin/api/logs` - 로그 조회 (파라미터: `log_type`, `hours`, `limit`, `bank`)
 - `GET /admin/api/crawler-config` - 크롤러 활성화 설정 조회
 - `POST /admin/api/crawler-config` - 크롤러 활성화/비활성화 토글
-- `GET /admin/api/crawler/stats` - 크롤러별 통계 (성공률, 평균 실행시간)
+- `GET /admin/api/crawler/stats` - 크롤러별 통계 (성공률, 평균 실행시간,
+  `consecutive_failures`). KB·Hana·Woori는 모든 폴백 실패 또는 MIBANK
+  `hard_fail` 저장 보류를 실패로 집계하며, 정상 unchanged는 성공이다.
 - `GET /admin/api/queue-status` - Selenium Queue 상태 조회
 - `GET /admin/api/redis-status` - Redis 메모리 및 Circuit 상태
 - `GET /admin/api/monitor/current` - 현재 시스템 리소스 (메모리, CPU, Chrome)

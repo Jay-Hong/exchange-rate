@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta, timezone as dt_timezone
 from typing import Any, Callable, Dict, Optional
 
 # 서드파티 라이브러리
+from apscheduler.events import EVENT_JOB_MAX_INSTANCES, EVENT_JOB_MISSED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.combining import OrTrigger
@@ -39,6 +40,47 @@ logger = logging.getLogger("exchange_rate.scheduler")
 # 한국 시간대 스케줄러 인스턴스 생성
 KST = timezone('Asia/Seoul')
 scheduler = AsyncIOScheduler(timezone=KST)
+
+
+def _scheduler_job_skip_listener(event) -> None:
+    """APScheduler가 wrapper 실행 전에 버린 작업을 구조화 로그로 남긴다.
+
+    crawler_stats는 실제로 wrapper가 호출된 작업만 볼 수 있으므로 max_instances와
+    misfire는 별도 이벤트 표면이 필요하다. 운영 smoke는 메시지 문구가 아니라
+    ``scheduler_event`` 필드의 델타를 집계한다.
+    """
+    if event.code == EVENT_JOB_MAX_INSTANCES:
+        scheduled_run_times = [
+            value.isoformat() for value in getattr(event, "scheduled_run_times", ())
+        ]
+        logger.warning(
+            "⏭️ APScheduler job skipped: max_instances",
+            extra={
+                "scheduler_event": "max_instances",
+                "job_id": event.job_id,
+                "scheduled_run_times": scheduled_run_times,
+                "occurrence_count": len(scheduled_run_times),
+            },
+        )
+        return
+
+    if event.code == EVENT_JOB_MISSED:
+        scheduled_run_time = getattr(event, "scheduled_run_time", None)
+        logger.warning(
+            "⏰ APScheduler job missed: misfire",
+            extra={
+                "scheduler_event": "misfire",
+                "job_id": event.job_id,
+                "scheduled_run_time": (
+                    scheduled_run_time.isoformat() if scheduled_run_time else None
+                ),
+                "occurrence_count": 1,
+            },
+        )
+
+
+SCHEDULER_SKIP_EVENT_MASK = EVENT_JOB_MAX_INSTANCES | EVENT_JOB_MISSED
+scheduler.add_listener(_scheduler_job_skip_listener, SCHEDULER_SKIP_EVENT_MASK)
 
 BANK_RETENTION_DAYS = 30
 SOURCE_RATE_RETENTION_DAYS = 30

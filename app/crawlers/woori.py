@@ -106,23 +106,26 @@ def crawl_and_save_woori_bank_exchange_rates():
                         extra={"bank": BANK_NAME},
                     )
                     rates, eval_result = _crawl_mibank_woori(db)
-
-                    if eval_result["hard_fail"]:
-                        logger.error(
-                            "mibank hard_fail → 저장 보류",
-                            extra={"bank": BANK_NAME, "details": eval_result["details"]},
-                        )
-                    else:
-                        if eval_result["soft_fail"]:
-                            logger.warning(
-                                "mibank soft_fail → 마지막 폴백이므로 저장",
-                                extra={"bank": BANK_NAME, "details": eval_result["details"]},
-                            )
-                        crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
                 except Exception as e3:
                     logger.exception("MIBANK_WOORI_URL 크롤링 실패", extra={"url": MIBANK_WOORI_URL})
                     error_msg = f"모든 URL 실패: {str(e3)[:100]}"
                     logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+                    raise RuntimeError(error_msg) from e3
+
+                if eval_result["hard_fail"]:
+                    error_msg = "mibank hard_fail → 저장 보류"
+                    logger.error(
+                        error_msg,
+                        extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                    )
+                    raise RuntimeError(error_msg)
+
+                if eval_result["soft_fail"]:
+                    logger.warning(
+                        "mibank soft_fail → 마지막 폴백이므로 저장",
+                        extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                    )
+                crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
             else:
                 logger.warning(
                     f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
@@ -131,7 +134,9 @@ def crawl_and_save_woori_bank_exchange_rates():
                         "action": "DB 마지막 환율 데이터 유지 (클라이언트가 재사용)"
                     }
                 )
-                # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 WOORI 환율 표시
+                # 공식 경로와 Selenium이 모두 실패한 결과다. 마지막 값을 보존하더라도
+                # scheduler 통계에는 성공으로 기록하면 안 된다.
+                raise RuntimeError("모든 공식 경로 실패, 신뢰 불가 시간대라 MIBANK 건너뜀")
     finally:
         db.close()
 

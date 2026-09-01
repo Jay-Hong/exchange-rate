@@ -77,23 +77,26 @@ def crawl_and_save_kb_bank_exchange_rates():
             try:
                 logger.info("MIBANK_KB_URL 시도", extra={"bank": BANK_NAME})
                 rates, eval_result = _crawl_mibank_kb(db)
-
-                if eval_result["hard_fail"]:
-                    logger.error(
-                        "mibank hard_fail → 저장 보류",
-                        extra={"bank": BANK_NAME, "details": eval_result["details"]},
-                    )
-                else:
-                    if eval_result["soft_fail"]:
-                        logger.warning(
-                            "mibank soft_fail → 마지막 폴백이므로 저장",
-                            extra={"bank": BANK_NAME, "details": eval_result["details"]},
-                        )
-                    crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
             except Exception as e3:
                 logger.exception("MIBANK_KB_URL 크롤링 실패", extra={"url": MIBANK_KB_URL})
                 error_msg = f"모든 URL 실패: {str(e3)[:100]}"
                 logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+                raise RuntimeError(error_msg) from e3
+
+            if eval_result["hard_fail"]:
+                error_msg = "mibank hard_fail → 저장 보류"
+                logger.error(
+                    error_msg,
+                    extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                )
+                raise RuntimeError(error_msg)
+
+            if eval_result["soft_fail"]:
+                logger.warning(
+                    "mibank soft_fail → 마지막 폴백이므로 저장",
+                    extra={"bank": BANK_NAME, "details": eval_result["details"]},
+                )
+            crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
     finally:
         db.close()
 

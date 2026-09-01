@@ -23,6 +23,7 @@ class CrawlerStat:
     bank: str
     success_count: int = 0
     fail_count: int = 0
+    consecutive_failures: int = 0
     total_duration: float = 0.0  # 초
     last_success_at: Optional[str] = None  # ISO 8601 format
     last_fail_at: Optional[str] = None
@@ -72,6 +73,7 @@ class CrawlerStatsCollector:
 
             stat = self.stats[bank]
             stat.success_count += 1
+            stat.consecutive_failures = 0
             stat.total_duration += duration
             stat.last_duration = round(duration, 2)
             stat.last_success_at = datetime.now().isoformat()
@@ -89,6 +91,7 @@ class CrawlerStatsCollector:
 
             stat = self.stats[bank]
             stat.fail_count += 1
+            stat.consecutive_failures += 1
             stat.last_fail_at = datetime.now().isoformat()
 
     def get_stats(self) -> dict:
