@@ -77,8 +77,8 @@
 - **C2 [코드]** `app/topic_initial_snapshot.py:354` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3206` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3248` `verify_firebase_token(request)` → `app/main.py:3251`
+- **C3 [코드]** `exchange-rate/app/main.py:3207` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3249` `verify_firebase_token(request)` → `app/main.py:3252`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:78-85` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -136,7 +136,7 @@
   `app/topic_initial_snapshot.py:733-817`). 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서
   독립된 shared 예산으로 `asyncio.to_thread(..., _run_snapshot_worker, topic, request_budget)`를
   감싼다 — **REST twin도 같은 single-flight·worker 래퍼를 쓴다**
-  (`app/main.py:3271-3272`).
+  (`app/main.py:3272-3273`).
   **E2-inf [추론]** ⇒ 연결당 topic 순회는 **순차**지만, 같은 key의 요청은 shared task 하나에
   합류하고 새 shared task의 admission 점유는 기본 4다. 서버 transient 실패의 즉시 재진입은
   cooldown으로 억제되지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 기본 1초와
