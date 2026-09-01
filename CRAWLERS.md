@@ -484,6 +484,8 @@
 
 **상세 코드:** `app/crawlers/woori.py:59-148` (subprocess fallback 포함), `woori.py:212-282` (crawl_woori_past_date_rates 함수)
 **최근 리팩토링:**
+- 2026-09-01: IN 모드만 60초(`:53`) → 30초(`:14/:44`)로 상향. BREAK1의
+  `:53` 및 05:04:53 종료, BREAK2/OUT 제외는 불변
 - 2025-10-26: SC 방식 적용, 날짜 변경 실패 처리 개선, MIBANK 조건부 실행 추가
 - 2025-11-14: Selenium 폴백 subprocess 격리 ([ADR-012](DECISIONS.md#adr-012-selenium-폴백-subprocess-격리-chrome-프로세스-좀비화-방지))
 

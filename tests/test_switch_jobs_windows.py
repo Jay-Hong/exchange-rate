@@ -84,6 +84,23 @@ class TestBankCollectionWindows(_SwitchJobsCase):
         self.assertEqual(f"{fires[0]:%H:%M:%S}", "19:00:18")
         self.assertEqual(f"{fires[-1]:%H:%M:%S}", "02:59:18")
 
+    def test_woori_in_fires_every_30_seconds_at_14_and_44(self):
+        """배포 2 본단계 1은 IN의 우리은행 주기만 바꾼다."""
+        jobs = self._jobs("IN")
+        job = jobs["task_woori"]
+        self.assertEqual(job.max_instances, 1)
+        self.assertEqual(job.misfire_grace_time, 30)
+        self.assertEqual(job.func.__name__, "request_wrapper_woori")
+        fires = _fires(
+            job,
+            KST.localize(datetime(2026, 9, 1, 10, 0, 0)),
+            KST.localize(datetime(2026, 9, 1, 10, 1, 59)),
+        )
+        self.assertEqual(
+            [f"{fire:%H:%M:%S}" for fire in fires],
+            ["10:00:14", "10:00:44", "10:01:14", "10:01:44"],
+        )
+
     def test_woori_is_one_job_and_runs_through_050453(self):
         jobs = self._jobs("BREAK1")
         # ⛔ tail을 별도 job으로 나누면 max_instances=1이 배타가 아니게 된다 (Chrome 2개 위험).

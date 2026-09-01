@@ -434,10 +434,10 @@ scheduler.add_job(
 **Tier B (kb, hana, woori, bs, citi):** 은행 환율, 중요
 - **특징**: 중요도 높음, 빈도 높음
 - **실행 방식**: kb/bs/citi는 순수 Request, hana/woori는 Request → Selenium 하이브리드
-- **IN/BREAK1/BREAK2**: 20-60초마다 (고정 초 레인으로 엇갈림)
+- **IN**: 20-60초마다 (고정 초 레인으로 엇갈림)
   - kb: `cron(second='15,35,55')`
   - hana: `cron(second='5,25,45')`
-  - woori: `cron(minute='*', second='53')` (우선순위 높음, 늦게 크롤링)
+  - woori: `cron(minute='*', second='14,44')` (**IN만 30초**, 배포 2 본단계 1)
   - bs: `cron(minute='*', second='33')`
   - citi: `cron(minute='*', second='13')`
 - **BREAK1**: kb, hana, bs, citi 유지 + woori는 **05:04:53까지**
@@ -487,6 +487,7 @@ scheduler.add_job(
 07초: investing (+ DXY 선물 동반 추출)
 11초: dxy_spot (DXY 현물)
 13초: citi
+14초: woori
 15초: kb
 17초: investing (+ DXY 선물 동반 추출)
 18초: shinhan (Selenium Queue)
@@ -499,10 +500,10 @@ scheduler.add_job(
 35초: kb
 37초: investing (+ DXY 선물 동반 추출)
 41초: dxy_spot (DXY 현물)
+44초: woori
 45초: hana
 47초: investing (+ DXY 선물 동반 추출)
 51초: dxy_spot (DXY 현물)
-53초: woori (우선순위 높음)
 54초: nh (Selenium Queue)
 55초: kb
 57초: investing (+ DXY 선물 동반 추출)
@@ -512,7 +513,7 @@ scheduler.add_job(
 **특징:**
 - Request/Selenium 크롤러가 서로 다른 초 레인을 사용해 동시 시작을 줄임
 - 저장 완료 뒤 다음 매초 broadcast에서 최신 Redis 값을 반영
-- woori는 citi보다 우선순위 높음: 53초 실행 → 사용자 표시 시간이 실제 변경 시간과 유사
+- woori는 IN에서 :14/:44 두 번 실행한다. BREAK1은 기존 :53과 05:04:53 종료를 유지한다
 - Selenium 크롤러는 Queue 순차 처리 (Request 먼저 시도)
 - 최대 동시 실행: 1-2개 (Request 기반 크롤러만)
 

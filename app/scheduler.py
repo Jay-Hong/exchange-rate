@@ -154,8 +154,8 @@ queue_status_cache = {
 #     - IN/BREAK1/BREAK2: 20초마다 (서로 10초 엇갈림)
 #     - OUT: 1분마다 (kb :28, hana :38) — 배포 2A
 #   - woori, bs, citi: 일반, 빈도 낮음
-#     - IN: 60초마다 (우선순위: woori(53초) > bs(33초) > citi(13초))
-#       * woori 우선순위 높음: 같은 1분 내 늦게 크롤링 → 사용자 표시 시간이 실제 변경 시간과 유사
+#     - IN: woori 30초마다(:14/:44), bs·citi 60초마다(bs :33 / citi :13)
+#       * woori만 단계적으로 상향. KB·hana 주기와 다른 모드는 이 단계에서 불변
 #     - BREAK1: woori(53초), bs(33초), citi(13초) 유지
 #     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 05:05 수집 종료)
 #     - OUT: bs도 1분마다 (:51) — 배포 2A
@@ -687,11 +687,14 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
+        # B Group: woori, bs, citi
+        # woori는 배포 2 본단계 1에서 IN만 30초(:14/:44)로 상향.
+        # 열거된 고정 IN job과 동일 시작초는 없고, 재기동 위상에 묶인 IntervalTrigger는
+        # 고정 레인으로 회피할 수 없으므로 scheduler_event와 smoke에서 별도 관측한다.
         if crawler_manager.is_enabled('woori'):
             scheduler.add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-                CronTrigger(minute='*', second='53', timezone=KST),
+                CronTrigger(minute='*', second='14,44', timezone=KST),
                 id='task_woori',
                 max_instances=1,
                 misfire_grace_time=30
