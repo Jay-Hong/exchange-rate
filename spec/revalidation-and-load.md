@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `9022f5f1a57bf49fa118fd236421d4a68d891d32`
+- server 기준 commit: `e312b43181af2de93688039246edda3d515ab2ff`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `075e280186bbc79c5c0ca1203b8d27118d86ce80378e7d492d5f570a7cef5b3c`
-- baseline SHA: `6b1205f2a04fe884178fbd3e9aaa75800b89e15c4e093da86a40a741d44fa946`
+- manifest SHA: `144fdb9892352496788088f4b1cfb06aa0d58e379be3c899c4fdaaea8274e265`
+- baseline SHA: `7cad459bc03f9fa2a71abe165a689b9309caa00bd15947592e92904d20637984`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -84,7 +84,7 @@ I/O 상한 · 서버 실패 cooldown).
   클라 jitter([R-CLI-24](ios-topic-state-machine.md#r-cli-24)) 가 **함께 있어야** 완화가 성립한다.
 
 근거(baseline): **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`,
-`MAX_OVERFLOW = 2` (**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. `app/database.py:36-38`
+`MAX_OVERFLOW = 2` (**최대 5**), 주석은 *"RDS db.t4g.micro 메모리 절약"*. `app/database.py:36-42`
 이 그 값을 `create_engine` 으로 넘긴다(구 좌표 `app/database.py:30` — **값 불변, 소유자만 이동**).
 **E1-b [코드]** `app/database_settings.py:113` — online `pool_timeout = 10초`(구 SQLAlchemy 기본
 30초). 아래 "그대로 쌓인다" 는 **무한 대기가 아니라 10초 상한**이 됐다 — 쌓인 요청은 그 뒤

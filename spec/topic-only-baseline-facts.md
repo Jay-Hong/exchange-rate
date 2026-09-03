@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1288-1294` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1317-1323` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
   KRX·미등록 asset 은 **generic 404** 로 수렴한다(익명이 상품 존재·topic 이름을 열거할 수 없다, 2026-08-23).
 
 ## B. publish 의미론
@@ -58,7 +58,7 @@
   stage 정의·엄격 파서·코드 기본값 `app/config.py:741-784` · **정책 정본**
   `app/topic_policy.py:237-275`(`plan_anonymous`) · 그 위임 wrapper
   `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:620-648` ·
-  production 주입 `app/main.py:313-321`.
+  production 주입 `app/main.py:342-350`.
   ⚠️ `0cfe474` 이전에는 stage 별 분기가 rollout wrapper 안에 있었다 — 지금은 정책표
   모듈이 정본이고 wrapper 는 주입받은 FX 집합을 넘겨 위임만 한다(익명·식별 두 축이
   `reject_anonymous_fx` 에서 값이 갈리므로 함수가 둘이다).
@@ -73,7 +73,7 @@
      Firebase 검증 전 관측이라 인증 사용자나 실제 RevenueCat 호출 수가 아니다
      (`app/topic_auth_rollout.py:254-296` · snapshot `app/topic_auth_rollout.py:339-400`). 정책 topic과
      현재 availability 기반 최종-stage RC 후보 topic은 production 기동 시 한 번 계산해 주입한다
-     (`app/main.py:303-321`).
+     (`app/main.py:332-350`).
 - **C2 [코드]** `app/topic_initial_snapshot.py:354` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
@@ -118,7 +118,7 @@
 ## E. 부하
 
 - **E1 [코드]** `app/database_settings.py:85-86` — PostgreSQL `POOL_SIZE = 3`, `MAX_OVERFLOW = 2`
-  (**최대 5**). 주석: *"RDS db.t4g.micro 메모리 절약"*. `app/database.py:36-38` 이 그 값을
+  (**최대 5**). 주석: *"RDS db.t4g.micro 메모리 절약"*. `app/database.py:36-42` 이 그 값을
   `create_engine` 으로 넘긴다.
   ⚠️ **좌표만 이동했다**(구 `app/database.py:30`): `DB_WORKLOAD_PROFILE` 슬라이스가 풀·timeout
   도출을 부작용 없는 별 모듈로 옮겼다. **값(3/2/최대 5)은 불변**이고 소유자만 바뀌었다.

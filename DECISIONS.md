@@ -4620,7 +4620,7 @@ class SourceDailyRate(Base):
 
 **Proposed** — Phase 2d 구현 진입 순서:
 
-1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `app/main.py:193`의 `create_all_app_tables(engine)`(실제 `Base.metadata.create_all`은 `app/database.py:65`, control-plane 테이블만 제외하며 `source_daily_rates`는 제외 대상이 아니다)이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
+1. **Schema 추가**: `source_daily_rates` table 마이그레이션 + ORM model. 운영 영향 — 코드 배포 시점에 `app/main.py:222`의 `create_all_app_tables(engine)`(실제 `Base.metadata.create_all`은 `app/database.py:69`, control-plane 테이블만 제외하며 `source_daily_rates`는 제외 대상이 아니다)이 신규 table을 자동 생성 가능 (lock 거의 없음 / ALTER 없음 / 빈 table 추가만). 별도 `scripts/migrate_source_daily_rates.py` (`__table__.create(checkfirst=True)` idempotent pattern)은 명시적 적용/검증/audit 용도 — 유일한 적용 경로는 아니지만 운영 진입 시점 명시화에 권장
 2. **Backfill dry-run**: 각 source 별 backfill job 작성 + dry-run 모드 (실제 INSERT X, log only)
 3. **Source별 partial backfill**: 1 source씩 (예: KRX 먼저) 일부 date range 실측 적재 → 검증
 4. **전체 backfill**: 3 source 모두 historical 적재
@@ -4694,7 +4694,7 @@ ADR-034 §3 schema + Open #14/#16/#17 → Accepted 전환 + helper module 신규
 
 **Step 1 land 후 운영 상태**:
 
-- 코드 배포 시 `app/main.py:193` `create_all_app_tables(engine)`(내부 `Base.metadata.create_all` — `app/database.py:65`)이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
+- 코드 배포 시 `app/main.py:222` `create_all_app_tables(engine)`(내부 `Base.metadata.create_all` — `app/database.py:69`)이 빈 `source_daily_rates` table 자동 생성 가능 (lock 거의 없음, ALTER 없음)
 - 운영 영향 거의 0 — read/write 호출자 X (helper module은 import 가능하나 사용자 없음)
 - ADR-034 §14 Rollout step 1 완료. Step 2 (backfill dry-run) 진입 가능.
 
@@ -6047,7 +6047,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 
 ### Decision 3 — 강제선의 현실 (per-user 한계 명시)
 
-`/ws`는 **익명**(main.py:1091 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
+`/ws`는 **익명**(main.py:1120 — 인증 없음)이라 topic 구독 자체를 사용자별로 막을 수 없음
 (codex 지적, 코드 확인 2026-07-04). 1차 강제선:
 
 - **인증 있는 REST(알림 API) = G1+G2 서버 강제**: 김프알림 krx 조합 생성/수정 403,
@@ -6219,7 +6219,7 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 
 ### 요약 (상세는 PLAN 문서)
 
-- **문제**: 비구독=매시간 스냅샷 / 구독=실시간 WS 제품 방향인데, 최신 rate/graph endpoint 대부분 무인증(`app/main.py` 894~2624 auth 0건) → 페이월이 UI에만 존재.
+- **문제**: 비구독=매시간 스냅샷 / 구독=실시간 WS 제품 방향인데, 최신 rate/graph endpoint 대부분 무인증(`app/main.py:923-2653` auth 0건) → 페이월이 UI에만 존재.
 - **결정**: D1 hourly=Firebase 인증만(KRX 항상 제외) / D2 최신 realtime 표면=premium(KRX는 +entitlement, ADR-038 `krx_visible`) / D4 신규 앱 legacy fallback 금지 / D5 무료 그래프=real hourly.
 - **접근 강제**: 무인증 최신-데이터 endpoint 전수(11종) 식별 → **Stage A**(신규 표면 인증, 출시 시) + **Stage B**(legacy REST/WS 종료, 양 플랫폼 <1% + 유예).
 - **양 플랫폼**: iOS reference → Android 이식(Android는 완전 legacy). Stage B는 iOS·Android 양쪽 기준([REALTIME_ARCHITECTURE_PLAN.md:479](REALTIME_ARCHITECTURE_PLAN.md#L479) 계약 승계).
@@ -6528,11 +6528,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `9022f5f1a57bf49fa118fd236421d4a68d891d32`
+- server 기준 commit: `e312b43181af2de93688039246edda3d515ab2ff`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `075e280186bbc79c5c0ca1203b8d27118d86ce80378e7d492d5f570a7cef5b3c`
-- baseline SHA: `6b1205f2a04fe884178fbd3e9aaa75800b89e15c4e093da86a40a741d44fa946`
+- manifest SHA: `144fdb9892352496788088f4b1cfb06aa0d58e379be3c899c4fdaaea8274e265`
+- baseline SHA: `7cad459bc03f9fa2a71abe165a689b9309caa00bd15947592e92904d20637984`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6596,7 +6596,7 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 legacy `/api/rates`·WS `rates` 는 **전부 무인증**이므로, 신규 앱이 legacy 로 떨어지면
 비구독자가 실시간을 공짜로 얻는다 = 페이월 우회.
 고정 server commit 의 legacy REST handler 와 `/ws` 연결 경로에도 Firebase/premium 검사가 없다
-(`app/main.py:1241-1290` · `app/main.py:1091-1135`).
+(`app/main.py:1270-1319` · `app/main.py:1120-1164`).
 ⚠️ `DECISIONS.md` ADR-039 요약은 이 문장에서 **`anon` 을 떨어뜨렸다**. 요약이 원문보다 강하다 —
 같은 슬라이스에서 정정한다.
 <!-- /evidence: E-INV-1 -->
@@ -6643,7 +6643,7 @@ fallback 빌드가 아니며 출시할 수 없다.
 구현 근거: `app/config.py:741-784`(stage) · `app/topic_policy.py:78-85`(정책표) ·
 `app/topic_policy.py:237-275`(익명 planner) · `app/topic_policy.py:278-323`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:792-948`(배선·등록) ·
-`app/main.py:3252-3256`(REST twin).
+`app/main.py:3281-3285`(REST twin).
 
 <!-- relation: references target=R-CLI-6 -->
 - references: [R-CLI-6](spec/ios-topic-state-machine.md#r-cli-6)
@@ -6730,7 +6730,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1522-1528` · `app/main.py:947-970`). 따라서 현재 경로에는
+  (`app/scheduler.py:1522-1528` · `app/main.py:976-999`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.
