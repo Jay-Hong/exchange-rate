@@ -69,6 +69,15 @@ def _no_notice_html(*, selected_date="2026.08.17"):
     """
 
 
+def _table_absent_html(*, selected_date="2026.08.27", body=""):
+    return f"""
+        <html><body>
+          <input id="inDate" value="{selected_date}">
+          {body}
+        </body></html>
+    """
+
+
 def _response(html):
     response = MagicMock()
     response.text = html
@@ -133,6 +142,20 @@ class TestIbkDatedRequestParser(unittest.TestCase):
                 reference_time=_HISTORICAL_REFERENCE,
             )
         self.assertIsNone(result)
+
+    def test_matching_date_without_table_raises_distinct_absent_state(self):
+        html = _table_absent_html()
+        with patch.object(ibk.requests, "post", return_value=_response(html)):
+            with self.assertRaisesRegex(
+                ibk.IbkRateTableAbsentError,
+                "일반고시환율 표 누락",
+            ):
+                ibk._fetch_ibk_rates_for_date(
+                    datetime.date(2026, 8, 27),
+                    reference_time=ibk.KST.localize(
+                        datetime.datetime(2026, 8, 27, 8, 10)
+                    ),
+                )
 
     def test_wrong_server_readback_is_rejected(self):
         html = _ibk_html(selected_date="2026.08.28")
@@ -240,6 +263,289 @@ class TestIbkDatedRequestParser(unittest.TestCase):
 
 
 class TestIbkDatedLookback(unittest.TestCase):
+    def test_current_preopen_table_absence_with_equal_prior_snapshot_is_noop(self):
+        db = MagicMock()
+        reference_time = ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10))
+        rates = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
+        prior_completed = ibk.KST.localize(datetime.datetime(2026, 8, 27, 5, 59, 55))
+        with patch.object(
+            ibk,
+            "_fetch_ibk_rates_for_date",
+            side_effect=[
+                ibk.IbkRateTableAbsentError("IBK 일반고시환율 표 누락"),
+                (rates, "05:59:55"),
+            ],
+        ) as mock_fetch, patch.object(
+            ibk.crud,
+            "get_last_bank_rates_with_ts",
+            return_value=_last_info(rates, _utc_naive(prior_completed)),
+        ), patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+            return_value=0,
+        ) as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.OBSERVED)
+        self.assertEqual(
+            [item.args[0] for item in mock_fetch.call_args_list],
+            [datetime.date(2026, 8, 27), datetime.date(2026, 8, 26)],
+        )
+        mock_insert.assert_called_once_with(
+            db=db,
+            current_rates=rates,
+            bank_name=ibk.BANK_NAME,
+        )
+
+    def test_current_preopen_table_absence_blocks_regressing_prior_snapshot(self):
+        db = MagicMock()
+        reference_time = ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10))
+        prior_rates = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
+        current_rates = {"usd-krw": 1383.0, "jpy-krw": 868.0, "eur-krw": 1611.0}
+        with patch.object(
+            ibk,
+            "_fetch_ibk_rates_for_date",
+            side_effect=[
+                ibk.IbkRateTableAbsentError("IBK 일반고시환율 표 누락"),
+                (prior_rates, "05:59:55"),
+            ],
+        ), patch.object(
+            ibk.crud,
+            "get_last_bank_rates_with_ts",
+            return_value=_last_info(
+                current_rates,
+                _utc_naive(ibk.KST.localize(datetime.datetime(2026, 8, 27, 7, 0))),
+            ),
+        ), patch.object(ibk.crud, "insert_bank_rates_into_db") as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.PRESERVED)
+        mock_insert.assert_not_called()
+
+    def test_current_preopen_table_absence_catches_up_newer_prior_completion(self):
+        db = MagicMock()
+        reference_time = ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10))
+        intermediate_rates = {
+            "usd-krw": 1381.0,
+            "jpy-krw": 866.0,
+            "eur-krw": 1609.0,
+        }
+        final_rates = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
+        with patch.object(
+            ibk,
+            "_fetch_ibk_rates_for_date",
+            side_effect=[
+                ibk.IbkRateTableAbsentError("IBK 일반고시환율 표 누락"),
+                (final_rates, "05:59:55"),
+            ],
+        ), patch.object(
+            ibk.crud,
+            "get_last_bank_rates_with_ts",
+            return_value=_last_info(
+                intermediate_rates,
+                _utc_naive(ibk.KST.localize(datetime.datetime(2026, 8, 27, 5, 0))),
+            ),
+        ), patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+            return_value=3,
+        ) as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.OBSERVED)
+        mock_insert.assert_called_once_with(
+            db=db,
+            current_rates=final_rates,
+            bank_name=ibk.BANK_NAME,
+        )
+
+    def test_preopen_table_absence_preserves_holiday_and_weekend_walkback(self):
+        db = MagicMock()
+        reference_time = ibk.KST.localize(datetime.datetime(2026, 8, 18, 8, 10))
+        friday_rates = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
+
+        def result_for_date(query_date, **_):
+            if query_date == datetime.date(2026, 8, 18):
+                raise ibk.IbkRateTableAbsentError("IBK 일반고시환율 표 누락")
+            if query_date == datetime.date(2026, 8, 17):
+                return None
+            if query_date == datetime.date(2026, 8, 14):
+                return friday_rates, "05:59:51"
+            raise AssertionError(f"unexpected date: {query_date}")
+
+        with patch.object(
+            ibk,
+            "_fetch_ibk_rates_for_date",
+            side_effect=result_for_date,
+        ) as mock_fetch, patch.object(
+            ibk.crud,
+            "get_last_bank_rates_with_ts",
+            return_value=_last_info(
+                friday_rates,
+                _utc_naive(ibk.KST.localize(datetime.datetime(2026, 8, 15, 5, 59, 51))),
+            ),
+        ), patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+            return_value=0,
+        ):
+            outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.OBSERVED)
+        self.assertEqual(
+            [item.args[0] for item in mock_fetch.call_args_list],
+            [
+                datetime.date(2026, 8, 18),
+                datetime.date(2026, 8, 17),
+                datetime.date(2026, 8, 14),
+            ],
+        )
+
+    def test_table_absence_only_walks_back_for_current_date_in_preopen_window(self):
+        db = MagicMock()
+        reference_time = ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10))
+        absent = ibk.IbkRateTableAbsentError("IBK 일반고시환율 표 누락")
+        with patch.object(
+            ibk,
+            "_fetch_ibk_rates_for_date",
+            side_effect=[absent, absent],
+        ) as mock_fetch, patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+        ) as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.FALLBACK)
+        self.assertEqual(
+            [item.args[0] for item in mock_fetch.call_args_list],
+            [datetime.date(2026, 8, 27), datetime.date(2026, 8, 26)],
+        )
+        mock_insert.assert_not_called()
+
+    def test_preopen_table_absence_window_has_inclusive_start_and_exclusive_end(self):
+        rates = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
+        allowed = (
+            datetime.datetime(2026, 8, 27, 8, 0, 0),
+            datetime.datetime(2026, 8, 27, 8, 34, 59),
+        )
+        for naive_reference in allowed:
+            with self.subTest(reference_time=naive_reference):
+                db = MagicMock()
+                reference_time = ibk.KST.localize(naive_reference)
+                with patch.object(
+                    ibk,
+                    "_fetch_ibk_rates_for_date",
+                    side_effect=[
+                        ibk.IbkRateTableAbsentError("IBK 일반고시환율 표 누락"),
+                        (rates, "05:59:55"),
+                    ],
+                ) as mock_fetch, patch.object(
+                    ibk.crud,
+                    "get_last_bank_rates_with_ts",
+                    return_value=_last_info(
+                        rates,
+                        _utc_naive(
+                            ibk.KST.localize(datetime.datetime(2026, 8, 27, 5, 59, 55))
+                        ),
+                    ),
+                ), patch.object(
+                    ibk.crud,
+                    "insert_bank_rates_into_db",
+                    return_value=0,
+                ):
+                    outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+                self.assertIs(outcome, ibk.DatedRequestOutcome.OBSERVED)
+                self.assertEqual(mock_fetch.call_count, 2)
+
+        rejected = (
+            datetime.datetime(2026, 8, 27, 7, 59, 59),
+            datetime.datetime(2026, 8, 27, 8, 35, 0),
+        )
+        for naive_reference in rejected:
+            with self.subTest(reference_time=naive_reference):
+                db = MagicMock()
+                reference_time = ibk.KST.localize(naive_reference)
+                with patch.object(
+                    ibk,
+                    "_fetch_ibk_rates_for_date",
+                    side_effect=ibk.IbkRateTableAbsentError(
+                        "IBK 일반고시환율 표 누락"
+                    ),
+                ) as mock_fetch:
+                    outcome = ibk.try_crawl_with_dated_requests(db, reference_time)
+
+                self.assertIs(outcome, ibk.DatedRequestOutcome.FALLBACK)
+                self.assertEqual(mock_fetch.call_count, 1)
+
+    def test_wrong_readback_error_inside_preopen_window_falls_back(self):
+        db = MagicMock()
+        malformed = _table_absent_html(
+            selected_date="2026.08.26",
+            body="<div>일시적인 오류가 발생했습니다.</div>",
+        )
+        with patch.object(
+            ibk.requests,
+            "post",
+            return_value=_response(malformed),
+        ) as mock_post, patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+        ) as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(
+                db,
+                ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10)),
+            )
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.FALLBACK)
+        self.assertEqual(mock_post.call_count, 1)
+        mock_insert.assert_not_called()
+
+    def test_explicit_error_message_inside_preopen_window_does_not_walk_back(self):
+        db = MagicMock()
+        error_page = _table_absent_html(
+            body="<div>일시적인 오류가 발생했습니다.</div>",
+        )
+        prior_page = _ibk_html(
+            selected_date="2026.08.26",
+            completed_at="05:59:55",
+        )
+        with patch.object(
+            ibk.requests,
+            "post",
+            side_effect=[_response(error_page), _response(prior_page)],
+        ) as mock_post, patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+        ) as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(
+                db,
+                ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10)),
+            )
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.FALLBACK)
+        self.assertEqual(mock_post.call_count, 1)
+        mock_insert.assert_not_called()
+
+    def test_transport_error_inside_preopen_window_falls_back_immediately(self):
+        db = MagicMock()
+        with patch.object(
+            ibk,
+            "_fetch_ibk_rates_for_date",
+            side_effect=ibk.requests.Timeout("timed out"),
+        ) as mock_fetch, patch.object(
+            ibk.crud,
+            "insert_bank_rates_into_db",
+        ) as mock_insert:
+            outcome = ibk.try_crawl_with_dated_requests(
+                db,
+                ibk.KST.localize(datetime.datetime(2026, 8, 27, 8, 10)),
+            )
+
+        self.assertIs(outcome, ibk.DatedRequestOutcome.FALLBACK)
+        self.assertEqual(mock_fetch.call_count, 1)
+        mock_insert.assert_not_called()
+
     def test_skips_weekends_and_continues_only_after_explicit_no_notice(self):
         db = MagicMock()
         reference_time = ibk.KST.localize(datetime.datetime(2026, 8, 18, 7, 50))
@@ -557,19 +863,17 @@ class TestIbkDatedLookback(unittest.TestCase):
         self.assertIs(outcome, ibk.DatedRequestOutcome.OBSERVED)
         self.assertEqual(mock_fetch.call_args.kwargs["timeout"], 3.0)
 
-    def test_missing_table_without_official_code_falls_back_through_real_parser(self):
-        """표 누락인데 ECBKFEX01589가 없으면 lookback 없이 즉시 FALLBACK.
+    def test_missing_table_outside_preopen_window_falls_back_through_real_parser(self):
+        """개장 전 제한 구간 밖의 표 누락은 lookback 없이 즉시 FALLBACK.
 
         `_fetch_ibk_rates_for_date`를 mock하지 않고 실제 HTML 판별기를 통과시켜,
-        '정확한 공식 무고시 코드에서만 lookback' 배타성을 잠근다. 판별기가 일반
-        오류 문구까지 무고시로 넓어지면 전송 오류를 공휴일로 오인해 더 오래된
-        기준일 값을 쓰거나 PRESERVED로 갱신이 멈춘다.
+        표 부재의 제한적 허용이 다른 시간대까지 넓어지지 않도록 잠근다.
         """
         db = MagicMock()
         broken = """
             <html><body>
               <input id="inDate" value="2026.08.26">
-              <div>일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.</div>
+              <div>환율 조회 준비 중</div>
             </body></html>
         """
         with patch.object(

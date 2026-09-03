@@ -343,9 +343,13 @@ sent_at           DATETIME
   - ibk는 매분 주기를 유지한다. 08:00 이후는 조회 당일 GET → **공식 날짜 지정
     POST**, 08:00 전은 빈 당일 GET을 생략하고 전 조회기준일 POST로 바로 시작한다. 공식 상세
     화면에서 주간 1회차가 08:26:29에도 관측되어 08:30 경계의 잠재 누락을 피했다. 주말
-    조회기준일은 건너뛰며 공식 무고시 코드일 때만 더 이전 평일을 조회한 뒤,
-    필요할 때만 Selenium → 조건부 MIBANK로 fallback한다. 00:00~00:05에는 날짜 POST는
-    실행하되 실패하면 불안정한 Selenium UI만 억제해 기존값을 유지한다.
+    조회기준일은 건너뛰고, 공식 무고시 코드이면 더 이전 평일을 계속 조회한다. 또한
+    08:00~08:34:59에는 정확한 당일 날짜 readback 뒤 표와 무고시 코드가 모두 없는 응답만
+    `preopen_table_pending`으로 분리해 같은 lookback·DB 회귀 방지를 적용한다. 네트워크,
+    날짜 readback, header/value 계약 및 코드가 명시적으로 판별하는 오류 문구 이상은 즉시 Selenium → 조건부
+    MIBANK로 fallback한다. 00:00~00:05에는 날짜 POST는 실행하되 실패하면 불안정한 Selenium
+    UI만 억제해 기존값을 유지한다. 미지의 오류 HTML이 정상 개장 전 화면과 같은 모양이면
+    완전히 구분할 수 없으므로 예외 허용은 당일 35분 창으로 제한한다.
     변경 전 야간 Selenium 기준선은 ≈10.2초/회이며 새 Request 경로의 메모리·큐 효과는 배포 후 검증한다.
 
 - **BREAK2 모드**: 06:00~07:59 (고시 마무리, 7개 크롤러)
@@ -457,7 +461,9 @@ scheduler.add_job(
     `inDate` POST로 바로 시작 → 필요 시 Selenium 3회 → 조건부 MIBANK.
     날짜 POST는 요청일 `#inDate` readback, 표 caption/header, USD·JPY·EUR 완전성/범위,
     고시완료시각을 검증한다. 완료시각의 미래 허용과 과거 후보의 DB 회귀 판정에는 각각
-    120초 오차를 둔다. 정확한 `ECBKFEX01589` 무고시 응답에서만 lookback하고, 응답 이상은
+    120초 오차를 둔다. 정확한 `ECBKFEX01589` 무고시와 08:00~08:34:59의 제한된
+    `preopen_table_pending`에서만 lookback한다. 후자는 정확한 당일 date readback과 표·공식
+    코드 부재를 요구하며, 과거 후보에도 같은 DB 회귀 방지를 적용한다. 그 밖의 응답 이상은
     즉시 Selenium 안전망으로 넘긴다. 00:00~00:05는 크롤러 전체가 아니라 날짜 POST 실패 뒤
     **Selenium만** 억제한다.
 - **IN**: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초 — sc는 18:59:58이 마지막)

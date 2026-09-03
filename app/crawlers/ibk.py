@@ -63,6 +63,10 @@ IBK_DB_SAVE_LAG_TOLERANCE_SECONDS = 120
 # 쓰면 신규 고시를 놓칠 수 있다. 야간 꼬리 종료(06:00)와 주간 시작 사이의
 # 명확한 공백인 08:00을 조회기준일 rollover 경계로 사용한다.
 IBK_SERVICE_DATE_ROLLOVER_TIME = datetime.time(8, 0)
+# 당일 조회기준일 화면은 첫 고시 전까지 날짜 readback만 있고 환율표가 없을 수
+# 있다. 이 짧은 구간에 한해서만 직전 서비스 기준일을 검증하며, 이후에는 같은
+# 표 부재를 계약 이상으로 보고 Selenium 안전망을 유지한다.
+IBK_PREOPEN_PENDING_END_TIME = datetime.time(8, 35)
 IBK_BANK_SELECTORS = {
     'usd-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(1) > td:nth-child(3)',
     'jpy-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(2) > td:nth-child(3)',
@@ -82,15 +86,24 @@ logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 class DatedRequestOutcome(Enum):
     """날짜 지정 공식 요청의 처리 결과.
 
-    ``PRESERVED``는 완전한 DB snapshot이 있는 공식 무고시 또는 과거값 회귀
-    위험을 확인해 현재 DB 값을 의도적으로 유지한 경우다. 이 상태를
-    ``FALLBACK``과 분리해야 Selenium이
-    같은 과거값을 다시 저장하며 회귀 차단을 우회하지 않는다.
+    ``PRESERVED``는 완전한 DB snapshot이 있는 공식 무고시·개장 전 표 준비
+    상태 또는 과거값 회귀 위험을 확인해 현재 DB 값을 의도적으로 유지한
+    경우다. 이 상태를 ``FALLBACK``과 분리해야 Selenium이 같은 과거값을
+    다시 저장하며 회귀 차단을 우회하지 않는다.
     """
 
     OBSERVED = "observed"
     PRESERVED = "preserved"
     FALLBACK = "fallback"
+
+
+class IbkRateTableAbsentError(ValueError):
+    """요청 날짜 readback은 맞지만 환율표와 공식 무고시 코드가 모두 없는 상태.
+
+    이 HTML 형태만으로 개장 전 대기와 계약 이상을 완전히 구분할 수는 없다.
+    호출자는 당일의 짧은 개장 전 구간에서만 이전 기준일 조회를 허용하고, 그
+    밖에서는 fail-closed로 Selenium 안전망에 넘겨야 한다.
+    """
 
 
 def _crawl_mibank_ibk(db: Session) -> tuple[dict, dict]:
@@ -138,7 +151,7 @@ def crawl_and_save_ibk_bank_exchange_rates():
         # 2차 시도: 공식 페이지의 날짜 지정 Request.
         # 00시 이후 고시는 조회기준일(전 영업일) 화면에 계속 누적되므로 브라우저로
         # 달력을 조작할 필요가 없다. 요청 날짜 readback과 3개 통화 완전성을 검증하고,
-        # 실패할 때만 기존 Selenium 경로로 내려간다.
+        # OBSERVED/PRESERVED가 아닌 FALLBACK일 때만 기존 Selenium 경로로 내려간다.
         dated_outcome = try_crawl_with_dated_requests(db, reference_time=now)
         if dated_outcome is DatedRequestOutcome.OBSERVED:
             logger.info(
@@ -225,6 +238,8 @@ def try_crawl_with_dated_requests(
     IBK의 00시 이후 고시는 달력상 오늘이 아니라 직전 조회기준일 화면에 누적된다.
     08:00 전에는 전날부터, 이후에는 오늘부터 최대 ``MAX_DAYS_LOOKBACK``일을 확인한다.
     이렇게 해야 영업 중 기본 GET이 일시 실패했을 때 전일 값으로 되돌리는 일을 막는다.
+    08:00~08:35에는 날짜 readback이 맞는 당일 표 부재만 개장 전 대기로 분류해 이전
+    기준일을 검증하고, 그 결과에도 기존 완료시각 기반 회귀 방지를 적용한다.
     주말 조회기준일은 공식적으로 고시가 없으므로 HTTP 요청 자체를 생략하고, 공휴일처럼
     평일인데 공식 무고시 응답이면 더 이전 날짜로 계속 진행한다.
 
@@ -240,6 +255,7 @@ def try_crawl_with_dated_requests(
     first_days_back = 0 if reference_time.time() >= IBK_SERVICE_DATE_ROLLOVER_TIME else 1
     candidate_rank = 0
     saw_explicit_no_notice = False
+    saw_preopen_pending = False
     deadline = time.monotonic() + IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS
     for days_back in range(first_days_back, MAX_DAYS_LOOKBACK + 1):
         query_date = reference_date - datetime.timedelta(days=days_back)
@@ -270,6 +286,42 @@ def try_crawl_with_dated_requests(
                 reference_time=reference_time,
                 timeout=min(DEFAULT_TIMEOUT, remaining_seconds),
             )
+        except IbkRateTableAbsentError as exc:
+            is_current_preopen_pending = (
+                query_date == reference_date
+                and IBK_SERVICE_DATE_ROLLOVER_TIME
+                <= reference_time.time()
+                < IBK_PREOPEN_PENDING_END_TIME
+            )
+            if not is_current_preopen_pending:
+                logger.warning(
+                    f"⚠️ {BANK_NAME} 날짜 지정 Request 응답 이상",
+                    extra={
+                        "bank": BANK_NAME,
+                        "query_date": query_date.isoformat(),
+                        "error": str(exc)[:200],
+                        "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 1),
+                        "candidate_rank": candidate_rank,
+                        "outcome": "response_error",
+                    },
+                )
+                return DatedRequestOutcome.FALLBACK
+
+            # 08:00 직후 당일 화면은 날짜만 전환되고 첫 고시 표가 아직 없을 수
+            # 있다. 이 상태만 직전 서비스 기준일 조회로 이어가되, 아래의 과거값
+            # 회귀 가드를 반드시 활성화한다.
+            saw_preopen_pending = True
+            logger.info(
+                f"ℹ️ {BANK_NAME} 개장 전 당일 환율표 준비 중 — 이전 기준일 검증",
+                extra={
+                    "bank": BANK_NAME,
+                    "query_date": query_date.isoformat(),
+                    "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 1),
+                    "candidate_rank": candidate_rank,
+                    "outcome": "preopen_table_pending",
+                },
+            )
+            continue
         except Exception as exc:
             # timeout/WAF/DOM 계약 변경을 공휴일로 오인해 더 오래된 값을 저장하지 않는다.
             # 즉시 FALLBACK을 반환해 기존 Selenium 안전망으로 넘긴다.
@@ -286,7 +338,8 @@ def try_crawl_with_dated_requests(
             )
             return DatedRequestOutcome.FALLBACK
 
-        # 요청 날짜 readback이 일치하고 공식 무고시 코드가 있는 경우에만 lookback 계속.
+        # 정확한 공식 무고시이거나, 위에서 제한적으로 인정한 당일 개장 전 표
+        # 준비 상태일 때만 더 이전 서비스 기준일로 진행한다.
         if result is None:
             saw_explicit_no_notice = True
             continue
@@ -296,10 +349,11 @@ def try_crawl_with_dated_requests(
         rates_to_store = current_rates
         preserved_pairs = []
 
-        # 명시적 무고시 후 더 오래된 서비스 기준일로 lookback한 경우,
-        # DB의 더 최근 값을 과거 스냅샷으로 되돌리지 않는다. 반대로 후보의 공식
-        # 완료시각이 DB 저장시각보다 뒤라면 놓친 최종 고시 catch-up이므로 허용한다.
-        if saw_explicit_no_notice:
+        # 개장 전 당일 표 미생성이나 명시적 무고시 후 더 오래된 서비스 기준일로
+        # lookback한 경우, DB의 더 최근 값을 과거 스냅샷으로 되돌리지 않는다.
+        # 반대로 후보의 공식 완료시각이 DB 저장시각보다 뒤라면 놓친 최종 고시
+        # catch-up이므로 허용한다.
+        if saw_explicit_no_notice or saw_preopen_pending:
             last_info = crud.get_last_bank_rates_with_ts(
                 db,
                 BANK_NAME,
@@ -384,31 +438,51 @@ def try_crawl_with_dated_requests(
     ]
     has_complete_snapshot = not missing_pairs
     if not has_complete_snapshot:
+        bootstrap_outcome = (
+            "preopen_pending_bootstrap_fallback"
+            if saw_preopen_pending
+            else "official_no_notice_bootstrap_fallback"
+        )
+        bootstrap_message = (
+            f"⚠️ {BANK_NAME} 개장 전 당일 환율표 준비 중이지만 DB bootstrap 필요"
+            if saw_preopen_pending
+            else f"⚠️ {BANK_NAME} 공식 무고시이지만 DB bootstrap 필요"
+        )
         logger.warning(
-            f"⚠️ {BANK_NAME} 공식 무고시이지만 DB bootstrap 필요",
+            bootstrap_message,
             extra={
                 "bank": BANK_NAME,
                 "reference_date": reference_date.isoformat(),
                 "max_days_lookback": MAX_DAYS_LOOKBACK,
                 "candidate_count": candidate_rank,
                 "missing_pairs": missing_pairs,
-                "outcome": "official_no_notice_bootstrap_fallback",
+                "outcome": bootstrap_outcome,
             },
         )
         return DatedRequestOutcome.FALLBACK
 
+    preserve_outcome = (
+        "preopen_pending_preserved"
+        if saw_preopen_pending
+        else "official_no_notice_preserved"
+    )
+    preserve_message = (
+        f"ℹ️ {BANK_NAME} 개장 전 당일 환율표 준비 중 — 기존값 유지"
+        if saw_preopen_pending
+        else f"ℹ️ {BANK_NAME} 날짜 지정 Request 공식 무고시 — 기존값 유지"
+    )
     logger.info(
-        f"ℹ️ {BANK_NAME} 날짜 지정 Request 공식 무고시 — 기존값 유지",
+        preserve_message,
         extra={
             "bank": BANK_NAME,
             "reference_date": reference_date.isoformat(),
             "max_days_lookback": MAX_DAYS_LOOKBACK,
             "candidate_count": candidate_rank,
-            "outcome": "official_no_notice_preserved",
+            "outcome": preserve_outcome,
         },
     )
-    # 요청한 영업일 후보가 모두 공식 무고시였고 DB에 완전한 정상값이
-    # 있을 때만 Selenium으로 같은 날짜를 다시 훑지 않고 현재값을 유지한다.
+    # 요청한 후보가 개장 전 미생성/공식 무고시이고 DB에 완전한 정상값이 있을
+    # 때만 Selenium으로 같은 날짜를 다시 훑지 않고 현재값을 유지한다.
     return DatedRequestOutcome.PRESERVED
 
 
@@ -421,8 +495,9 @@ def _fetch_ibk_rates_for_date(
     """IBK 공식 날짜 지정 POST 응답을 검증해 ``(rates, 완료시각)``을 반환한다.
 
     정확한 요청 날짜의 공식 무고시 응답(``ECBKFEX01589``)만 ``None``으로 표현한다.
-    네트워크 오류, 날짜 불일치, DOM/값 계약 위반은 예외로 올려 호출자가 Selenium으로
-    전환하게 한다.
+    날짜 readback은 맞지만 표와 공식 코드가 모두 없는 상태는 전용 예외로 분리한다.
+    네트워크 오류, 날짜 불일치, 그 밖의 DOM/값 계약 위반은 일반 예외로 올려 호출자가
+    Selenium으로 전환하게 한다.
     """
     request_data = {
         **IBK_DATE_REQUEST_DEFAULTS,
@@ -474,7 +549,16 @@ def _parse_ibk_official_response(
     if rate_table is None:
         if 'ECBKFEX01589' in response.text:
             return None
-        raise ValueError("IBK 일반고시환율 표 누락")
+        # ⚠️ 이 문구는 실제 IBK 응답 캡처로 확정된 **계약이 아니다**. 앞선 커밋의 테스트
+        #    fixture 가 "깨진 응답"을 표현하려고 쓴 문자열이 여기로 승격된 **방어적
+        #    heuristic** 이다. 실제 오류 화면 문구가 다르면 이 분기는 발화하지 않고 아래
+        #    표 부재 상태로 분류된다. 그 상태를 개장 전 준비로 허용하는 범위는 제한 창으로
+        #    한정된다.
+        #    실제 오류 응답 본문을 확보하면 이 판별을 그 근거로 갱신할 것.
+        page_text = soup.get_text(' ', strip=True)
+        if '일시적인 오류가 발생했습니다' in page_text:
+            raise ValueError("IBK 공식 응답 오류 페이지")
+        raise IbkRateTableAbsentError("IBK 일반고시환율 표 누락")
 
     header = rate_table.find('tr')
     header_names = [cell.get_text(' ', strip=True) for cell in header.find_all(['th', 'td'])]
