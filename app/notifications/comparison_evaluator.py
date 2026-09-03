@@ -290,8 +290,17 @@ class ComparisonAlertEvaluator:
                     self._in_flight_settings.discard(candidate.setting_id)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("[comparison] evaluator 실패 (격리 — tick 경로 영향 X)")
+        except Exception as exc:
+            # persist/cleanup SQL 예외에는 bind parameter(UID·token)가 포함될 수 있다.
+            # evaluator는 원래 tick에서 격리하므로, traceback 대신 안전한 유형만 남긴다.
+            logger.error(
+                "[comparison] evaluator 실패 (격리 — tick 경로 영향 X)",
+                extra={
+                    "event": "comparison_evaluator",
+                    "outcome": "failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     async def _send_one(self, candidate: ComparisonCandidate) -> None:
         # 1) 양쪽 leg 조회 (sync unified lookup → to_thread)
@@ -426,7 +435,7 @@ class ComparisonAlertEvaluator:
     def _persist_result_sync(candidate: ComparisonCandidate, fresh: FreshComparisonSnapshot,
                              left: UnifiedRate, right: UnifiedRate, spread: float,
                              fcm_result: dict) -> None:
-        """mark(once/repeat 분기) + log 기록 + 무효 토큰 삭제 — 단일 session (기존 persist 패턴)."""
+        """mark(once/repeat 분기) + log 기록 + 확정 미등록 토큰 정리 — 단일 session."""
         from app import crud, models
         from app.database import get_db_context
 
@@ -447,9 +456,14 @@ class ComparisonAlertEvaluator:
             ))
             failed = fcm_result.get("failed_tokens") or []
             if failed:
-                db.query(models.UserDevice).filter(
-                    models.UserDevice.device_token.in_(failed)).delete(synchronize_session=False)
-            db.commit()
+                # candidate 하나 = 단일 사용자. sent_tokens 는 :338 발송에 쓴 목록 그대로.
+                crud.purge_unregistered_devices(
+                    db,
+                    owner_uid=candidate.user_id,
+                    sent_tokens=candidate.device_tokens,
+                    unregistered_tokens=failed,
+                )
+            db.commit()          # ⚠️ 조건문 **밖** — 기존 위치 유지
 
     # -- cache invalidation (CRUD API에서 호출 — S3) -----------------------
 

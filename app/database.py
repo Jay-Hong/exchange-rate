@@ -35,7 +35,11 @@ DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()
 # 풀 제한(RDS db.t4g.micro 메모리 절약)과 timeout 3종은 profile 이 정한다.
 _engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, DB_WORKLOAD_PROFILE)
 
-engine = create_engine(DATABASE_URL, **_engine_kwargs)
+# SQLAlchemy StatementError/DBAPIError 문자열은 기본적으로 SQL bind parameter를
+# 포함한다. application engine에서 SQLAlchemy가 렌더링하는 `[parameters: ...]`는
+# 일괄 숨긴다. 단, `exc.params` 자체를 지우거나 driver 원문·SQL literal을 정화하는
+# 옵션은 아니므로 secret-bearing 실패 경로의 type-only logging은 계속 필요하다.
+engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

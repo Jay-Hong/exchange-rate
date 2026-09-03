@@ -2497,96 +2497,86 @@ async def check_and_notify(bank: str, currency: str, new_rate: float):
 
 > **확장 계획**: 다중 조건/프리미엄 기능 추가 시 `triggered` 플래그를 별도 테이블 (`notification_states`)로 분리하거나, `notification_logs` 기반 멱등성으로 전환 검토
 
-### 2. 재시도 정책
+### 2. 전송 실패와 기기 토큰 정리 정책
 
-**방식**: 선형 재시도 (1초, 2초) + 토큰 오류 시 즉시 삭제
+**현재 production 계약**: batch sender 3종은 앱 레이어에서 one-shot으로
+전송한다. 반환값의 `failed_tokens`는 하위 호환을 위해 key 이름을
+유지하지만, **모든 실패 토큰**이 아니라
+`messaging.UnregisteredError`로 확정된 **cleanup 후보만** 담는다.
+
+- `UnregisteredError`: 재시도 대상 아님, 소유자 fence 후 정리 가능
+- generic `NotFoundError`: 정리하지 않음
+- `InvalidArgumentError`: payload 오류일 수 있으므로 정리하지 않음
+- 초기화·transport·전체 batch 실패: 정리 후보 0
+
+단일 sender `send_fcm_notification()`는 현재 production 호출부가 없고 기존
+1초·2초 앱 재시도를 유지한다. 이 함수는 `(bool, code)`만 반환하여
+generic `NOT_FOUND`와 확정 미등록을 구분할 수 없으므로, **반환 code로
+토큰을 삭제하면 안 된다**.
 
 ```python
-async def send_fcm_with_retry(
-    token: str,
-    message: messaging.Message,
-    max_retries: int = 2
-) -> bool:
-    delays = [1, 2]  # 초
+from app.notifications import fcm
 
-    for attempt in range(max_retries + 1):
-        try:
-            messaging.send(message)
-            return True
-        except FirebaseError as e:
-            error_code = e.code
+result = messaging.send_each_for_multicast(message)
+confirmed_unregistered = []
+for idx, item in enumerate(result.responses):
+    if not item.success and fcm.is_unregistered(item.exception):
+        confirmed_unregistered.append(sent_tokens[idx])
 
-            # 토큰 오류: 재시도 무의미, 즉시 삭제
-            if error_code in ['UNREGISTERED', 'INVALID_ARGUMENT']:
-                await delete_device_token(token)
-                logger.warning("무효 토큰 삭제", extra={
-                    "token": token[:20] + "...",
-                    "error_code": error_code
-                })
-                return False
-
-            # 서버 오류: 재시도
-            if attempt < max_retries:
-                await asyncio.sleep(delays[attempt])
-            else:
-                logger.error("FCM 전송 실패", extra={
-                    "token": token[:20] + "...",
-                    "error_code": error_code,
-                    "attempts": attempt + 1
-                })
-                return False
-
-    return False
+# 발송 시점에 포착한 UID와 실제 보낸 토큰을 둘 다 제시한다.
+# helper는 (confirmed_unregistered ∩ sent_tokens)를 다시 계산하고
+# WHERE user_id = captured_uid AND device_token IN (...) 로만 지운다.
+if confirmed_unregistered:
+    crud.purge_unregistered_devices(
+        db,
+        owner_uid=captured_uid,
+        sent_tokens=sent_tokens,
+        unregistered_tokens=confirmed_unregistered,
+    )
+    db.commit()  # helper 자체는 commit/rollback 하지 않음
 ```
 
 ### 3. 구조화 로그 (관측 가능성)
 
-**필수 필드**: `event`, `success`, `latency_ms`, `error_code`
+**필수 필드**: `event`, `success`, `failure`, `invalid_tokens`,
+`retained_by_reason`. `invalid_tokens`는 현재 **확정 미등록 cleanup 후보 수**를
+뜻한다. 새 구조화 로그에 원문 FCM token·전체 UID를 넣지 않는다.
+
+> **보호 범위와 잔여 위험.** 이 절은 애플리케이션의 구조화 로그와 SQLAlchemy가
+> 렌더링하는 bind parameter를 다룬다. 현재
+> `DELETE /api/register-device?device_token=...` 계약은 토큰을 URL query에 넣으므로,
+> query를 포함하는 Nginx·Uvicorn access log에는 원문 토큰이 남을 수 있다. 이는 이
+> 정리 hotfix가 닫지 않는 기존 위험이며, 엔드투엔드 token 비노출을 뜻하지 않는다.
+> 클라이언트 호환을 유지한 즉시 완화는 서버 access log에서 query를 제외하는 것이고,
+> URL 자체에서 제거하려면 body 기반 해제 API를 추가한 뒤 기존 iOS·Android 앱과의
+> 호환 기간을 두고 전환해야 한다.
 
 ```python
-import time
-from app import logger
-
-async def send_notification_with_logging(user_id: str, bank: str, currency: str, rate: float):
-    start = time.time()
-    success = False
-    error_code = None
-
-    try:
-        # FCM 전송 로직
-        await send_fcm_notification(user_id, bank, currency, rate)
-        success = True
-    except FirebaseError as e:
-        error_code = e.code
-    finally:
-        latency_ms = (time.time() - start) * 1000
-
-        logger.info("FCM 알림 발송", extra={
-            "event": "fcm_send",
-            "user_id": user_id,
-            "bank": bank,
-            "currency": currency,
-            "rate": rate,
-            "success": success,
-            "latency_ms": round(latency_ms, 2),
-            "error_code": error_code
-        })
+logger.info("FCM 멀티캐스트 완료", extra={
+    "event": "fcm_multicast_sync",
+    "total": len(sent_tokens),
+    "success": response.success_count,
+    "failure": response.failure_count,
+    "invalid_tokens": len(confirmed_unregistered),
+    "retained_failures": sum(retained_by_reason.values()),
+    "retained_by_reason": dict(retained_by_reason),
+    "latency_ms": round(latency_ms, 2),
+})
 ```
 
 **로그 기반 분석 (Phase 5 이후)**:
 
 ```bash
 # 실패율 확인
-grep '"event": "fcm_send"' logs/app.log | \
-  jq 'select(.success == false)' | wc -l
+grep '"event": "fcm_multicast' logs/app.log | \
+  jq '.failure' | awk '{sum+=$1} END {print sum}'
 
 # 평균 지연 확인
-grep '"event": "fcm_send"' logs/app.log | \
+grep '"event": "fcm_multicast_sync"' logs/app.log | \
   jq '.latency_ms' | awk '{sum+=$1; count++} END {print sum/count}'
 
-# 에러 코드별 카운트
-grep '"event": "fcm_send"' logs/app.log | \
-  jq 'select(.error_code != null) | .error_code' | sort | uniq -c
+# 보존한(자동 삭제하지 않은) 실패 유형별 카운트
+grep '"event": "fcm_multicast' logs/app.log | jq '.retained_by_reason'
 ```
 
 ### 완료 게이트 (Phase 2)
@@ -2594,17 +2584,17 @@ grep '"event": "fcm_send"' logs/app.log | \
 | 항목 | 테스트 | 통과 기준 |
 |------|--------|----------|
 | ✅ 유효 토큰 알림 | 조건 충족 시 푸시 수신 | 10초 내 수신 |
-| ✅ 무효 토큰 처리 | 잘못된 토큰으로 전송 | 자동 삭제 확인 |
+| ✅ 확정 미등록 토큰 처리 | `UnregisteredError` + A→B 소유권 이전 | 발송 시점 UID와 일치하는 행만 삭제 |
 | ✅ 중복 알림 방지 | 같은 조건 연속 충족 | 알림 1회만 발송 |
 | ✅ 조건 리셋 | 미충족 → 재충족 | 새 알림 발송 |
 | ✅ 구조화 로그 | 로그 파일 확인 | 필수 필드 포함 |
 
 ---
 
-## 🔧 기기 토큰 정리 전략 (구현 예정)
+## 🔧 기기 토큰 정리 전략 (구현됨)
 
-> **목적**: FCM device_token 관리 및 정리 전략 (구현 시점에 최종 결정)
-> **상태**: 📋 검토 완료, 구현 대기 → **알림 품질 게이트에 통합됨**
+> **목적**: FCM device_token 관리 및 정리 전략
+> **상태**: 전송 시점 정리 + `updated_at` retention job + 등록 시 소유권 이전 구현
 
 ### 문제 상황
 
@@ -2615,67 +2605,82 @@ FCM device_token은 다음 상황에서 무효화됨:
 3. **토큰 만료**: FCM이 주기적으로 토큰 갱신 (드물게 발생)
 4. **OS 업데이트**: 일부 메이저 업데이트 시 토큰 변경
 
-무효 토큰으로 FCM 전송 시 `InvalidRegistration` 또는 `NotRegistered` 에러 발생.
+현재 pinned Firebase Admin SDK에서 확정 미등록은
+`messaging.UnregisteredError`로 표현된다. 이 예외와 generic `NotFoundError`는
+둘 다 `.code == "NOT_FOUND"`이므로 **문자열 code만으로는 정리 자격을
+판정할 수 없다**. production은 `fcm.is_unregistered()`를 통해 타입이 실제
+클래스일 때만 인정하며, SDK/stub에 해당 타입이 없거나 타입이 아니면
+`False`로 닫힌다.
 
 ### 전략 옵션
 
 #### Option A: 전송 시점 정리 (Lazy Cleanup) ⭐ 권장
 
 ```python
+from app.notifications import fcm
+
 # FCM 전송 후 응답 확인
-response = messaging.send(message)
-# 또는 send_multicast 사용 시
-response = messaging.send_multicast(message)
+response = messaging.send_each_for_multicast(message)
 
 # 실패한 토큰 처리
+confirmed_unregistered = []
 for idx, result in enumerate(response.responses):
-    if not result.success:
-        error_code = result.exception.code
-        if error_code in ['UNREGISTERED', 'INVALID_ARGUMENT']:
-            # 무효 토큰 삭제
-            delete_device_token(tokens[idx])
+    if not result.success and fcm.is_unregistered(result.exception):
+        confirmed_unregistered.append(tokens[idx])
+
+# token-only DELETE 금지. 발송 때 포착한 owner UID와 sent token 교집으로 제한한다.
+if confirmed_unregistered:
+    crud.purge_unregistered_devices(
+        db,
+        owner_uid=captured_uid,
+        sent_tokens=tokens,
+        unregistered_tokens=confirmed_unregistered,
+    )
+    db.commit()  # helper는 commit하지 않으므로 호출자가 기존 트랜잭션 경계에서 commit
 ```
 
 **장점:**
 
 - 실제 문제 발생 시에만 정리 (불필요한 API 호출 없음)
 - 구현 간단
-- FCM 응답으로 정확한 상태 파악
+- SDK가 `UnregisteredError`로 mapping한 확정 미등록만 정리
 
 **단점:**
 
 - 첫 번째 실패 시까지 무효 토큰 유지
 - 알림 전송 실패 1회 발생
 
-#### Option B: 주기적 검증 (Scheduled Cleanup)
+#### Option B: `updated_at` retention cleanup (구현됨)
 
 ```python
-# 매일 새벽 3시 실행
-@scheduler.scheduled_job('cron', hour=3)
-async def cleanup_stale_tokens():
-    # 30일 이상 미사용 토큰 삭제
-    cutoff = datetime.now() - timedelta(days=30)
-    await db.execute(
-        "DELETE FROM user_devices WHERE last_used < ?",
-        (cutoff,)
-    )
+# 매일 03:20:01 KST. 설정 파싱 실패 시 90일, 최솟값 7일,
+# 상한 clamp는 없다. 현재 모델에 `last_used`는 없으므로 `updated_at`을 쓴다.
+raw_days = os.getenv("USER_DEVICES_RETENTION_DAYS", "90")
+try:
+    retention_days = int(raw_days)
+except ValueError:
+    retention_days = 90
+retention_days = max(7, retention_days)
+cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=retention_days)
+db.query(UserDevice).filter(UserDevice.updated_at < cutoff).delete()
+db.commit()
 ```
 
 **장점:**
 
-- 미사용 토큰 자동 정리
+- 오래 갱신되지 않은 레코드 자동 정리
 - DB 크기 관리
 
 **단점:**
 
-- `last_used` 컬럼 추가 필요
-- 토큰 갱신 시점 추적 필요
+- 실제 사용 시점이 아니라 `updated_at`을 보므로, 전송 실패 즉시 정리를 대체하지 않음
+- job은 실패를 로그하고 종료하는 best-effort이며, 별도 재시도/경보는 없음
 
 #### Option C: 하이브리드 (권장 조합)
 
 ```text
-1. FCM 전송 실패 시 즉시 삭제 (Option A)
-2. 30일 이상 미사용 토큰 주기적 삭제 (Option B)
+1. `UnregisteredError`로 확정된 토큰만 UID + sent-token fence 후 정리 (Option A)
+2. `updated_at` 기준 retention cleanup (기본 90일, 최소 7일 보정; 상한 clamp 없음)
 3. 앱 시작 시 토큰 갱신 확인 (클라이언트)
 ```
 
@@ -2694,8 +2699,8 @@ async def cleanup_stale_tokens():
 ### 중복 토큰 처리
 
 ```sql
--- user_devices 테이블의 UNIQUE 제약
-UNIQUE(user_id, device_token)
+-- user_devices 테이블의 UNIQUE 제약: token 자체가 전역 unique
+UNIQUE(device_token)
 
 -- 같은 토큰이 다른 user_id로 등록 시도 시
 -- (기기 소유자 변경, 로그아웃 후 다른 계정 로그인)
@@ -2706,11 +2711,11 @@ ON CONFLICT (device_token) DO UPDATE SET
 
 ### 구현 체크리스트
 
-- [ ] FCM 전송 응답 핸들링 (무효 토큰 삭제)
+- [x] FCM 전송 응답 핸들링 (`UnregisteredError`만 UID + sent-token fence 후 정리)
 - [ ] `last_used` 컬럼 추가 (선택)
-- [ ] 주기적 정리 Job 추가 (선택)
-- [ ] 멀티 디바이스 정책 결정
-- [ ] 중복 토큰 처리 로직 구현
+- [x] 주기적 정리 Job (`updated_at`, 매일 03:20:01 KST, 기본 90일)
+- [x] 멀티 디바이스 정책: 현재 사용자의 모든 등록 기기
+- [x] 중복 토큰 처리: `device_token` 충돌 시 UPSERT로 소유권 이전
 
 ### 관련 문서
 

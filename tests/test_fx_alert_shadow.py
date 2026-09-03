@@ -57,6 +57,30 @@ def _fx_candidate(setting_id: int = 5) -> CachedAlertSetting:
     )
 
 
+def _assert_owner_fenced_delete(case, mock_db, *, uid: str, tokens: tuple) -> None:
+    """삭제가 **user_id fence + 보낸 토큰 교집합** 두 조건으로 걸렸는지 단언한다.
+
+    `mock_db.query.assert_called()` 만으로는 token-only DELETE 회귀를 잡지 못한다
+    (구 코드도 query 를 호출했다). 실제 WHERE 절을 컴파일해 확인한다.
+    """
+    mock_db.query.assert_called()
+    filter_calls = mock_db.query.return_value.filter.call_args_list
+    case.assertTrue(filter_calls, "filter() 가 호출되지 않았다")
+    clauses = [
+        str(c.compile(compile_kwargs={"literal_binds": True}))
+        for c in filter_calls[-1].args
+    ]
+    case.assertTrue(
+        any(f"user_id = '{uid}'" in c for c in clauses),
+        f"user_id fence 없음: {clauses}",
+    )
+    token_sql = ", ".join(repr(t) for t in sorted(tokens))
+    case.assertTrue(
+        any(f"device_token IN ({token_sql})" in c for c in clauses),
+        f"토큰 교집합 불일치: {clauses}",
+    )
+
+
 def _fx_snapshot(setting_id: int = 5) -> FreshSettingSnapshot:
     return FreshSettingSnapshot(
         setting_id=setting_id, enabled=True, triggered=False,
@@ -399,10 +423,26 @@ class TestFxCanaryBackend(unittest.TestCase):
              patch("app.crud.create_notification_log"):
             FxCanaryBackend().persist_result(
                 _fx_candidate(), 1455.0,
-                {"success_count": 1, "failure_count": 1, "failed_tokens": ["bad"]},
+                # 보낸 토큰(device_tokens=("t1",)) 안의 것이어야 fence 를 통과한다
+                {"success_count": 1, "failure_count": 1, "failed_tokens": ["t1"]},
             )
-        mock_db.query.assert_called()
+        _assert_owner_fenced_delete(self, mock_db, uid="u1", tokens=("t1",))
         mock_db.commit.assert_called()
+
+    def test_persist_out_of_sent_failed_token_is_not_deleted(self):
+        """보낸 적 없는 토큰은 삭제하지 않는다 (fail-closed)."""
+        mock_db, ctx = _mock_db_ctx()
+        with patch("app.database.get_db_context", return_value=ctx), \
+             patch("app.crud.mark_setting_triggered"), \
+             patch("app.crud.create_notification_log"):
+            FxCanaryBackend().persist_result(
+                _fx_candidate(), 1455.0,
+                {"success_count": 1, "failure_count": 1, "failed_tokens": ["never-sent"]},
+            )
+        self.assertEqual(
+            mock_db.query.return_value.filter.return_value.delete.call_count, 0,
+            "sent_tokens 밖 토큰이 삭제됐다",
+        )
 
 
 class TestFxCanaryEvaluatorAndHook(unittest.TestCase):

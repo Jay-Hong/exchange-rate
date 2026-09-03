@@ -123,10 +123,16 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
       'test_maintenance_is_strictly_more_permissive_than_online',)),
     ('S2-6 create_engine 이 kwargs 를 안 받음 → 순수 함수는 맞는데 **배선이 끊긴다**',
      'app/database.py',
-     [('engine = create_engine(DATABASE_URL, **_engine_kwargs)\n',
-       'engine = create_engine(DATABASE_URL)\n')],
+     [('engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)\n',
+       'engine = create_engine(DATABASE_URL, hide_parameters=True)\n')],
      ('tests/test_pg_engine_binding.py::TestWorkloadProfileReachesTheServer::'
       'test_each_profile_lands_all_three_timeouts_on_a_live_connection',)),
+    ('S2-20 bind parameter 숨김 제거 → DB 오류 문자열에 UID·token 원문이 실린다',
+     'app/database.py',
+     [('engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)\n',
+       'engine = create_engine(DATABASE_URL, **_engine_kwargs)\n')],
+     ('tests/test_device_token_cleanup_observability.py::TestRegistrationFailurePrivacy::'
+      'test_application_engine_hides_sql_bind_parameters',)),
     ('S2-7 profile 검증을 건너뛰고 raw env 를 그대로 사용 → 기동이 안 죽는다',
      'app/database.py',
      [('DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()\n',
@@ -144,8 +150,8 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
        '_early_profile = "online"\n'),
       ('_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, DB_WORKLOAD_PROFILE)\n',
        '_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, _early_profile)\n'),
-      ('engine = create_engine(DATABASE_URL, **_engine_kwargs)\n',
-       'engine = create_engine(DATABASE_URL, **_engine_kwargs)\n'
+      ('engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)\n',
+       'engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)\n'
        'DB_WORKLOAD_PROFILE = _validate_profile()\n')],
      ('tests/test_pg_engine_binding.py::TestValidationPrecedesEngineCreationAtRuntime::'
       'test_the_profile_is_bound_before_create_engine_runs',)),
@@ -224,8 +230,8 @@ MUTANTS: list[tuple[str, str, list[tuple[str, str]], tuple[str, ...]]] = [
        '_early_profile = "online"\n'),
       ('_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, DB_WORKLOAD_PROFILE)\n',
        '_engine_kwargs = database_settings.engine_kwargs(DATABASE_URL, _early_profile)\n'),
-      ('engine = create_engine(DATABASE_URL, **_engine_kwargs)\n',
-       'engine = create_engine(DATABASE_URL, **_engine_kwargs)\n'
+      ('engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)\n',
+       'engine = create_engine(DATABASE_URL, hide_parameters=True, **_engine_kwargs)\n'
        'DB_WORKLOAD_PROFILE = database_settings.resolve_profile_from_env()\n')],
      ('tests/test_db_workload_profile.py::TestValidationPrecedesEngineCreation::'
       'test_profile_is_resolved_before_create_engine_in_source_order',)),
@@ -344,7 +350,8 @@ def classify(codes: dict[str, int], skips: dict[str, int | None]) -> str:
             return "INFRA"
     # ⚠️ `any` 가 아니라 `all` 이다 — `mutation_auth_executor_ledger.classify` 와 같은 의미로
     #    맞춘다. probe 가 둘 이상일 때 한쪽이 공허해도 KILLED 로 접히면 그 공허함이 숨는다.
-    #    **오늘은 판정 불변**이다: 전 22변이가 단일 probe 임을 실측했다.
+    #    `any`→`all` 보강 당시에는 22변이가 모두 단일 probe라 당시 판정은 불변이었다.
+    #    지금은 다중 probe 변이도 있으므로 `all`이 실제로 load-bearing이다.
     return "KILLED" if all(rc == 1 for rc in codes.values()) else "SURVIVED"
 
 

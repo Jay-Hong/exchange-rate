@@ -153,7 +153,10 @@ async def notify_user_devices_sync(db: Session, user_id: str):
         FCM_BATCH_SIZE = 500
         total_success = 0
         total_failure = 0
-        all_failed_tokens = []
+        # batch 별 (sent ∩ confirmed-unregistered)만 누적한다. 같은 사용자라도
+        # 서로 다른 500개 batch의 sent/failed를 마지막에 한꺼번에 교차하면
+        # out-of-batch 오류가 다른 batch의 실제 토큰과 잘못 결합할 수 있다.
+        unregistered_by_uid = {}
 
         for i in range(0, len(tokens), FCM_BATCH_SIZE):
             batch_tokens = tokens[i:i + FCM_BATCH_SIZE]
@@ -163,28 +166,54 @@ async def notify_user_devices_sync(db: Session, user_id: str):
             )
             total_success += result["success_count"]
             total_failure += result["failure_count"]
-            all_failed_tokens.extend(result["failed_tokens"])
+            crud.accumulate_unregistered_by_owner(
+                unregistered_by_uid,
+                owner_uid=user_id,
+                sent_tokens=batch_tokens,
+                unregistered_tokens=result["failed_tokens"],
+            )
 
-        # 무효 토큰 일괄 삭제 (batch)
-        if all_failed_tokens:
-            db.query(models.UserDevice).filter(
-                models.UserDevice.device_token.in_(all_failed_tokens)
-            ).delete(synchronize_session=False)
-            db.commit()
+        # 확정 미등록 토큰 삭제 — commit 위치는 유지한다. 정상 sender 계약에서는
+        # 기존 failed_tokens 조건과 동치지만, invalid/out-of-batch 결과는 의도적으로
+        # accumulator에 들어오지 않으므로 commit하지 않는다.
+        if unregistered_by_uid:
+            try:
+                crud.purge_unregistered_by_owner(db, unregistered_by_uid)
+                db.commit()
+            except Exception as exc:
+                # SQLAlchemy 예외 문자열/traceback에는 bind parameter(전체 UID·FCM token)가
+                # 포함될 수 있다. 원문은 남기지 않고 세션만 정상 상태로 되돌린다.
+                rollback_error_type = crud.rollback_token_cleanup_safely(db)
+                logger.warning(
+                    "동기화 푸시 확정 미등록 토큰 정리 실패 (무시됨)",
+                    extra={
+                        "event": "sync_alerts_token_cleanup",
+                        "outcome": "failed",
+                        "error_type": type(exc).__name__,
+                        "rollback_error_type": rollback_error_type,
+                    },
+                )
 
         logger.info(
             "동기화 푸시 발송",
             extra={
                 "event": "sync_alerts_sent",
-                "user_id": user_id,
                 "success": total_success,
                 "failure": total_failure,
                 "total": len(tokens)
             }
         )
 
-    except Exception:
-        logger.warning("동기화 푸시 실패 (무시됨)", exc_info=True)
+    except Exception as exc:
+        # SDK/DB 예외 원문에는 token·UID가 들어갈 수 있으므로 traceback을 기록하지 않는다.
+        logger.warning(
+            "동기화 푸시 실패 (무시됨)",
+            extra={
+                "event": "sync_alerts_send",
+                "outcome": "failed",
+                "error_type": type(exc).__name__,
+            },
+        )
 
 
 # DB 테이블 생성 — atomic_write_control(P1 control plane)은 제외 (migration script가
@@ -3713,7 +3742,6 @@ async def register_device(
             "📱 디바이스 등록",
             extra={
                 "event": "device_register",
-                "user_id": user_id,
                 "platform": body.platform,
                 "device_id": device.id
             }
@@ -3725,9 +3753,20 @@ async def register_device(
             device_id=device.id
         )
 
-    except Exception:
-        logger.error("디바이스 등록 실패", exc_info=True)
-        raise HTTPException(status_code=500, detail="Device registration failed")
+    except Exception as exc:
+        # crud의 SQL 오류에는 전체 UID·FCM token bind parameter가 포함될 수 있다.
+        # 원문/traceback을 기록하지 않는다. 아래 HTTPException은 except 블록 밖에서
+        # 새로 만들어 원 예외를 __context__로 보존하지 않고 API 계약만 500으로 접는다.
+        logger.error(
+            "디바이스 등록 실패",
+            extra={
+                "event": "device_register",
+                "outcome": "failed",
+                "error_type": type(exc).__name__,
+            },
+        )
+
+    raise HTTPException(status_code=500, detail="Device registration failed")
 
 
 @app.delete("/api/register-device")
@@ -3750,7 +3789,10 @@ async def unregister_device(
     deleted = crud.delete_device(db=db, user_id=user_id, device_token=device_token)
 
     if deleted:
-        logger.info("📱 디바이스 삭제", extra={"user_id": user_id})
+        logger.info(
+            "📱 디바이스 삭제",
+            extra={"event": "device_unregister", "deleted": True},
+        )
         return {"success": True, "message": "Device unregistered"}
     else:
         raise HTTPException(status_code=404, detail="Device not found")

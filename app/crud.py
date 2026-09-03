@@ -4,9 +4,10 @@
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone as dt_timezone
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Iterable, Optional, Tuple
 
 # 서드파티 라이브러리
 from sqlalchemy.orm import Session
@@ -1821,7 +1822,6 @@ def register_device(
                 extra={
                     "old_user": transferred_from[:8] + "...",
                     "new_user": user_id[:8] + "...",
-                    "token": device_token[:20] + "..."
                 }
             )
             logger.info(
@@ -1841,9 +1841,19 @@ def register_device(
 
         return device
 
-    except Exception as e:
-        db.rollback()
-        logger.error("기기 등록 실패", exc_info=True)
+    except Exception as exc:
+        # UPSERT 오류의 SQL bind parameter에는 전체 UID·FCM token이 들어간다.
+        # traceback/str(exc)를 기록하지 않고 rollback 실패도 원문 없이 격리한다.
+        rollback_error_type = rollback_token_cleanup_safely(db)
+        logger.error(
+            "기기 등록 실패",
+            extra={
+                "event": "device_register",
+                "outcome": "failed",
+                "error_type": type(exc).__name__,
+                "rollback_error_type": rollback_error_type,
+            },
+        )
         raise
 
 
@@ -1874,29 +1884,172 @@ def delete_device(db: Session, user_id: str, device_token: str) -> bool:
     return deleted > 0
 
 
-def delete_devices_by_token(db: Session, device_token: str) -> int:
-    """
-    무효 토큰 삭제 (FCM 발송 실패 시 호출)
+def _validated_token_set(value, field: str):
+    """토큰 collection을 원자적으로 materialize하고 검증한다."""
+    if isinstance(value, (str, bytes)):
+        return None, f"{field}:not-a-collection"
+    if isinstance(value, Mapping):
+        # dict 는 key 를 순회해 "문자열 key = 토큰" 으로 조용히 오인된다.
+        return None, f"{field}:mapping-not-a-token-collection"
+    try:
+        items = list(value)
+    except Exception:
+        # generator 가 일부를 yield 한 뒤 던져도 caller 상태는 아직 바뀌지 않는다.
+        # BaseException(KeyboardInterrupt/SystemExit)은 삼키지 않는다.
+        return None, f"{field}:materialization-failed"
+    out = set()
+    for item in items:
+        if not isinstance(item, str) or not item:
+            return None, f"{field}:non-string-or-empty-element"
+        out.add(item)
+    return out, None
 
-    Args:
-        db: 데이터베이스 세션
-        device_token: 무효화된 FCM Device Token
+
+def _log_token_purge_rejection(reason: str) -> None:
+    """원문 UID·토큰 없이 fail-closed 거부 사유만 기록한다."""
+    logger.warning(
+        "미등록 토큰 삭제 거부",
+        extra={
+            "event": "device_token_purge",
+            "outcome": "invalid_input",
+            "reason": reason,
+        },
+    )
+
+
+def rollback_token_cleanup_safely(db: Session) -> Optional[str]:
+    """cleanup 실패 뒤 rollback하되, rollback 오류까지 호출자 밖으로 새지 않게 한다.
+
+    연결 손실 시 ``rollback()`` 자체가 실패할 수 있다. 그 예외를 다시 올리면 원래
+    SQLAlchemy 오류가 ``__context__``로 붙어 bind parameter(UID·token)가 상위
+    traceback에 노출된다. 원문 없이 rollback 오류의 타입만 반환한다.
+    """
+    try:
+        db.rollback()
+        return None
+    except Exception as exc:
+        return type(exc).__name__
+
+
+def purge_unregistered_devices(
+    db: Session,
+    *,
+    owner_uid: str,
+    sent_tokens: Iterable[str],
+    unregistered_tokens: Iterable[str],
+) -> int:
+    """FCM 이 **확정한 미등록 토큰**만, **보낸 사용자 소유분에 한해** 삭제한다.
+
+    구 `delete_devices_by_token(db, device_token)` 을 대체한다. 구 함수는
+    (a) `device_token` 만 보고 지웠고 (b) 스스로 commit 했다. `device_token` 은
+    전역 unique 이고 `register_device` 가 충돌 시 `user_id` 를 갱신하므로(소유권 이전),
+    A 로그아웃 뒤 B 가 같은 기기에 로그인하면 **A 의 뒤늦은 정리가 B 의 정상 등록을 지운다.**
+
+    두 겹으로 막는다.
+      1. `user_id == owner_uid` — 발송 시점에 포착한 소유자여야 한다. 정리 시점에
+         현재 소유자를 다시 조회하면 이미 B 로 넘어가 있어 fence 가 무의미해진다.
+      2. `∩ sent_tokens` — 실제로 보낸 토큰만. 직접 호출 경로는 여기서 producer
+         결과를 fail-closed 로 좁힌다. 다중 발송 경로는 accumulator가 **각 발송별로**
+         먼저 같은 교집합을 계산하고, 이 helper는 이미 좁혀진 집합을 다시 검증한다.
+         `sent_tokens` 가 비면 교집합이 비어 **아무것도 지우지 않는다.**
+
+    ⛔ **commit 하지 않는다.** 호출자마다 트랜잭션 경계가 다르고(알림 history·triggered
+    상태와 같은 세션을 공유), helper 가 몰래 commit 하면 그 경계가 바뀐다. 호출자는
+    기존 `db.commit()` 을 **있던 자리 그대로** 유지한다.
 
     Returns:
-        삭제된 레코드 개수
+        삭제된 레코드 개수 (0 이면 지울 것이 없었다는 뜻이며 오류가 아니다)
     """
-    deleted = db.query(models.UserDevice).filter(
-        models.UserDevice.device_token == device_token
-    ).delete()
+    # 입력을 신뢰하지 않는다. 이 helper 는 보안 경계이므로 타입 힌트가 아니라
+    # 런타임 검사로 fail-closed 한다. 하나라도 어긋나면 **전체를 0 으로** 만든다.
+    #   · bare str/bytes 를 넘기면 문자 단위로 분해된다("abc" → a,b,c) — 반드시 거부
+    #   · None·정수·unhashable 원소는 조용한 오삭제나 예외가 된다 — 거부
+    if not isinstance(owner_uid, str) or not owner_uid:
+        _log_token_purge_rejection("owner_uid:not-a-nonempty-string")
+        return 0
 
-    db.commit()
-
-    if deleted:
-        logger.warning(
-            "무효 토큰 삭제",
-            extra={"token": device_token[:20] + "...", "deleted": deleted}
+    sent, err = _validated_token_set(sent_tokens, "sent_tokens")
+    if err is None:
+        candidates, err = _validated_token_set(
+            unregistered_tokens, "unregistered_tokens"
         )
+    if err is not None:
+        _log_token_purge_rejection(err)
+        return 0
+
+    eligible = sorted(candidates & sent)
+    if not eligible:
+        return 0
+
+    deleted = db.query(models.UserDevice).filter(
+        models.UserDevice.user_id == owner_uid,
+        models.UserDevice.device_token.in_(eligible),
+    ).delete(synchronize_session=False)
+    # 성공 로그는 남기지 않는다. helper는 commit하지 않으므로 여기서
+    # "삭제 완료"를 기록하면 후속 commit 실패/롤백 시 거짓 성공 로그가 된다.
+    # durable 결과는 commit을 소유한 호출자가 commit 후에 기록한다.
     return deleted
+
+
+def accumulate_unregistered_by_owner(
+    acc: dict,
+    *,
+    owner_uid,
+    sent_tokens,
+    unregistered_tokens,
+) -> None:
+    """발송 단위로 검증한 cleanup 대상만 UID 별로 누적한다.
+
+    여러 사용자의 발송을 한 루프에서 처리하는 경로는 실패 토큰을 평평한 리스트로
+    합쳐 왔다. 그러면 어느 토큰이 누구 것인지 사라져 `purge_unregistered_devices`
+    의 `owner_uid` fence 를 걸 수 없다 — 마지막 사용자 uid 로 잘못 fence 하면
+    컴파일도 되고 리뷰도 통과한다. 그래서 발송 시점에 UID 를 함께 붙잡는다.
+
+    각 발송에서 먼저 `unregistered ∩ sent` 를 계산한다. UID 별 sent 합집합과
+    unregistered 합집합을 나중에 교차하면, 같은 UID 의 서로 다른 두 발송 사이에서
+    한 발송의 out-of-sent 오류가 다른 발송의 sent 토큰과 잘못 결합할 수 있다.
+
+    입력 materialize·검증이 모두 끝나기 전에는 `acc` 를 건드리지 않는다. 따라서
+    generator 중간 예외나 unhashable 원소가 있어도 부분 bucket이 남지 않는다.
+    """
+    if not isinstance(owner_uid, str) or not owner_uid:
+        _log_token_purge_rejection("owner_uid:not-a-nonempty-string")
+        return
+
+    candidates, err = _validated_token_set(
+        unregistered_tokens, "unregistered_tokens"
+    )
+    if err is not None:
+        _log_token_purge_rejection(err)
+        return
+    if not candidates:
+        return
+
+    sent, err = _validated_token_set(sent_tokens, "sent_tokens")
+    if err is not None:
+        _log_token_purge_rejection(err)
+        return
+
+    eligible = candidates & sent
+    if not eligible:
+        return
+    acc.setdefault(owner_uid, set()).update(eligible)
+
+
+def purge_unregistered_by_owner(db: Session, acc: dict) -> int:
+    """`accumulate_unregistered_by_owner` 로 모은 것을 UID 별로 삭제한다.
+
+    ⛔ **commit 하지 않는다.** 호출자가 기존 자리에서 commit 한다.
+    """
+    total = 0
+    for owner_uid, eligible in acc.items():
+        total += purge_unregistered_devices(
+            db,
+            owner_uid=owner_uid,
+            sent_tokens=eligible,
+            unregistered_tokens=eligible,
+        )
+    return total
 
 
 def get_devices_by_user(db: Session, user_id: str) -> List[models.UserDevice]:
@@ -2479,7 +2632,8 @@ def process_rate_alerts(
         return 0
 
     sent_count = 0
-    all_failed_tokens = []  # 일괄 삭제용 무효 토큰 수집
+    # UID 별 cleanup eligible 토큰 — 각 발송의 (sent ∩ unregistered)만 누적한다
+    unregistered_by_uid: dict = {}
 
     for rate_info in changed_rates:
         bank = rate_info["bank"]
@@ -2581,36 +2735,59 @@ def process_rate_alerts(
                         }
                     )
 
-                # 무효 토큰 수집 (나중에 일괄 삭제)
-                if result["failed_tokens"]:
-                    all_failed_tokens.extend(result["failed_tokens"])
+                # 확정 미등록 토큰 수집 — **발송 시점의 UID 와 보낸 토큰을 함께** 붙잡는다
+                accumulate_unregistered_by_owner(
+                    unregistered_by_uid,
+                    owner_uid=user_id,
+                    sent_tokens=tokens,
+                    unregistered_tokens=result["failed_tokens"],
+                )
 
-        except Exception as e:
+        except Exception as exc:
             # 알림 처리 실패가 환율 저장에 영향 주지 않도록
-            logger.exception(
+            # DB 예외 traceback/문자열에는 조회·쓰기 bind parameter의 전체 UID가
+            # 포함될 수 있으므로 안전한 유형만 기록한다.
+            logger.error(
                 "알림 처리 실패",
                 extra={
                     "bank": bank,
                     "currency": currency,
                     "rate": rate,
-                    "error": str(e)
+                    "error_type": type(exc).__name__,
                 }
             )
             continue
 
-    # 무효 토큰 일괄 삭제 (N번 commit → 1번 commit으로 최적화)
-    if all_failed_tokens:
+    # 확정 미등록 토큰 일괄 삭제 (N번 commit → 1번 commit으로 최적화)
+    if unregistered_by_uid:
         try:
-            deleted_count = db.query(models.UserDevice).filter(
-                models.UserDevice.device_token.in_(all_failed_tokens)
-            ).delete(synchronize_session=False)
+            deleted_count = purge_unregistered_by_owner(db, unregistered_by_uid)
             db.commit()
             logger.info(
-                "무효 토큰 일괄 삭제",
-                extra={"count": deleted_count, "tokens": len(all_failed_tokens)}
+                "확정 미등록 토큰 일괄 정리 결과",
+                extra={
+                    "deleted_count": deleted_count,
+                    "owners": len(unregistered_by_uid),
+                    "candidate_count": sum(
+                        len(tokens) for tokens in unregistered_by_uid.values()
+                    ),
+                    "outcome": (
+                        "deleted" if deleted_count else "not_present_or_rebound"
+                    ),
+                }
             )
-        except Exception as e:
-            logger.exception("무효 토큰 삭제 실패", extra={"error": str(e)})
+        except Exception as exc:
+            # SQLAlchemy traceback은 bind parameter(UID·token)를 노출할 수 있다.
+            rollback_error_type = rollback_token_cleanup_safely(db)
+            logger.error(
+                "확정 미등록 토큰 정리 실패",
+                extra={
+                    "event": "device_token_purge",
+                    "outcome": "failed",
+                    "error_type": type(exc).__name__,
+                    "rollback_error_type": rollback_error_type,
+                },
+            )
 
     return sent_count
 
@@ -3625,7 +3802,8 @@ def process_source_rate_alerts(
         return 0
 
     sent_count = 0
-    all_failed_tokens: List[str] = []
+    # UID 별 cleanup eligible 토큰 — 각 발송의 (sent ∩ unregistered)만 누적한다
+    unregistered_by_uid: dict = {}
 
     for rate_info in changed_rates:
         source = rate_info.get("source") or rate_info.get("bank")
@@ -3719,28 +3897,56 @@ def process_source_rate_alerts(
                         error_message=err_msg,
                     )
 
-                if result["failed_tokens"]:
-                    all_failed_tokens.extend(result["failed_tokens"])
+                # 확정 미등록 토큰 수집 — **발송 시점의 UID 와 보낸 토큰을 함께** 붙잡는다
+                accumulate_unregistered_by_owner(
+                    unregistered_by_uid,
+                    owner_uid=user_id,
+                    sent_tokens=tokens,
+                    unregistered_tokens=result["failed_tokens"],
+                )
 
-        except Exception:
-            logger.exception(
+        except Exception as exc:
+            # DB 예외 traceback에는 조회·쓰기 bind parameter의 전체 UID가 포함될 수 있다.
+            logger.error(
                 "source 알림 처리 실패",
-                extra={"source": source, "asset": asset, "rate": rate},
+                extra={
+                    "source": source,
+                    "asset": asset,
+                    "rate": rate,
+                    "error_type": type(exc).__name__,
+                },
             )
             continue
 
-    # 무효 토큰 일괄 삭제
-    if all_failed_tokens:
+    # 확정 미등록 토큰 일괄 삭제
+    if unregistered_by_uid:
         try:
-            deleted_count = db.query(models.UserDevice).filter(
-                models.UserDevice.device_token.in_(all_failed_tokens)
-            ).delete(synchronize_session=False)
+            deleted_count = purge_unregistered_by_owner(db, unregistered_by_uid)
             db.commit()
             logger.info(
-                "source 알림: 무효 토큰 일괄 삭제",
-                extra={"count": deleted_count, "tokens": len(all_failed_tokens)},
+                "source 알림: 확정 미등록 토큰 일괄 정리 결과",
+                extra={
+                    "deleted_count": deleted_count,
+                    "owners": len(unregistered_by_uid),
+                    "candidate_count": sum(
+                        len(tokens) for tokens in unregistered_by_uid.values()
+                    ),
+                    "outcome": (
+                        "deleted" if deleted_count else "not_present_or_rebound"
+                    ),
+                },
             )
-        except Exception:
-            logger.exception("source 알림: 무효 토큰 삭제 실패")
+        except Exception as exc:
+            # SQLAlchemy traceback은 bind parameter(UID·token)를 노출할 수 있다.
+            rollback_error_type = rollback_token_cleanup_safely(db)
+            logger.error(
+                "source 알림: 확정 미등록 토큰 정리 실패",
+                extra={
+                    "event": "source_device_token_purge",
+                    "outcome": "failed",
+                    "error_type": type(exc).__name__,
+                    "rollback_error_type": rollback_error_type,
+                },
+            )
 
     return sent_count

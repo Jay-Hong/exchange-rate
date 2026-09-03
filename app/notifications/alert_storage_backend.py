@@ -188,20 +188,40 @@ class SourceAlertBackend(AlertStorageBackend):
                     error_message=err_msg,
                 )
 
-            # failed_tokens cleanup (기존 패턴 동일)
+            # 확정 미등록 토큰 cleanup — candidate 하나 = 단일 사용자.
+            # sent_tokens 는 실제 발송에 쓴 목록 그대로 (evaluator 가 같은 candidate 를 넘긴다).
             failed_tokens = fcm_result.get("failed_tokens") or []
             if failed_tokens:
                 try:
-                    deleted = db.query(models.UserDevice).filter(
-                        models.UserDevice.device_token.in_(failed_tokens),
-                    ).delete(synchronize_session=False)
+                    deleted = crud.purge_unregistered_devices(
+                        db,
+                        owner_uid=candidate.user_id,
+                        sent_tokens=candidate.device_tokens,
+                        unregistered_tokens=failed_tokens,
+                    )
                     db.commit()
                     logger.info(
-                        "[alert_evaluator] failed_tokens cleanup",
-                        extra={"deleted_count": deleted, "tokens": len(failed_tokens)},
+                        "[alert_evaluator] 확정 미등록 토큰 정리 결과",
+                        extra={
+                            "deleted_count": deleted,
+                            "candidate_count": len(failed_tokens),
+                            "outcome": (
+                                "deleted" if deleted else "not_present_or_rebound"
+                            ),
+                        },
                     )
-                except Exception:
-                    logger.exception("[alert_evaluator] failed_tokens cleanup 실패")
+                except Exception as exc:
+                    # DB 예외의 SQL bind parameter에 UID·token이 포함될 수 있다.
+                    rollback_error_type = crud.rollback_token_cleanup_safely(db)
+                    logger.error(
+                        "[alert_evaluator] 확정 미등록 토큰 정리 실패",
+                        extra={
+                            "event": "alert_device_token_purge",
+                            "outcome": "failed",
+                            "error_type": type(exc).__name__,
+                            "rollback_error_type": rollback_error_type,
+                        },
+                    )
 
     def build_payload(self, candidate: "CachedAlertSetting", triggered_rate: Decimal) -> tuple[str, str, dict]:
         """FCM title/body/data 생성 — 기존 `process_source_rate_alerts` 패턴 보존.
@@ -425,10 +445,32 @@ class FxCanaryBackend(FxNotificationBackend):
             failed_tokens = fcm_result.get("failed_tokens") or []
             if failed_tokens:
                 try:
-                    deleted = db.query(models.UserDevice).filter(
-                        models.UserDevice.device_token.in_(failed_tokens),
-                    ).delete(synchronize_session=False)
+                    deleted = crud.purge_unregistered_devices(
+                        db,
+                        owner_uid=candidate.user_id,
+                        sent_tokens=candidate.device_tokens,
+                        unregistered_tokens=failed_tokens,
+                    )
                     db.commit()
-                    logger.info("FX canary 무효 토큰 삭제", extra={"count": deleted})
-                except Exception:
-                    logger.exception("FX canary 무효 토큰 삭제 실패")
+                    logger.info(
+                        "FX canary 확정 미등록 토큰 정리 결과",
+                        extra={
+                            "deleted_count": deleted,
+                            "candidate_count": len(failed_tokens),
+                            "outcome": (
+                                "deleted" if deleted else "not_present_or_rebound"
+                            ),
+                        },
+                    )
+                except Exception as exc:
+                    # DB 예외의 SQL bind parameter에 UID·token이 포함될 수 있다.
+                    rollback_error_type = crud.rollback_token_cleanup_safely(db)
+                    logger.error(
+                        "FX canary 확정 미등록 토큰 정리 실패",
+                        extra={
+                            "event": "fx_canary_device_token_purge",
+                            "outcome": "failed",
+                            "error_type": type(exc).__name__,
+                            "rollback_error_type": rollback_error_type,
+                        },
+                    )

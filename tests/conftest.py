@@ -82,6 +82,16 @@ class _StubNotFoundError(_StubFirebaseError):
         _StubFirebaseError.__init__(self, "NOT_FOUND", message, cause, http_response)
 
 
+class _StubUnregisteredError(_StubNotFoundError):
+    """firebase-admin 6.9.0 `messaging.UnregisteredError` — `NotFoundError` **직하**.
+
+    ⛔ 이 계층이 hotfix 의 전제다. `.code` 는 부모를 그대로 물려받아 **"NOT_FOUND"** 이며
+       generic `NotFoundError` 와 **문자열로 구분되지 않는다**. stub 이 이를 형제로 만들거나
+       `.code` 를 "UNREGISTERED" 로 두면, "타입으로만 삭제 자격을 판정한다" 는 계약이
+       가짜 green 이 된다 — 문자열로도 구분되는 세계에서 테스트하는 셈이기 때문이다.
+    """
+
+
 class _StubUserNotFoundError(_StubNotFoundError):
     """`_auth_utils.UserNotFoundError` — `NotFoundError` 직하."""
 
@@ -150,8 +160,30 @@ _fb_auth.CertificateFetchError = _StubCertificateFetchError
 _fb_exceptions.FirebaseError = _StubFirebaseError
 # ⚠️ 계층은 wire 에서 보이지 않는다 — 위 형제 관계가 틀리면 매핑 테스트가 가짜 green 이 되므로
 #    `tests/test_firebase_auth_mapping.py` 의 fidelity 단언이 이 계층을 직접 잠근다.
+_fb_exceptions.InvalidArgumentError = _StubInvalidArgumentError
 _fb_exceptions.NotFoundError = _StubNotFoundError
 _fb_exceptions.UnavailableError = _StubUnavailableError
+
+class _StubResourceExhaustedError(_StubFirebaseError):
+    """`exceptions.ResourceExhaustedError` — `.code == "RESOURCE_EXHAUSTED"`."""
+
+    def __init__(self, message, cause=None, http_response=None):
+        _StubFirebaseError.__init__(self, "RESOURCE_EXHAUSTED", message, cause, http_response)
+
+
+class _StubQuotaExceededError(_StubResourceExhaustedError):
+    """`messaging.QuotaExceededError` — `.code` 는 **RESOURCE_EXHAUSTED** (QUOTA_EXCEEDED 아님)."""
+
+
+class _StubSenderIdMismatchError(_StubPermissionDeniedError):
+    """`messaging.SenderIdMismatchError` — `.code` 는 **PERMISSION_DENIED**."""
+
+
+class _StubThirdPartyAuthError(_StubUnauthenticatedError):
+    """`messaging.ThirdPartyAuthError` — `.code` 는 **UNAUTHENTICATED**."""
+
+
+_fb_exceptions.ResourceExhaustedError = _StubResourceExhaustedError
 _fb_exceptions.DeadlineExceededError = _StubDeadlineExceededError
 _fb_exceptions.UnauthenticatedError = _StubUnauthenticatedError
 _fb_exceptions.PermissionDeniedError = _StubPermissionDeniedError
@@ -173,6 +205,16 @@ for _m in ("firebase_admin.credentials", "firebase_admin.messaging"):
     _sub = MagicMock()
     sys.modules[_m] = _sub
     setattr(_firebase, _m.rsplit(".", 1)[1], _sub)
+
+# messaging 은 MagicMock 이라 `UnregisteredError` 도 **자동 생성 속성**(MagicMock)이 된다.
+# `isinstance(exc, messaging.UnregisteredError)` 는 그 상태에서 TypeError 를 던지거나,
+# `fcm.is_unregistered` 의 `isinstance(unregistered, type)` 가드에 걸려 **영원히 False** 가
+# 된다 — 삭제가 한 번도 일어나지 않는 세계에서 테스트하게 된다. 실제 클래스를 심는다.
+_fb_messaging = sys.modules["firebase_admin.messaging"]
+_fb_messaging.UnregisteredError = _StubUnregisteredError
+_fb_messaging.QuotaExceededError = _StubQuotaExceededError
+_fb_messaging.SenderIdMismatchError = _StubSenderIdMismatchError
+_fb_messaging.ThirdPartyAuthError = _StubThirdPartyAuthError
 
 # 1b. google.auth는 conftest가 stub하지 않아 **로컬에서 verify_firebase_token 본문 진입 자체가
 #     ImportError**였다(app/main.py가 함수 안에서 import). CI(lock)에는 설치돼 있어 로컬/CI가

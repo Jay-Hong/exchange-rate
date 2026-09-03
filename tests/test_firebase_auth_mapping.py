@@ -89,6 +89,69 @@ class TestStubFidelity(unittest.TestCase):
         self.assertEqual(fb_auth.CertificateFetchError("x", None).code, "UNKNOWN")
         self.assertEqual(fb_exceptions.FirebaseError("UNREGISTERED", "gone").code, "UNREGISTERED")
 
+    def test_messaging_unregistered_hierarchy_matches_sdk(self):
+        """`messaging.UnregisteredError` 계층 — hotfix 의 삭제 자격 판정 전제.
+
+        firebase-admin 6.9.0: `UnregisteredError <: NotFoundError <: FirebaseError`.
+        **부정 단언이 본체다** — 역방향이 성립하면 generic NotFound 까지 확정 미등록으로
+        취급돼 살아 있는 토큰이 지워진다. 그 회귀를 여기서 먼저 드러낸다.
+        """
+        from firebase_admin import messaging as fb_messaging
+        self.assertTrue(issubclass(fb_messaging.UnregisteredError, fb_exceptions.NotFoundError))
+        self.assertTrue(issubclass(fb_messaging.UnregisteredError, fb_exceptions.FirebaseError))
+        self.assertFalse(issubclass(fb_exceptions.NotFoundError, fb_messaging.UnregisteredError))
+
+    def test_other_messaging_error_hierarchies_match_sdk(self):
+        """hotfix 관측 stub의 나머지 public parent도 실물 6.9.0과 같아야 한다."""
+        from firebase_admin import messaging as fb_messaging
+
+        self.assertTrue(
+            issubclass(
+                fb_messaging.QuotaExceededError,
+                fb_exceptions.ResourceExhaustedError,
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                fb_messaging.SenderIdMismatchError,
+                fb_exceptions.PermissionDeniedError,
+            )
+        )
+        self.assertTrue(
+            issubclass(
+                fb_messaging.ThirdPartyAuthError,
+                fb_exceptions.UnauthenticatedError,
+            )
+        )
+        self.assertFalse(
+            issubclass(
+                fb_exceptions.ResourceExhaustedError,
+                fb_messaging.QuotaExceededError,
+            )
+        )
+
+    def test_messaging_module_identity_is_shared(self):
+        """`from firebase_admin import messaging` 과 sys.modules 항목이 **같은 객체**여야 한다.
+
+        갈리면 `fcm.is_unregistered` 가 보는 클래스와 테스트가 던지는 클래스가 달라져
+        타입 판정이 **영원히 False** 가 된다(삭제 0 인 세계에서 통과하는 가짜 green).
+        """
+        import sys
+        from firebase_admin import messaging as fb_messaging
+        self.assertIs(firebase_admin.messaging, fb_messaging)
+        self.assertIs(sys.modules["firebase_admin.messaging"], fb_messaging)
+
+    def test_messaging_error_codes_match_sdk(self):
+        """FCM mapping key 는 `.code` 로 나타나지 않는다 — 실물 상속이 platform code 를 준다."""
+        from firebase_admin import messaging as fb_messaging
+        self.assertEqual(fb_messaging.UnregisteredError("gone").code, "NOT_FOUND")
+        self.assertEqual(fb_messaging.QuotaExceededError("q").code, "RESOURCE_EXHAUSTED")
+        self.assertEqual(fb_messaging.SenderIdMismatchError("s").code, "PERMISSION_DENIED")
+        self.assertEqual(fb_messaging.ThirdPartyAuthError("t").code, "UNAUTHENTICATED")
+        # generic NotFound 와 문자열로 구분되지 않는다 — 이것이 타입 판정을 강제하는 이유
+        self.assertEqual(fb_exceptions.NotFoundError("nf").code,
+                         fb_messaging.UnregisteredError("gone").code)
+
     def test_google_transport_error_is_real_exception(self):
         self.assertTrue(issubclass(google_auth_exceptions.TransportError, BaseException))
 

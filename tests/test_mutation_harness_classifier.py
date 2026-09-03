@@ -223,6 +223,28 @@ except SystemExit:
 
 
 class TestDbEngineClassifierTreatsSkipAsInfra:
+    def test_all_shipped_mutation_anchors_are_current_and_syntax_valid(self):
+        """CI에서도 앵커 drift를 잡는다.
+
+        수동 배터리를 실제로 돌리기 전까지 정확 문자열 앵커가 0회가 된 사실을 모르면,
+        변이가 `INVALID`로 빠져도 일반 pytest는 초록이다. PG 없이도 가능한 적용·문법
+        검사는 여기서 전 변이에 대해 항상 수행한다.
+        """
+        sources = {}
+        failures = []
+        for name, rel, pairs, _probes in _BAT_DB.MUTANTS:
+            source = sources.setdefault(
+                rel, (_BAT_DB.REPO / rel).read_text(encoding="utf-8")
+            )
+            mutated, why = _BAT_DB.apply_pairs(source, pairs)
+            if mutated is None:
+                failures.append(f"{name}: {why}")
+                continue
+            valid, detail = _BAT_DB.syntax_ok(rel, mutated)
+            if not valid:
+                failures.append(f"{name}: {detail}")
+        assert failures == []
+
     def test_skip_with_rc_zero_is_infra_not_survived(self):
         """⛔ 이 슬라이스의 핵심 교정 — PG 없이 돌린 probe 가 변이를 살려준 것처럼 보였다."""
         assert _BAT_DB.classify({"a": 0}, {"a": 1}) == "INFRA"
@@ -245,7 +267,8 @@ class TestDbEngineClassifierTreatsSkipAsInfra:
 
         `mutation_db_engine` 은 한때 `any(rc == 1)` 이라 probe 둘 중 하나만 죽여도 KILLED 로
         접었다 — 나머지 probe 가 공허하다는 사실이 숨는다. `mutation_auth_executor_ledger` 는
-        처음부터 `all(...)` 이었다. **오늘 판정은 불변**이다(전 22변이가 단일 probe, 실측).
+        처음부터 `all(...)` 이었다. 보강 당시에는 22변이가 모두 단일 probe라 당시
+        판정은 불변이었지만, 지금은 다중 probe 변이도 있어 `all`이 load-bearing이다.
         """
         assert _BAT_DB.classify({"a": 1, "b": 0}, {"a": 0, "b": 0}) == "SURVIVED"
 
