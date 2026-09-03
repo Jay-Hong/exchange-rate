@@ -338,7 +338,8 @@ sent_at           DATETIME
   - 유지: investing, dxy, kb, hana, woori, shinhan, bs, citi, ibk, nh
   - **은행별 종료 시각**(cron 시간 범위로 표현, 별도 런타임 게이트 없음):
     - shinhan `hour='19-23,0-2'` → 마지막 **02:59:18** (고시 02:45 + 14분 여유)
-    - woori `hour='19-23,0-4'` + tail `hour='5', minute='0-4'` → 마지막 **05:04:53** (고시 05:00 + 여유)
+    - woori 단일 `OrTrigger`: 19:00~04:59 및 05:00~05:03은 `:14/:44`,
+      마지막 분은 `05:04:53` 한 번만 실행 (고시 05:00 + 기존 최종 수집 기회 보존)
     - ibk → 마지막 **05:59:34** (고시 06:00, 이후는 BREAK2 terminal capture가 담당)
   - ibk는 매분 주기를 유지한다. 08:00 이후는 조회 당일 GET → **공식 날짜 지정
     POST**, 08:00 전은 빈 당일 GET을 생략하고 전 조회기준일 POST로 바로 시작한다. 공식 상세
@@ -439,16 +440,15 @@ scheduler.add_job(
 - **특징**: 중요도 높음, 빈도 높음
 - **실행 방식**: kb/bs/citi는 순수 Request, hana/woori는 Request → Selenium 하이브리드
 - **IN**: 10-60초마다 (고정 초 레인으로 엇갈림)
-  - kb: `cron(second='9,19,29,39,49,59')` (**IN만 10초**)
-  - hana: `cron(second='2,12,22,32,42,52')` (**IN만 10초**)
-  - woori: `cron(minute='*', second='14,44')` (**IN만 30초**)
+  - kb: `cron(second='9,19,29,39,49,59')` (10초)
+  - hana: `cron(second='2,12,22,32,42,52')` (10초)
+  - woori: `cron(minute='*', second='14,44')` (30초)
   - bs: `cron(minute='*', second='33')`
   - citi: `cron(minute='*', second='13')`
-- **BREAK1**: kb(`:15/:35/:55`)·hana(`:05/:25/:45`)의 기존 20초 주기와
-  bs·citi 유지 + woori는 **05:04:53까지**
-  (`OrTrigger([hour='19-23,0-4', hour='5' minute='0-4'])` **단일 job `task_woori`** —
-  별 job으로 나누면 `max_instances=1`이 배타가 아니라 지연 시 중복 실행 위험)
-- **BREAK2**: kb·hana 기존 20초 주기와 bs·citi 유지 (woori는 05:05 종료)
+- **BREAK1**: kb·hana는 IN과 같은 10초 레인, bs·citi 유지. woori는 단일
+  `OrTrigger` job으로 19:00~05:03에 `:14/:44`, 마지막은 **05:04:53** 한 번만 실행한다.
+  마지막 분의 `:14/:44`를 빼 기존 최종 수집 기회가 선행 장기 실행에 막힐 위험을 줄인다.
+- **BREAK2**: kb·hana는 IN과 같은 10초 레인, bs·citi 유지 (woori는 05:05 종료 후 미등록)
 - **OUT**: kb(`:28`)·hana(`:38`)·bs(`:51`) 모두 **1분마다** (배포 2A)
 
 **Tier C (shinhan, ibk, nh, sc):** subprocess queue, Request-first / Selenium fallback
@@ -526,7 +526,8 @@ scheduler.add_job(
 **특징:**
 - Request/Selenium 크롤러가 서로 다른 초 레인을 사용해 동시 시작을 줄임
 - 저장 완료 뒤 다음 매초 broadcast에서 최신 Redis 값을 반영
-- kb·hana는 IN에서 10초, woori는 30초로 상향한다. BREAK1/BREAK2/OUT은 기존 주기를 유지한다
+- kb·hana는 IN/BREAK1/BREAK2에서 10초, woori는 IN/BREAK1에서 30초로 수집한다.
+  OUT 주기와 woori의 BREAK2/OUT 제외는 유지한다
 - Selenium 크롤러는 Queue 순차 처리 (Request 먼저 시도)
 - 최대 동시 실행: 1-2개 (Request 기반 크롤러만)
 

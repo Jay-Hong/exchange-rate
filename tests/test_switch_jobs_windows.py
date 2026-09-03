@@ -101,8 +101,8 @@ class TestBankCollectionWindows(_SwitchJobsCase):
             ["10:00:14", "10:00:44", "10:01:14", "10:01:44"],
         )
 
-    def test_kb_hana_in_fire_every_10_seconds_and_other_modes_are_unchanged(self):
-        """KB·하나 10초 상향은 IN에만 적용한다."""
+    def test_kb_hana_10_second_lanes_extend_through_break2_and_out_is_unchanged(self):
+        """KB·하나는 IN/BREAK1/BREAK2에서 같은 10초 레인, OUT은 기존 1분이다."""
         cases = {
             "IN": {
                 "start": KST.localize(datetime(2026, 9, 1, 10, 0, 0)),
@@ -111,13 +111,13 @@ class TestBankCollectionWindows(_SwitchJobsCase):
             },
             "BREAK1": {
                 "start": KST.localize(datetime(2026, 9, 1, 20, 0, 0)),
-                "kb": [15, 35, 55],
-                "hana": [5, 25, 45],
+                "kb": [9, 19, 29, 39, 49, 59],
+                "hana": [2, 12, 22, 32, 42, 52],
             },
             "BREAK2": {
                 "start": KST.localize(datetime(2026, 9, 2, 7, 0, 0)),
-                "kb": [15, 35, 55],
-                "hana": [5, 25, 45],
+                "kb": [9, 19, 29, 39, 49, 59],
+                "hana": [2, 12, 22, 32, 42, 52],
             },
             "OUT": {
                 "start": KST.localize(datetime(2026, 9, 5, 10, 0, 0)),
@@ -139,52 +139,84 @@ class TestBankCollectionWindows(_SwitchJobsCase):
                 self.assertEqual(job.max_instances, 1)
                 self.assertEqual(job.misfire_grace_time, 10 if mode != "OUT" else 30)
 
-    def test_in_canary_lanes_do_not_share_crawler_start_seconds(self):
-        """세 대상과 나머지 IN 크롤러는 같은 시작초를 쓰지 않는다."""
-        jobs = self._jobs("IN")
-        start = KST.localize(datetime(2026, 9, 1, 10, 0, 0))
-        end = start + timedelta(seconds=59)
-        seconds_by_job = {
-            job_id: {fire.second for fire in _fires(job, start, end)}
-            for job_id, job in jobs.items()
+    def test_expanded_lanes_do_not_share_other_crawler_start_seconds(self):
+        """상향 대상은 활성 모드에서 대상끼리나 다른 크롤러와 시작초를 공유하지 않는다."""
+        cases = {
+            "IN": (
+                KST.localize(datetime(2026, 9, 1, 10, 0, 0)),
+                {"task_kb", "task_hana", "task_woori"},
+            ),
+            "BREAK1": (
+                KST.localize(datetime(2026, 9, 1, 20, 0, 0)),
+                {"task_kb", "task_hana", "task_woori"},
+            ),
+            "BREAK2": (
+                KST.localize(datetime(2026, 9, 2, 7, 0, 0)),
+                {"task_kb", "task_hana"},
+            ),
         }
-        target_ids = {"task_kb", "task_hana", "task_woori"}
-        target_seconds = set()
-        for job_id in target_ids:
-            self.assertEqual(
-                target_seconds & seconds_by_job[job_id],
-                set(),
-                f"{job_id}: 대상 은행끼리 같은 시작초를 쓰면 안 된다",
+        for mode, (start, target_ids) in cases.items():
+            jobs = self._jobs(mode)
+            end = start + timedelta(seconds=59)
+            seconds_by_job = {
+                job_id: {fire.second for fire in _fires(job, start, end)}
+                for job_id, job in jobs.items()
+            }
+            target_seconds = set()
+            for job_id in target_ids:
+                self.assertEqual(
+                    target_seconds & seconds_by_job[job_id],
+                    set(),
+                    f"{mode}/{job_id}: 대상 은행끼리 같은 시작초를 쓰면 안 된다",
+                )
+                target_seconds |= seconds_by_job[job_id]
+
+            other_seconds = set().union(
+                *(seconds for job_id, seconds in seconds_by_job.items() if job_id not in target_ids)
             )
-            target_seconds |= seconds_by_job[job_id]
+            self.assertEqual(
+                target_seconds & other_seconds,
+                set(),
+                f"{mode}: 다른 크롤러와 같은 시작초를 쓰면 안 된다",
+            )
 
-        other_seconds = set().union(
-            *(seconds for job_id, seconds in seconds_by_job.items() if job_id not in target_ids)
-        )
-        self.assertEqual(
-            target_seconds & other_seconds,
-            set(),
-            "IN의 다른 크롤러와 같은 시작초를 쓰면 안 된다",
-        )
-
-    def test_woori_is_one_job_and_runs_through_050453(self):
+    def test_woori_break1_is_one_job_and_preserves_050453_final_fire(self):
         jobs = self._jobs("BREAK1")
         # ⛔ tail을 별도 job으로 나누면 max_instances=1이 배타가 아니게 된다 (Chrome 2개 위험).
         self.assertNotIn("task_woori_tail", jobs,
                          "woori는 OrTrigger 단일 job이어야 한다 (max_instances=1 전 구간 적용)")
         self.assertIsInstance(jobs["task_woori"].trigger, OrTrigger)
         self.assertEqual(jobs["task_woori"].max_instances, 1)
+        self.assertEqual(jobs["task_woori"].misfire_grace_time, 30)
         self.assertEqual(jobs["task_woori"].func.__name__, "request_wrapper_woori")
         fires = _fires(jobs["task_woori"],
                        KST.localize(datetime(2026, 8, 25, 19, 0, 1)),
                        KST.localize(datetime(2026, 8, 26, 6, 0, 1)))
-        self.assertEqual(f"{fires[0]:%H:%M:%S}", "19:00:53")
+        self.assertEqual(f"{fires[0]:%H:%M:%S}", "19:00:14")
         self.assertEqual(f"{fires[-1]:%H:%M:%S}", "05:04:53")
-        # 04:59:53 → 05:00:53 경계가 끊기지 않는다
+        self.assertEqual(
+            len(fires),
+            1209,
+            "19:00~04:59 1200회 + 05:00~05:03 8회 + 05:04:53 1회",
+        )
+        # 04:59:44 → 05:00:14 경계가 끊기지 않는다
         stamps = {f"{f:%H:%M:%S}" for f in fires}
-        for s in ("04:59:53", "05:00:53", "05:01:53", "05:04:53"):
+        for s in (
+            "04:59:14", "04:59:44", "05:00:14", "05:00:44",
+            "05:03:14", "05:03:44", "05:04:53",
+        ):
             self.assertIn(s, stamps)
-        self.assertNotIn("05:05:53", stamps)
+        self.assertNotIn(
+            "05:04:14",
+            stamps,
+            "느린 :14 실행이 마지막 :53을 skip하게 만들면 안 된다",
+        )
+        self.assertNotIn(
+            "05:04:44",
+            stamps,
+            "마지막 :53과 9초 간격으로 실행하면 안 된다",
+        )
+        self.assertNotIn("05:05:14", stamps)
 
     def test_ibk_break1_last_fire_is_055934(self):
         jobs = self._jobs("BREAK1")

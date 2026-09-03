@@ -151,14 +151,12 @@ queue_status_cache = {
 #
 # B Group: Request 기반 (일부 하이브리드 폴백)
 #   - kb, hana: 중요, 빈도 높음
-#     - IN: 10초마다 (kb :09/:19/:29/:39/:49/:59,
-#                     hana :02/:12/:22/:32/:42/:52)
-#     - BREAK1/BREAK2: 기존 20초마다 유지 (kb :15/:35/:55, hana :05/:25/:45)
+#     - IN/BREAK1/BREAK2: 10초마다 (kb :09/:19/:29/:39/:49/:59,
+#                                     hana :02/:12/:22/:32/:42/:52)
 #     - OUT: 1분마다 (kb :28, hana :38) — 배포 2A
 #   - woori, bs, citi: 일반, 빈도 낮음
 #     - IN: woori 30초마다(:14/:44), bs·citi 60초마다(bs :33 / citi :13)
-#       * 배포 2 본단계는 세 은행을 IN에서만 함께 상향. 다른 모드는 불변
-#     - BREAK1: woori(53초), bs(33초), citi(13초) 유지
+#     - BREAK1: woori 30초마다(:14/:44, 마지막 분은 05:04:53만), bs(33초), citi(13초)
 #     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 05:05 수집 종료)
 #     - OUT: bs도 1분마다 (:51) — 배포 2A
 #   - 하이브리드: hana, woori는 Request → Selenium 폴백. bs/citi는 순수 Request
@@ -668,7 +666,7 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana — 배포 2 본단계에서 IN만 10초로 상향.
+        # B Group: kb, hana — IN canary에서 검증한 10초 분리 레인.
         # KB는 짧은 순수 Request라 Selenium 실행 꼬리와 겹치는 residue 9를 맡고,
         # Selenium 폴백 가능성이 있는 hana는 residue 2로 분리한다.
         # 매초 websocket broadcast를 제외한 고정 작업과 같은 시작초는
@@ -697,7 +695,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi
-        # woori는 배포 2 본단계에서 IN만 30초(:14/:44)로 상향.
+        # woori는 IN canary에서 검증한 30초 레인(:14/:44)을 사용한다.
         # 열거된 고정 IN job과 동일 시작초는 없고, 재기동 위상에 묶인 IntervalTrigger는
         # 고정 레인으로 회피할 수 없으므로 scheduler_event와 smoke에서 별도 관측한다.
         if crawler_manager.is_enabled('woori'):
@@ -818,11 +816,13 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (10초 엇갈림)
+        # B Group: kb, hana — IN에서 검증한 10초 분리 레인을 BREAK1에도 적용.
+        # 고정 작업과의 알려진 같은-초 시작은 KB/free snapshot 시간당 1회,
+        # hana/graph precompute 시간당 6회이며, IN canary에서 정상 완료를 확인했다.
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-                CronTrigger(second='15,35,55', timezone=KST),
+                CronTrigger(second='9,19,29,39,49,59', timezone=KST),
                 id='task_kb',
                 max_instances=1,
                 misfire_grace_time=10
@@ -833,7 +833,7 @@ def switch_jobs(mode: str):
         if crawler_manager.is_enabled('hana'):
             scheduler.add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-                CronTrigger(second='5,25,45', timezone=KST),
+                CronTrigger(second='2,12,22,32,42,52', timezone=KST),
                 id='task_hana',
                 max_instances=1,
                 misfire_grace_time=10
@@ -841,19 +841,22 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: woori, bs, citi (7초 전, 20초씩 엇갈림)
+        # B Group: woori, bs, citi
         # woori: 고시가 새벽 05:00경까지 연장됨 (사용자 은행 페이지 실측).
         # <05:05 를 정확히 표현하려면 본구간(19-23,0-4시)과 보정구간(5시 0-4분)이 필요한데,
         # ⛔ **두 개의 job으로 나누면 안 된다** — max_instances=1은 job 단위라 서로 배타가
-        #    아니고, 04:59:53 실행이 지연되면(최악: requests 10s → Selenium 45s → mibank 10s)
-        #    05:00:53 tail과 겹쳐 Chrome 2개가 동시에 뜰 수 있다.
+        #    아니고, 04:59:44 실행이 지연되면(최악: requests 10s → Selenium 45s → mibank 10s)
+        #    05:00:14 tail과 겹쳐 Chrome 2개가 동시에 뜰 수 있다.
         #    OrTrigger로 묶어 **단일 job**으로 두면 max_instances=1이 전 구간에 적용된다.
         if crawler_manager.is_enabled('woori'):
             scheduler.add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 OrTrigger([
-                    CronTrigger(hour='19-23,0-4', minute='*', second='53', timezone=KST),
-                    CronTrigger(hour='5', minute='0-4', second='53', timezone=KST),  # 마지막 05:04:53
+                    CronTrigger(hour='19-23,0-4', minute='*', second='14,44', timezone=KST),
+                    CronTrigger(hour='5', minute='0-3', second='14,44', timezone=KST),
+                    # 기존 마지막 수집 기회를 보존한다. 마지막 분의 :14/:44는 빼서
+                    # 직전 슬롯과 69초를 확보하고 05:04:53 skip 위험을 낮춘다.
+                    CronTrigger(hour='5', minute='4', second='53', timezone=KST),
                 ]),
                 id='task_woori',
                 max_instances=1,
@@ -957,11 +960,12 @@ def switch_jobs(mode: str):
         else:
             logger.info("⏸️ [dxy] 비활성화 상태 - job 등록 스킵")
 
-        # B Group: kb, hana (10초 엇갈림)
+        # B Group: kb, hana — IN에서 검증한 10초 분리 레인을 BREAK2에도 적용.
+        # BREAK1과 같은 고정 작업 co-start 계약을 유지한다.
         if crawler_manager.is_enabled('kb'):
             scheduler.add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
-                CronTrigger(second='15,35,55', timezone=KST),
+                CronTrigger(second='9,19,29,39,49,59', timezone=KST),
                 id='task_kb',
                 max_instances=1,
                 misfire_grace_time=10
@@ -972,7 +976,7 @@ def switch_jobs(mode: str):
         if crawler_manager.is_enabled('hana'):
             scheduler.add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-                CronTrigger(second='5,25,45', timezone=KST),
+                CronTrigger(second='2,12,22,32,42,52', timezone=KST),
                 id='task_hana',
                 max_instances=1,
                 misfire_grace_time=10
