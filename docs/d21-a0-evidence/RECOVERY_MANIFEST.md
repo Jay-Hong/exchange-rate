@@ -63,3 +63,13 @@ RECOVERY_OR_NEW_GENERATION   fxi-contract-drift.3jE6zp — 재생성은 복구�
 바꾸는 순환은 막는다. 그 이상의 독립성은 주장하지 않는다.
 
 `docs/` 는 이 리포에 없던 디렉터리이며 이 복원을 위해 신설했다.
+
+## 함께 보존한 설계 패킷
+
+| 파일 | lines | bytes | SHA-256 | 상태 |
+|---|---:|---:|---|---|
+| `A0_5_PACKET_v3_2.md` | 2152 | 154782 | `b754cc221f5ab709f3f43a8c36a0df12d8505845486782dbef081be467edbbc7` | `DESIGN_OPEN / ACCEPTED 0` |
+
+이 파일은 Phase A0 실행 산출물이 아니라 D21 server-ordering 설계 패킷이다.
+성공한 세션 패치 이력으로 복원된 bytes를 함께 보존한 것이며, 이 기록은 패킷을
+정본이나 승인된 설계로 승격하지 않는다.

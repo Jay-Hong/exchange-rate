@@ -191,10 +191,10 @@ generation에서 아래 요구를 먼저 만족해야 한다.
 삭제 금지  유일본, 원시 증거, 아직 재현되지 않은 source, 영속 manifest/receipt
 ```
 
-이번 사고에서는 원래 temp source가 이미 없어 cleanup할 대상이 없다. 현재 복원된
-`A0_5_PACKET_v3_2.md`는 다시 `/private/tmp`에만 있으므로, 이 부록이 존재한다는 이유로
-삭제하지 않는다. 영속 archive 위치와 검증 절차를 별도로 승인·완료한 뒤에만 temp 사본을
-cleanup 대상으로 분류한다.
+이번 사고에서는 원래 temp source가 이미 없어 cleanup할 대상이 없다. 복원된
+`A0_5_PACKET_v3_2.md`는 `docs/d21-a0-evidence/`에 byte-exact 사본을 두었으나,
+그 영속화가 commit·push로 확정되고 독립 검증될 때까지 `/private/tmp` 사본을 삭제하지
+않는다. 그 뒤에만 temp 사본을 cleanup 대상으로 분류한다.
 
 ## 8. 현재 다음 단계
 
@@ -227,5 +227,7 @@ Git 상태          아직 untracked — commit/push 전에는 로컬 파일일 
 hotfix audit package, D21 teardown 초안의 최종 bytes는 계속 감사 대상이다. contract-drift를
 현재 revision에서 다시 생성하는 것은 과거 산출물 복원이 아니라 새 evidence generation이다.
 
-또한 `A0_5_PACKET_v3_2.md`의 검증된 복원본은 아직 `/private/tmp`에만 있으므로 별도 영속
-안착이 필요하다. 따라서 §8의 나머지 항목과 §7의 삭제 조건은 계속 유효하다.
+`A0_5_PACKET_v3_2.md`는 `docs/d21-a0-evidence/`에 byte-exact하게 안착했다. target의
+SHA-256과 byte 크기가 source와 일치하며, 원본 `/private/tmp` 사본은 삭제하지 않았다.
+이는 역사 초안의 보존일 뿐 정본 승격이 아니다. git 안착은 이 부록과 같은 commit으로
+완료된다. 따라서 §8의 나머지 항목과 §7의 삭제 조건은 계속 유효하다.
