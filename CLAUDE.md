@@ -51,7 +51,11 @@
    의미 있는 코드/문서 변경은 commit/push 전에 외부 검토를 기본으로 한다.
    - 검토용 요약: 변경 의도 + 핵심 diff 발췌 + 검토 포인트
    - 흐름: 요약 작성 → 외부 에이전트(Codex/Claude 등) 검토 → 반영 → commit
-   - push는 commit과 분리해 별도 GO로 결정
+   - commit message도 Claude와 Codex가 exact 최종 본문을 각각 승인한다
+   - commit·push·deploy는 서로 분리해 각각 사용자 GO 또는
+     `~/.claude/CLAUDE.md`의 **Claude + Codex 이중 합의 승인**으로 결정한다
+   - 비중요 파일 수정·생성은 고정 verdict 형식보다 Claude·Codex의 실질 합의를 우선한다.
+     critical 범위와 편집 보류 우선순위는 전역 가이드를 따른다
    - 예외: typo, lint, formatting, 변수명/임포트 정렬 같은 비의미 cosmetic 변경
    - 경계가 모호하면 검토 받는 쪽이 default (false negative > false positive)
 5. **자동화는 중기 과제**: pre-commit/commit-msg hook은 이 절차가 안정된 뒤 별도 작업으로 도입한다. 지금은 의식적 검증 게이트로 먼저 적용한다.
