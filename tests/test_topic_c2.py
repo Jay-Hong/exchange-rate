@@ -60,6 +60,127 @@ OLD = "a" * 40
 NEW = "b" * 40
 
 
+def test_pin_replacement_preserves_semantic_prose():
+    """JSON 산문에 적힌 commit 은 pin 이 아니라 역사다 — 덮으면 접두사가 깨져 이후 C2 가 막힌다."""
+    lines = [
+        f'    "server_commit": "{OLD}",',                       # pin — 갱신 대상
+        f'      "server": "{OLD}",',                            # pin — 갱신 대상
+        f'          "C1({OLD}) 의 봉인 전 상호 검토 — 역사 서술",',  # 산문 — 보존
+        f'      "sha": "{OLD}",',                               # evidence — 보존
+    ]
+    out, replaced, preserved = topic_c2.replace_pin_in_lines(
+        lines, OLD, NEW, json_document=True
+    )
+    assert replaced == 2 and preserved == 2
+    assert out[0] == f'    "server_commit": "{NEW}",'
+    assert out[1] == f'      "server": "{NEW}",'
+    assert OLD in out[2], "산문의 commit 을 덮으면 커밋된 접두사가 바뀐다 (epoch 0082 실측)"
+    assert out[3] == f'      "sha": "{OLD}",'
+
+
+def test_pin_replacement_does_not_take_quoted_json_in_prose_for_a_pin():
+    """산문이 JSON 조각을 인용해도 pin 으로 오인하지 않는다 — 값 따옴표가 이스케이프돼 있다."""
+    line = f'          "산문이 \\"server\\": \\"{OLD}\\" 를 인용한다",'
+    out, replaced, preserved = topic_c2.replace_pin_in_lines(
+        [line], OLD, NEW, json_document=True
+    )
+    assert replaced == 0 and preserved == 1
+    assert out[0] == line
+
+
+def test_pin_advances_when_the_json_key_and_value_are_on_different_lines():
+    """키-값을 한 줄에서 찾으면 줄바꿈된 JSON pin 을 역사로 오판해 **전진이 멈춘다**."""
+    lines = ['{"ios":', f'"{OLD}",', f'  "sha": "{OLD}"', '}']
+    out, replaced, preserved = topic_c2.replace_pin_in_lines(
+        lines, OLD, NEW, json_document=True
+    )
+    assert replaced == 1 and preserved == 1
+    assert out[1] == f'"{NEW}",', "값이 다음 줄에 있어도 pin 은 pin 이다"
+    assert out[2] == f'  "sha": "{OLD}"', "evidence sha 는 그대로 남는다"
+
+
+def test_advance_pin_does_not_report_success_while_leaving_a_line_broken_pin(
+    monkeypatch, tmp_path
+):
+    """오판하면 잔여 검사도 같은 기준을 쓰므로 **구 pin 을 남긴 채 성공으로 보고**한다."""
+    target = tmp_path / "pin.json"
+    target.write_text(f'{{\n  "ios":\n  "{OLD}"\n}}\n')
+    monkeypatch.setattr(topic_c2, "REPO", tmp_path)
+    monkeypatch.setattr(topic_c2, "_run", lambda *_a, **_k: NEW + "\n")
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "_pin_files", lambda _old: [target])
+
+    result = topic_c2.advance_pin(NEW)
+
+    assert result["replaced"] == 1
+    assert OLD not in target.read_text(), "성공을 보고했으면 구 pin 이 남아 있으면 안 된다"
+
+
+def test_prose_is_history_even_when_an_escaped_quote_abuts_the_sha():
+    """산문 fixture 는 **직렬화로** 만든다 — 손으로 이스케이프하면 배제를 안 건드리는 모양이 된다.
+
+    배제가 실제로 갈리는 유일한 모양은 여는 따옴표만 이스케이프된 경우다. 문자열 안에서
+    따옴표를 열고 SHA 로 문자열이 끝나면 raw 줄에 `\\"<sha>"` 가 생겨, 배제가 없으면 pin 으로
+    오인해 산문을 덮는다.
+    """
+    bare = "    " + json.dumps(f"검토 대상 commit 은 {OLD} 이다", ensure_ascii=False) + ","
+    abutting = "    " + json.dumps(f'인용을 열고 "{OLD}', ensure_ascii=False) + ","
+    real_pin = f'    "ios": "{OLD}"'
+    assert abutting.count(f'\\"{OLD}"') == 1, "배제가 갈리는 모양이 실제로 만들어져야 한다"
+
+    out, replaced, preserved = topic_c2.replace_pin_in_lines(
+        [bare, abutting, real_pin], OLD, NEW, json_document=True
+    )
+    assert replaced == 1 and preserved == 2
+    assert out[0] == bare, "문장 안에 박힌 SHA 는 역사다"
+    assert out[1] == abutting, "이스케이프된 여는 따옴표는 문자열 경계가 아니다"
+    assert out[2] == f'    "ios": "{NEW}"', "진짜 pin 은 갱신된다 — 대조군"
+
+
+def test_markdown_pin_headers_are_not_affected_by_the_json_rule():
+    """문서 헤더는 SHA 를 backtick 으로 감싸 JSON 판정에 걸리지 않는다 — 적용하면 안 바뀐다."""
+    lines = [f'- server 기준 commit: `{OLD}`']
+    out, replaced, preserved = topic_c2.replace_pin_in_lines(
+        lines, OLD, NEW, json_document=False
+    )
+    assert replaced == 1 and preserved == 0
+    assert out[0] == f'- server 기준 commit: `{NEW}`'
+
+
+def test_advance_pin_residual_check_accepts_preserved_prose(monkeypatch, tmp_path):
+    """보존한 산문이 잔여 검사에서 '치환 누락' 으로 오탐되면 안 된다 — 같은 의미 구분을 쓴다."""
+    target = tmp_path / "spec" / "topic-only-semantic-review.json"
+    target.parent.mkdir()
+    target.write_text(f'{{\n  "ios": "{OLD}",\n  "scope": ["C1({OLD}) 역사 서술"]\n}}\n')
+    monkeypatch.setattr(topic_c2, "REPO", tmp_path)
+    monkeypatch.setattr(topic_c2, "_run", lambda *_a, **_k: NEW + "\n")
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "_pin_files", lambda _old: [target])
+
+    result = topic_c2.advance_pin(NEW)
+
+    assert result["replaced"] == 1 and result["evidence_preserved"] == 1
+    text = target.read_text()
+    assert f'"ios": "{NEW}"' in text
+    assert f'C1({OLD}) 역사 서술' in text, "산문은 그대로 남아야 한다"
+
+
+def test_advance_pin_updates_markdown_headers_through_the_call_site(monkeypatch, tmp_path):
+    """호출부가 파일 종류를 실제로 넘기는지 잠근다 — md 를 JSON 으로 취급하면 헤더가 조용히 안 바뀐다."""
+    target = tmp_path / "spec" / "legacy-cutover.md"
+    target.parent.mkdir()
+    target.write_text(f"- server 기준 commit: `{OLD}`\n")
+    monkeypatch.setattr(topic_c2, "REPO", tmp_path)
+    monkeypatch.setattr(topic_c2, "_run", lambda *_a, **_k: NEW + "\n")
+    monkeypatch.setattr(topic_c2, "current_ios_pin", lambda: OLD)
+    monkeypatch.setattr(topic_c2, "_pin_files", lambda _old: [target])
+
+    result = topic_c2.advance_pin(NEW)
+
+    assert result["replaced"] == 1 and result["evidence_preserved"] == 0
+    assert target.read_text() == f"- server 기준 commit: `{NEW}`\n"
+
+
 def test_pin_replacement_preserves_evidence_sha():
     lines = [
         f'    "ios": "{OLD}"',                      # pin — 갱신 대상

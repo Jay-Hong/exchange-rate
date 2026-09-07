@@ -140,17 +140,48 @@ def _pin_files(old: str) -> list[pathlib.Path]:
     return [REPO / line for line in done.stdout.splitlines()]
 
 
-def replace_pin_in_lines(lines: list[str], old: str, new: str) -> tuple[list[str], int, int]:
-    """pin 만 바꾸고 `evidence[].sha` 는 남긴다.
+def json_pin_is_whole_string(line: str, old: str) -> bool:
+    """JSON 에서 pin 은 **문자열 하나 전체**다 — `"<sha>"`. 산문은 문장 안에 SHA 가 끼어 있다.
 
-    ⛔ 원장에는 sha 가 **두 종류**다. `evidence[].sha` 는 그 작업을 한 commit = **역사 기록**이라
-    pin 으로 덮으면 위조가 되고, `manifest_sha256`·`pinned_commit` 은 pin 성격이라 갱신 대상이다.
+    ⛔ 키가 같은 줄에 있는지는 보지 않는다. `{"ios":` 와 값이 다른 줄로 갈라져도 pin 은 pin 이고,
+    `"키": "값"` 을 한 줄에서 찾는 앵커는 그 경우를 역사로 오판해 **pin 전진을 조용히 멈춘다**
+    (잔여 검사도 같은 판정을 쓰므로 성공으로 보고된다 — 회귀 시험으로 잠갔다).
+
+    여는 따옴표가 이스케이프돼 있으면 pin 이 아니다 — 산문이 JSON 조각을 인용하면
+    `\\"<sha>\\"` 로 들어온다. backslash 를 하나만 보면 충분하다: 유효한 JSON 에서 문자열
+    여는 따옴표 앞에 올 수 있는 것은 `[ , : {` 와 공백뿐이고, backslash 는 문자열 **안**에만
+    나오며 그 안의 따옴표는 반드시 이스케이프(홀수)된다. 짝수 backslash 직후의 pin 따옴표는
+    유효한 JSON 에서 만들어지지 않아 홀짝 판정은 도달 불가다(변이로 확인).
+    """
+    return re.search(rf'(?<!\\)"{re.escape(old)}"', line) is not None
+
+
+def pin_line_is_history(line: str, old: str, *, json_document: bool) -> bool:
+    """이 줄의 commit 식별자를 pin 이 아니라 **역사 기록**으로 볼 것인가.
+
+    ⛔ 두 종류가 더 있다. `evidence[].sha` 는 그 작업을 한 commit 이고, **semantic 산문에 적힌
+    commit** 도 그 시점을 가리키는 역사다. pin 으로 덮으면 둘 다 위조가 되고, 산문의 경우
+    커밋된 접두사가 바뀌어 이후 C2 가 통째로 막힌다(epoch 0082 실측).
+    JSON 산문은 SHA 가 문장 안에 박혀 있어 문자열 전체가 아니므로 그 모양으로 가른다.
+    md 문서 헤더는 SHA 를 backtick 으로 감싸 JSON 판정에 걸리지 않으니 적용하지 않고
+    기존대로 갱신한다 — 적용하면 md pin 이 영영 전진하지 않는다.
+    """
+    if '"sha"' in line:
+        return True
+    return json_document and not json_pin_is_whole_string(line, old)
+
+
+def replace_pin_in_lines(
+    lines: list[str], old: str, new: str, *, json_document: bool = False
+) -> tuple[list[str], int, int]:
+    """pin 만 바꾸고 역사 기록(`evidence[].sha`·산문 안 commit)은 남긴다.
+
     일괄 치환은 앞을 덮고, 원장 통째 제외는 뒤를 빠뜨린다 — **줄 단위로 가른다**.
     """
     out: list[str] = []
     replaced = preserved = 0
     for line in lines:
-        if old in line and '"sha"' in line:
+        if old in line and pin_line_is_history(line, old, json_document=json_document):
             preserved += line.count(old)
             out.append(line)
             continue
@@ -182,7 +213,9 @@ def _advance_pin(target: str, new: str, *, dry_run: bool = False) -> dict:
     replaced = preserved = 0
     touched: list[str] = []
     for path in files:
-        out, changed_here, kept = replace_pin_in_lines(path.read_text().split("\n"), old, new)
+        out, changed_here, kept = replace_pin_in_lines(
+            path.read_text().split("\n"), old, new, json_document=path.suffix == ".json"
+        )
         replaced += changed_here
         preserved += kept
         changed = changed_here > 0
@@ -199,7 +232,8 @@ def _advance_pin(target: str, new: str, *, dry_run: bool = False) -> dict:
             f"{path.relative_to(REPO)}:{number}"
             for path in _pin_files(old)
             for number, line in enumerate(path.read_text().split("\n"), 1)
-            if old in line and '"sha"' not in line
+            if old in line
+            and not pin_line_is_history(line, old, json_document=path.suffix == ".json")
         ]
         if left:
             raise C2Error(f"치환 후에도 구 pin 이 남았다: {left}")
