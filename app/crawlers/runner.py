@@ -7,21 +7,28 @@ scheduler.py에서 asyncio.create_subprocess_exec()로 호출됩니다.
 
 Usage:
     python -m app.crawlers.runner <bank_name>
+    python scripts/ibk_subprocess_bootstrap.py ibk --run-id <id> --reference-time <aware ISO>
+    두 번째 경로는 결과 adapter 미연결 상태이므로 현재는 수집 전에 종료한다.
 
 Exit Codes:
-    0: 성공
+    0: legacy 성공 / IBK 결과 경로에서는 종료·전달 (부모 결과 검증 필요)
     1: 실패
     2: 잘못된 인자
 
 Notes:
-    - 타임아웃 시 프로세스 전체가 kill되므로 Chrome 프로세스도 함께 종료됨
-    - driver.quit() 실행 여부와 무관하게 프로세스 정리 보장
+    - legacy 부모는 직접 자식 kill, 새 capture는 소유 프로세스 그룹 kill을 수행
+    - 별도 그룹/세션으로 이탈한 자손의 정리는 보장하지 않음
     - 크롤러 함수는 내부에서 자체적으로 DB 연결 관리
     - 로깅은 subprocess에서 독립적으로 초기화
 """
 
-import sys
 import logging
+import os
+import sys
+from datetime import datetime, timezone
+
+from app.ibk_result_protocol import IbkProtocolError, decode_ibk_result, encode_ibk_result
+from app.ibk_run_context import IbkRunContext
 from app.crawlers import (
     shinhan,
     ibk,
@@ -46,17 +53,71 @@ CRAWLER_MAP = {
 }
 
 
-def main():
+# No implicit LegacyResult/None -> OBSERVED adapter. Bind only a separately verified
+# final-result crawler here. Until then the new bootstrap path stops BEFORE DB refresh.
+IBK_RESULT_CRAWLER = None
+
+
+def _ibk_result_main(args, result_fd, crawler):
+    logger = logging.getLogger("exchange_rate.crawler.runner")
+    try:
+        context = IbkRunContext.from_arguments(args)
+        if type(result_fd) is not int or result_fd < 3:
+            raise IbkProtocolError("RESULT_CHANNEL_REQUIRED")
+    except IbkProtocolError:
+        logger.error("IBK_RESULT_ARGUMENTS_REJECTED")
+        return 2
+    if not callable(crawler):
+        logger.error("IBK_RESULT_ADAPTER_UNAVAILABLE")
+        return 2
+    try:
+        # Conditional import: legacy main keeps its original refresh path, and the
+        # unbound protocol path must not connect to the DB at all.
+        from app.atomic_write_refresh import refresh_write_mode_cache
+        refresh_write_mode_cache()
+        result = crawler(context)
+    except Exception:
+        logger.error("IBK_RESULT_CRAWLER_ERROR")
+        return 1
+    try:
+        frame = encode_ibk_result(result)
+        checked = decode_ibk_result(frame, context.run_id)
+        context.validate_result(checked, received_at=datetime.now(timezone.utc))
+    except (IbkProtocolError, AttributeError):
+        # The process completed but the result is invalid. Emit no fabricated
+        # semantic outcome: IbkParentRunner classifies exit0/no-frame as protocol
+        # error without retry. This channel must NEVER use an exit-code-only parent.
+        logger.error("IBK_RESULT_REJECTED")
+        return 0
+    try:
+        remaining = memoryview(frame)
+        while remaining:
+            written = os.write(result_fd, remaining)
+            if written <= 0:
+                raise OSError
+            remaining = remaining[written:]
+    except OSError:
+        logger.error("IBK_RESULT_EMIT_ERROR")
+        return 1
+    logger.info("IBK_RESULT_EMITTED", extra={"ibk_status": checked.status.value})
+    return 0  # delivery/completion, NOT a blanket crawler success
+
+
+def main(*, argv=None, result_fd=None, ibk_result_crawler=None):
     """메인 실행 함수"""
+    args = tuple(sys.argv[1:] if argv is None else argv)
+    if result_fd is not None:
+        crawler = IBK_RESULT_CRAWLER if ibk_result_crawler is None else ibk_result_crawler
+        return _ibk_result_main(args, result_fd, crawler)
     # 로거 설정 (subprocess에서 독립 실행)
     logger = logging.getLogger("exchange_rate.crawler.runner")
 
     # 인자 검증
-    if len(sys.argv) != 2:
+    if len(args) != 1:
         logger.error("❌ Usage: python -m app.crawlers.runner <bank_name>")
         sys.exit(2)
 
-    bank_name = sys.argv[1]
+    bank_name = args[0]
 
     # P1b A2-2: subprocess는 별 프로세스라 main process의 write-mode cache poll을 공유하지 않음
     # → 진입 시 1회 refresh로 control row를 읽어 cache 세팅 (no-throw). bank 크롤러가 이 subprocess
@@ -86,4 +147,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

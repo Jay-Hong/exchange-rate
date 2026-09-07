@@ -410,8 +410,12 @@ async def execute_with_timeout(bank_name: str) -> bool:
 # ═════════════════════════════════════════════════════════════
 # AsyncIO PriorityQueue Worker (Selenium 크롤러 순차 실행)
 # ═════════════════════════════════════════════════════════════
-async def selenium_job_executor():
-    """우선순위 Queue Worker (타임아웃 + 재시도 로직 + 헬스체크)"""
+async def selenium_job_executor(*, ibk_parent=None):
+    """우선순위 Queue Worker. IBK 결과 처리기는 명시적으로 주입할 때만 사용한다.
+
+    현재 시작 지점은 인자 없이 호출하므로 기존 경로다. 최종 IBK adapter·경보 검증
+    전에는 기본 바인딩을 바꾸지 않는다. typed 결과의 실패 집계와 재등록은 분리한다.
+    """
     global selenium_queue, selenium_worker_last_heartbeat, selenium_worker_current_job
     logger.info("🔧 Selenium Priority Queue Worker 시작")
 
@@ -430,14 +434,19 @@ async def selenium_job_executor():
             )
 
             # subprocess 기반 실행 (타임아웃 제어)
-            success = await execute_with_timeout(bank_name)
+            if bank_name == "ibk" and ibk_parent is not None:
+                decision = await ibk_parent.execute(is_retry=is_retry)
+                should_retry = decision.should_retry
+            else:
+                success = await execute_with_timeout(bank_name)
+                should_retry = not success
 
             # 작업 완료 후 헬스체크 업데이트
             selenium_worker_last_heartbeat = time.time()
             selenium_worker_current_job = None
 
             # 실패 시 재시도 (최대 1회)
-            if not success and not is_retry:
+            if should_retry and not is_retry:
                 retry_priority = priority + 1000  # 낮은 우선순위로 재시도
                 await selenium_queue.put((
                     retry_priority,

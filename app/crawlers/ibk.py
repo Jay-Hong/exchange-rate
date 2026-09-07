@@ -2,6 +2,7 @@
 
 # 표준 라이브러리
 import datetime
+from dataclasses import dataclass
 from enum import Enum
 import logging
 import math
@@ -20,6 +21,19 @@ from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
 from app import crud, models
+from app.ibk_regression_guard import find_regressing_pairs
+from app.ibk_result_builder import (
+    IbkIntendedState,
+    IbkObservationFailure,
+    IbkOfficialObservation,
+    IbkPreservationGrant,
+    IbkRetentionReason,
+    IbkWriteAttempt,
+    build_ibk_result,
+    capture_write_mode,
+    read_ibk_db_snapshot,
+)
+from app.ibk_result_protocol import IbkReason, IbkResult, IbkSource
 from app.database import SessionLocal
 from app.crawlers.constants import (
     DEFAULT_TIMEOUT,
@@ -97,6 +111,35 @@ class DatedRequestOutcome(Enum):
     FALLBACK = "fallback"
 
 
+class IbkLegacyDisposition(Enum):
+    """기존 실행이 끝난 분기. 최종 OBSERVED/DEGRADED 의미 판정이 아니다."""
+
+    CURRENT_REQUEST_RETURNED = "current_request_returned"
+    DATED_OBSERVED = "dated_observed"
+    DATED_PRESERVED = "dated_preserved"
+    MIDNIGHT_SUPPRESSED = "midnight_suppressed"
+    SELENIUM_RETURNED = "selenium_returned"
+    MIBANK_WRITE_RETURNED = "mibank_write_returned"
+    MIBANK_REJECTED = "mibank_rejected"
+    MIBANK_FAILED = "mibank_failed"
+    MIBANK_SKIPPED = "mibank_skipped"
+
+
+@dataclass(frozen=True)
+class IbkLegacyResult:
+    """행동보존 리팩터의 로컬 provisional 결과 (부모 wire 계약 아님).
+
+    분기 종료와 DB/신선도 검증을 혼동하지 않는다. 특히 write_return_count=0은
+    unchanged 또는 쓰기정책 차단이며, None은 반환 개수를 수집하지 않았다는 뜻이다.
+    DATED_OBSERVED도 기존 enum의 이름일 뿐 기대 서비스일 관측을 보증하지 않는다.
+    최종 의미 계측 전까지 공개 진입 함수는 이 결과를 버리고 기존 None을 반환한다.
+    """
+
+    disposition: IbkLegacyDisposition
+    selenium_attempts: int = 0
+    write_return_count: int | None = None
+
+
 class IbkRateTableAbsentError(ValueError):
     """요청 날짜 readback은 맞지만 환율표와 공식 무고시 코드가 모두 없는 상태.
 
@@ -122,7 +165,12 @@ def _crawl_mibank_ibk(db: Session) -> tuple[dict, dict]:
 
 
 def crawl_and_save_ibk_bank_exchange_rates():
-    """기업은행 환율 크롤링"""
+    """기존 runner 계약 유지: 예외/None 반환 및 부모 계측 의미는 아직 변경하지 않는다."""
+    crawl_ibk_legacy_result()
+
+
+def crawl_ibk_legacy_result() -> IbkLegacyResult:
+    """기업은행 기존 수집 동작을 실행하고 종료 분기만 타입으로 반환한다."""
 
     # ═══════════════════════════════════════════════════════════════════
     # 자정 전환기 Selenium 스킵 (00:00~00:05)
@@ -135,6 +183,7 @@ def crawl_and_save_ibk_bank_exchange_rates():
     # ───────────────────────────────────────────────────────────────────
     now = datetime.datetime.now(KST)
     midnight_transition = now.hour == 0 and now.minute < 5
+    selenium_attempts = 0
 
     db = SessionLocal()
     try:
@@ -146,7 +195,7 @@ def crawl_and_save_ibk_bank_exchange_rates():
             reference_time=now,
         ):
             logger.debug(f"✅ {BANK_NAME} Requests 크롤링 성공")
-            return
+            return IbkLegacyResult(IbkLegacyDisposition.CURRENT_REQUEST_RETURNED)
 
         # 2차 시도: 공식 페이지의 날짜 지정 Request.
         # 00시 이후 고시는 조회기준일(전 영업일) 화면에 계속 누적되므로 브라우저로
@@ -158,9 +207,9 @@ def crawl_and_save_ibk_bank_exchange_rates():
                 f"✅ {BANK_NAME} 날짜 지정 Requests 크롤링 성공",
                 extra={"bank": BANK_NAME},
             )
-            return
+            return IbkLegacyResult(IbkLegacyDisposition.DATED_OBSERVED)
         if dated_outcome is DatedRequestOutcome.PRESERVED:
-            return
+            return IbkLegacyResult(IbkLegacyDisposition.DATED_PRESERVED)
 
         if midnight_transition:
             logger.warning(
@@ -172,15 +221,20 @@ def crawl_and_save_ibk_bank_exchange_rates():
                     "action": "DB 마지막 환율 유지",
                 },
             )
-            return
+            return IbkLegacyResult(IbkLegacyDisposition.MIDNIGHT_SUPPRESSED)
 
         # 3차 시도: Selenium 날짜 변경 - 최대 3회 재시도 (Request 계약 변경 시 안전망)
         logger.info(f"➡️ {BANK_NAME} Selenium으로 전환 (환율 데이터 없음)", extra={"bank": BANK_NAME})
         for attempt in range(3):
             try:
-                crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
+                selenium_attempts += 1
+                write_return_count = crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
                 logger.info(f"✅ {BANK_NAME} Selenium 성공 (시도 {attempt+1}/3)")
-                return  # 성공 시 종료
+                return IbkLegacyResult(
+                    IbkLegacyDisposition.SELENIUM_RETURNED,
+                    selenium_attempts=selenium_attempts,
+                    write_return_count=write_return_count,
+                )
             except Exception as e:
                 logger.warning(f"⚠️ {BANK_NAME} Selenium 실패 (시도 {attempt+1}/3): {str(e)[:50]}")
                 if attempt < 2:  # 마지막 시도 전이면
@@ -205,17 +259,30 @@ def crawl_and_save_ibk_bank_exchange_rates():
                         "mibank hard_fail → 저장 보류",
                         extra={"bank": BANK_NAME, "details": eval_result["details"]},
                     )
+                    return IbkLegacyResult(
+                        IbkLegacyDisposition.MIBANK_REJECTED,
+                        selenium_attempts=selenium_attempts,
+                    )
                 else:
                     if eval_result["soft_fail"]:
                         logger.warning(
                             "mibank soft_fail → 마지막 폴백이므로 저장",
                             extra={"bank": BANK_NAME, "details": eval_result["details"]},
                         )
-                    crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
+                    write_return_count = crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
+                    return IbkLegacyResult(
+                        IbkLegacyDisposition.MIBANK_WRITE_RETURNED,
+                        selenium_attempts=selenium_attempts,
+                        write_return_count=write_return_count,
+                    )
             except Exception as e2:
                 logger.exception("MIBANK_IBK_URL 크롤링 실패", extra={"url": MIBANK_IBK_URL})
                 error_msg = f"모든 URL 실패: {str(e2)[:100]}"
                 logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+                return IbkLegacyResult(
+                    IbkLegacyDisposition.MIBANK_FAILED,
+                    selenium_attempts=selenium_attempts,
+                )
         else:
             logger.warning(
                 f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말 + Selenium 실패)",
@@ -225,6 +292,10 @@ def crawl_and_save_ibk_bank_exchange_rates():
                 }
             )
             # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 IBK 환율 표시
+            return IbkLegacyResult(
+                IbkLegacyDisposition.MIBANK_SKIPPED,
+                selenium_attempts=selenium_attempts,
+            )
     finally:
         db.close()
 
@@ -359,23 +430,12 @@ def try_crawl_with_dated_requests(
                 BANK_NAME,
                 MIBANK_REQUIRED_PAIRS,
             )
-            regressing_pairs = []
-            for pair, info in last_info.items():
-                last_rate = info.get("rate")
-                if last_rate is None or current_rates.get(pair) == last_rate:
-                    continue
-
-                last_timestamp = info.get("timestamp")
-                if last_timestamp is None:
-                    regressing_pairs.append(pair)
-                    continue
-                if last_timestamp.tzinfo is None:
-                    last_timestamp = last_timestamp.replace(tzinfo=datetime.timezone.utc)
-                last_timestamp_kst = last_timestamp.astimezone(KST)
-                if last_timestamp_kst > candidate_completion_kst + datetime.timedelta(
-                    seconds=IBK_DB_SAVE_LAG_TOLERANCE_SECONDS
-                ):
-                    regressing_pairs.append(pair)
+            regressing_pairs = find_regressing_pairs(
+                current_rates,
+                last_info,
+                candidate_completion_kst,
+                IBK_DB_SAVE_LAG_TOLERANCE_SECONDS,
+            )
 
             if regressing_pairs:
                 rates_to_store = {
@@ -561,6 +621,8 @@ def _parse_ibk_official_response(
         raise IbkRateTableAbsentError("IBK 일반고시환율 표 누락")
 
     header = rate_table.find('tr')
+    if header is None:
+        raise ValueError("IBK 일반고시환율 표 헤더 행 누락")
     header_names = [cell.get_text(' ', strip=True) for cell in header.find_all(['th', 'td'])]
     try:
         rate_column = header_names.index('매매기준율')
@@ -772,3 +834,119 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
         return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
     else:
         raise Exception(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception")
+
+
+# ═════════════════════════════════════════════════════════════
+# 미연결 결과 생성기 (운영 진입점·runner 바인딩에 연결하지 않음)
+# ═════════════════════════════════════════════════════════════
+def _intended_from_snapshot(before, regressing, current_rates):
+    """제출할 값과 유지할 값을 구성한다. 유지 대상은 사용 가능한 값이어야 한다.
+
+    회귀로 제외한 통화의 기존 값이 사용 가능하지 않으면(비유한·범위 밖·시각 없음)
+    유지하겠다고 선언할 수 없다. 그 경우 None을 돌려 호출자가 결과로 종결하게 한다.
+    제출 대상은 이 검사와 무관하므로 빈·부분 DB의 정상 보충은 막지 않는다.
+    """
+    if not regressing:
+        return IbkIntendedState(submitted=dict(current_rates))
+    usable = before.rates or {}
+    if any(pair not in usable for pair in regressing):
+        return None
+    submitted = {
+        pair: rate for pair, rate in current_rates.items() if pair not in regressing
+    }
+    return IbkIntendedState(
+        submitted=submitted,
+        retained={pair: usable[pair] for pair in regressing},
+        retention={pair: IbkRetentionReason.REGRESSION_GUARD for pair in regressing},
+    )
+
+
+def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkResult:
+    """한 서비스일의 공식 후보를 검증부터 최종 판정까지 연결한다. 아직 연결하지 않는다.
+
+    범위 밖: lookback, 당일 GET 우선순위, Selenium, MIBANK, 개장 전 보존 창 정책,
+    부모 경보. 표가 모호하게 없는 상태는 보존 승인이 아니라 실패 원인으로 분류한다 —
+    보존 승인에는 창 정책 판정이 필요하고 그것은 후속 단계다.
+    """
+    service_date = datetime.date.fromisoformat(context.expected_service_date)
+    observed_at = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
+    official = preservation = failure = None
+    intended = None
+    write = IbkWriteAttempt.none()
+
+    try:
+        fetched = _fetch_ibk_rates_for_date(
+            service_date, reference_time=context.reference_time, timeout=timeout
+        )
+    except IbkRateTableAbsentError:
+        failure = IbkObservationFailure(IbkReason.AMBIGUOUS_TABLE_ABSENT)
+    except requests.RequestException:
+        failure = IbkObservationFailure(IbkReason.TRANSPORT_ERROR)
+    except ValueError:
+        failure = IbkObservationFailure(IbkReason.CONTRACT_ERROR)
+
+    if failure is None:
+        try:
+            last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
+        except Exception:
+            # 사전 조회가 없으면 회귀 판정을 할 수 없어 안전하게 쓰지 않는다.
+            last_info = None
+            failure = IbkObservationFailure(IbkReason.DB_ERROR)
+
+    if failure is None:
+        before = read_ibk_db_snapshot(
+            db,
+            bank_name=BANK_NAME,
+            ranges=MIBANK_RATE_RANGES,
+            reader=lambda *_args, **_kwargs: last_info,
+        )
+        if fetched is None:
+            preservation = IbkPreservationGrant(IbkReason.OFFICIAL_NO_SESSION)
+            keep = dict(before.rates or {})
+            intended = IbkIntendedState(
+                retained=keep,
+                retention={pair: IbkRetentionReason.NOT_OBSERVED for pair in keep},
+                unavailable=tuple(before.missing or ()),
+            )
+        else:
+            current_rates, completed_at = fetched
+            completion = _ibk_completion_kst(service_date, completed_at)
+            official = IbkOfficialObservation(
+                IbkSource.OFFICIAL_POST, service_date, dict(current_rates), completion
+            )
+            regressing = find_regressing_pairs(
+                current_rates, last_info, completion, IBK_DB_SAVE_LAG_TOLERANCE_SECONDS
+            )
+            intended = _intended_from_snapshot(before, regressing, current_rates)
+            if intended is None:
+                # 유지하려는 기존 값을 쓸 수 없다. 관측을 승격하지 않고 결과로 종결한다.
+                official = None
+                failure = IbkObservationFailure(IbkReason.DB_ERROR)
+
+        if failure is None and intended.submitted:
+            mode = capture_write_mode()
+            try:
+                changed = crud.insert_bank_rates_into_db(
+                    db=db, current_rates=dict(intended.submitted), bank_name=BANK_NAME
+                )
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                write = IbkWriteAttempt(True, mode, None, failed=True)
+            else:
+                write = IbkWriteAttempt(True, mode, changed)
+
+    db_after = read_ibk_db_snapshot(db, bank_name=BANK_NAME, ranges=MIBANK_RATE_RANGES)
+    return build_ibk_result(
+        run_id=context.run_id,
+        expected_service_date=service_date,
+        observed_at=observed_at,
+        db_after=db_after,
+        intended=intended,
+        official=official,
+        preservation=preservation,
+        failure=failure,
+        write=write,
+    )

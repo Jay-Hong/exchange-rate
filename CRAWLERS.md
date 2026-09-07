@@ -434,6 +434,30 @@
 
 #### IBK 기업은행 (`app/crawlers/ibk.py`) ⭐⭐⭐
 
+**후속 정책 승인 / 아직 미활성 (2026-09-07):** 사용자가 IBK MIBANK writer를
+no-write 진단으로 격하하는 데 동의했다. 최종 변경에서는 평일 낮을 포함해 IBK
+MIBANK 값은 DB에 저장하지 않고, 기존 비신뢰 시간대 제한을 유지한 선택적·예산 내
+진단만 허용한다. 공식 경로를 검증하지 못하면 완전한 기존 DB는 DEGRADED,
+빈/부분 DB는 FAILED로 구분하는 계측·경보와 함께 반영한다. 신한 등 다른 은행은
+변경하지 않는다. 아래는 **현재 동작**이며 POST-first와 MIBANK 저장 금지는 아직 아니다.
+
+**준비 구현의 범위 (로컬, 미배포) — 세 갈래로 구분한다:**
+(1) *해당 범위 검증 완료*: 결과 프로토콜, 유한 subprocess capture, 실행 ID·기준시각 전달,
+선택적 부모 배선, 판정 어댑터, 회귀 가드 순수 함수 추출, 단일 서비스일 결과 생성기.
+(2) *기본 운영 경로 미전환*: `IBK_RESULT_CRAWLER = None`이고 worker는 인자 없이 생성되므로
+IBK를 포함한 모든 은행이 기존 경로로 흐른다. 생성기의 운영 호출자는 없다.
+(3) *후속 작업*: 전체 IBK 실행 흐름 연결, Selenium 안전화, POST-first 정책 전환, 실제 경보 연결.
+이 검증은 로컬 경계에서 이뤄졌고 실제 HTTP·Selenium·운영 PostgreSQL·부모 경보 검증이 아니다.
+
+**행동보존 준비 단계 (로컬 구현, 미배포):** `crawl_ibk_legacy_result()`가 종료 분기,
+Selenium 시도 수, 직접 확보한 저장 함수 반환 개수만 `IbkLegacyResult`로 돌려준다.
+공개 진입 함수는 이를 버리고 기존 `None`/예외 계약을 유지한다. 이 타입은
+최종 OBSERVED/PRESERVED/DEGRADED/FAILED도, 부모 IPC 프로토콜도 아니다.
+HTTP 순서·쓰기 집합·재시도·부모 성공/실패 계측은 불변이다. 특히 저장 반환 0을
+unchanged로 확정하지 않으며 기존 MIBANK writer도 후속 원자 배포까지 남는다.
+실패 주입은 `tests/test_ibk_legacy_result.py`, 기존 공식 POST 검증은
+`tests/test_ibk_historical_request.py`에서 함께 확인한다.
+
 **핵심 로직:**
 - **자정 전환기 Selenium 억제**: 00:00~00:05에도 공식 날짜 POST는 실행하고, 실패한 경우에만 UI Selenium을 억제
 - **조건부 폴백**: 08:00 이후 당일 GET → 날짜 POST / 08:00 전 날짜 POST 직행 → Selenium (3회) → MIBANK(조건부)
