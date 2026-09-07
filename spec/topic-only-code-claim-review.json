@@ -2,19 +2,19 @@
   "schema_version": 1,
   "inputs": {
     "archive_sha256": "cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814",
-    "manifest_sha256": "8013021f95f2582e80f50a8034c5848127083249dab8d466107d9efc95615037",
+    "manifest_sha256": "509f0f3dfdc2c9434d4ff7971139a6b1617b8d0b666dfe1b3f67168c7b37d058",
     "baseline_sha256": "7cad459bc03f9fa2a71abe165a689b9309caa00bd15947592e92904d20637984",
-    "lock_sha256": "6a11ce387ae74e798813fd4e428e213cbfd5718af80b15b65956487cb643dd5c",
-    "server_commit": "9fe4a26458ce3ee909a4c92f4c395fcacb14c411",
+    "lock_sha256": "376a9656a081e0a8400efd47c089bb2e4cefe2908c46a5c11ceeadd5a9b63fa1",
+    "server_commit": "aef3c5d0948f94877aebe30f181b3e12bafba4f3",
     "ios_commit": "8f6afff299621d50c3431dbea739ed07c378c59a"
   },
   "documents": {
-    "ADR": "98a88f97f098536136ea75d225d63149a13f6a27f2ac792d8d9ccd0a50401957",
-    "CLIENT": "4aaaac3f4c3f8aab058c7e08102f573f7daec2be0950acfcb738ed9be5c25cad",
-    "CUT": "56ce5b7d3d82f248ff9cd2b6191405cfd06611028d0e611643169238f07d22f4",
-    "HAND": "9a440e936c40849dca583593de34f3da1a3c0ca26779bf353af519a1ade872c4",
-    "HEALTH": "e73af4202f3eb3b6f9f27f2a4d0ad0909aeb730e9c3d90412c4c868e16d918dc",
-    "LOAD": "9f13526381f402932299916aad4b958a25feec5febf57143edea39b9f43ef4ff"
+    "ADR": "31fb87aba7a0ac73872c201a09e306992e3f0a34840c6961374aa2d46c15c57a",
+    "CLIENT": "a7190afbbbc6c2ead048518c5a0072c46e9711f2c5b9d50497571a105f920451",
+    "CUT": "a811bb4a24dc8a408ea18ae71bec56859c520ff920de1b5c6cd3f9f489e96239",
+    "HAND": "b93b77df17528be2fdea317d116280ae71e7f22d4bb1bf434f5344d0e97b0397",
+    "HEALTH": "b9148a3cbc301106f66d7309700cfbd44601099b1d0de5f9db257e29dd0b102a",
+    "LOAD": "ecea9c11341aa05a5b3de09c3230a3dd32fd9a363ed3edad98fe14a6d3e6049c"
   },
   "entries": [
     {
@@ -36,14 +36,14 @@
     {
       "destination": "ADR",
       "rid": "R-DEC-1",
-      "unit_sha256": "8d7d5c9d8322cebe0850dd82691bdee0fb9b43f2569c1ec45c52754478546d61",
-      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1528-1534` · `app/main.py:976-999`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:243`.",
+      "unit_sha256": "3a5be638e59fa5d3ad3b8fdd198b4a4c7f5a26770a5c5291dc09f2aa5a8f12ae",
+      "unit_text": "- publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의 `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다 (`app/scheduler.py:1537-1543` · `app/main.py:976-999`). 따라서 현재 경로에는 **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**. ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고 특정 topic publisher 의 생존은 증명하지 않는다. 근거: baseline B1 · `ios/FXi/Utils/Constants.swift:243`.",
       "classification": "code_fact",
       "detail": "baseline B1은 두 publisher 모듈 내부만의 부정 사실이다. 외부 scheduler가 broadcast_rates_once를 매초 깨우지만 publisher 호출은 is_changed 분기 안임을 추가 확인해, 무조건 주기 재발행 계약 부재로 범위를 좁혔다.",
       "provenance": [
         "baseline:B1",
         "file:app/main.py:976-999",
-        "file:app/scheduler.py:1528-1534",
+        "file:app/scheduler.py:1537-1543",
         "file:ios/FXi/Utils/Constants.swift:243"
       ]
     },
@@ -719,15 +719,15 @@
     {
       "destination": "HEALTH",
       "rid": "R-HLT-1",
-      "unit_sha256": "8ae90806ebb52056a8ba3671b67f3291ca3a5250263d50789816c6461b3da1a4",
-      "unit_text": "**서버 — 정상 initial snapshot _이후_ 의 publisher 사망은 클라가 판별할 수 없다** (⛔ 파생 숫자 숨김 정책([R-DEC-2](../DECISIONS.md#r-dec-2), `[제안·결정 대기]`)을 수용할 경우 이것은 **arming 선행조건**이며 **후속이 아니다**) ([R-DEC-1](../DECISIONS.md#r-dec-1) — 45초는 데이터의 나이가 아니므로 **정상 침묵과 구분 불가**). **서버 publisher health/SLO/알람**으로 덮는다. 이건 클라 계약이 아니라 **운영 계약**이다. 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다 (`app/scheduler.py:1528-1534` · `app/main.py:976-999`).",
+      "unit_sha256": "8e2024e3d36ed00516ef7dcc25e9c1f414a7f2213beeb148008806d41aadb5c1",
+      "unit_text": "**서버 — 정상 initial snapshot _이후_ 의 publisher 사망은 클라가 판별할 수 없다** (⛔ 파생 숫자 숨김 정책([R-DEC-2](../DECISIONS.md#r-dec-2), `[제안·결정 대기]`)을 수용할 경우 이것은 **arming 선행조건**이며 **후속이 아니다**) ([R-DEC-1](../DECISIONS.md#r-dec-1) — 45초는 데이터의 나이가 아니므로 **정상 침묵과 구분 불가**). **서버 publisher health/SLO/알람**으로 덮는다. 이건 클라 계약이 아니라 **운영 계약**이다. 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다 (`app/scheduler.py:1537-1543` · `app/main.py:976-999`).",
       "classification": "code_fact",
       "detail": "B1/B2의 범위를 publisher 내부 timer와 coalesce 의미로 한정하고, 외부 broadcast caller도 payload 변경 시에만 publish함을 확인했다. initial snapshot 실패 close와 별개로 정상 snapshot 이후 publisher 침묵을 클라이언트가 구분할 신호는 없다.",
       "provenance": [
         "baseline:B1",
         "baseline:B2",
         "file:app/main.py:976-999",
-        "file:app/scheduler.py:1528-1534"
+        "file:app/scheduler.py:1537-1543"
       ]
     },
     {
