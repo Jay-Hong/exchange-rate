@@ -514,6 +514,67 @@ def test_failed_block_notice_enqueue_does_not_reset_reminder_clock_or_retry_capt
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("bank", ["ibk", "nh"])
+def test_legacy_failure_is_retried_exactly_once_per_queue_item(bank, monkeypatch):
+    """실패한 회차는 **한 번만** 재등록된다 — 재등록된 작업은 다시 재등록되지 않는다.
+
+    ⛔ 이 상한이 운영 문서의 근거다. shadow 활성 시 "멈춘 관측 → 부모 kill → 회차 재실행" 이
+       **큐 항목당 최대 1회** 라고 CRAWLERS.md 가 적고 있는데, 그 1회를 지키는 것은
+       `should_retry and not is_retry` 뿐이다(scheduler.py). 여기가 풀리면 실패가 무한
+       재등록되고 문서가 거짓이 된다.
+
+    ⛔ 판정은 **호출 횟수**다. 아래 안전장치가 폭주를 끊어 큐가 정상적으로 비므로
+       `queue.join()` 시간 초과에 기대지 않는다. 초판 주석은 그렇게 적었지만 안전장치를
+       넣은 뒤로는 사실이 아니어서 고쳤다 — `wait_for` 만으로는 이벤트 루프를 독점하는
+       폭주를 끊지 못한다.
+    """
+    async def scenario():
+        queue = asyncio.PriorityQueue()
+        monkeypatch.setattr(scheduler, "selenium_queue", queue)
+        seen = []
+        enqueued = []
+        counts = {"run": 0, "put": 0}
+        original_put = queue.put
+
+        async def recording_put(item):
+            # ⛔ 상한이 깨진 변이에서는 무한히 재등록된다. 전량을 모으면 리스트가 폭주하고
+            #    실패 메시지 포매팅이 시험을 멈춰 세운다(실측). 앞 몇 건만 남기고 세기만 한다.
+            counts["put"] += 1
+            if len(enqueued) < 4:
+                enqueued.append(item)
+            await original_put(item)
+
+        monkeypatch.setattr(queue, "put", recording_put)
+
+        async def always_failing(name):
+            counts["run"] += 1
+            if len(seen) < 4:
+                seen.append(name)
+            # ⛔ 상한이 깨진 변이에서는 worker 가 초당 수만 회 돌며 로그를 쏟아 시험을 마비시킨다
+            #    (실측: 배터리가 두 번 멈췄다). 폭주를 여기서 끊어 판정이 빠르게 끝나게 한다.
+            #    성공을 돌려주면 재등록이 멈추고 큐가 비어 아래 단언이 정상적으로 실패한다.
+            return counts["run"] > 6
+
+        monkeypatch.setattr(scheduler, "execute_with_timeout", always_failing)
+        await original_put((5, 0, bank, False))
+        worker = asyncio.create_task(scheduler.selenium_job_executor())
+        try:
+            await asyncio.wait_for(queue.join(), 3)
+        finally:
+            worker.cancel()
+            await worker
+
+        assert counts["run"] == 2, f"원래 1회 + 재시도 1회여야 한다 (실제 {counts['run']}회)"
+        assert seen[:2] == [bank, bank]
+        assert queue.empty(), "재시도 작업이 다시 재등록되면 큐가 비지 않는다"
+        assert counts["put"] == 1, f"재등록은 정확히 1회 (실제 {counts['put']}회)"
+        priority, _, name, is_retry = enqueued[0]
+        assert name == bank and is_retry is True, "재등록 항목은 재시도 표시를 달고 간다"
+        assert priority == 5 + 1000, "재시도는 낮은 우선순위로 들어간다"
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("bank,injected", [("ibk", False), ("nh", True)])
 def test_existing_worker_default_and_other_banks_remain_legacy(bank, injected, monkeypatch):
     async def scenario():
