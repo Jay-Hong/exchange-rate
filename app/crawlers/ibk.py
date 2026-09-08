@@ -1,12 +1,15 @@
 # app/crawlers/ibk.py
 
 # 표준 라이브러리
+import dataclasses
 import datetime
+import types
 from dataclasses import dataclass
 from enum import Enum
 import logging
 import math
 import re
+import threading
 import time
 
 # 서드파티 라이브러리
@@ -21,6 +24,7 @@ from sqlalchemy.orm import Session
 
 # 로컬 애플리케이션
 from app import crud, models
+from app import ibk_selenium_config
 from app.ibk_regression_guard import find_regressing_pairs
 from app.ibk_result_builder import (
     IbkIntendedState,
@@ -40,6 +44,10 @@ from app.ibk_candidate_policy import (
 )
 from app.ibk_result_protocol import IbkReason, IbkResult, IbkSource
 from app.ibk_run_context import SERVICE_DATE_ROLLOVER_TIME
+from app.ibk_selenium_observation import (
+    IbkSeleniumObservation,
+    compare_mappings,
+)
 from app.database import SessionLocal
 from app.crawlers.constants import (
     DEFAULT_TIMEOUT,
@@ -94,6 +102,14 @@ IBK_BANK_SELECTORS = {
     'jpy-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(2) > td:nth-child(3)',
     'eur-krw': '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(3) > td:nth-child(3)',
     # '#contents_in > div.section_last > div.table_view_section2 > table > tbody > tr:nth-child(4) > td:nth-child(3)',
+}
+
+# 공식 표의 통화 코드 → 우리 pair. **파서와 관측이 같은 매핑을 쓴다** — 갈라지면
+# 관측이 파서와 다른 것을 보게 되고 shadow 수치가 예측력을 잃는다.
+IBK_CODE_TO_PAIR = {
+    'USD': 'usd-krw',
+'JPY': 'jpy-krw',
+'EUR': 'eur-krw',
 }
 INPUT_SELECTOR = "#inDate"
 
@@ -180,6 +196,9 @@ def crawl_and_save_ibk_bank_exchange_rates():
 def crawl_ibk_legacy_result() -> IbkLegacyResult:
     """기업은행 기존 수집 동작을 실행하고 종료 분기만 타입으로 반환한다."""
 
+    # 이 회차의 시작. 검증 관측(shadow)의 예산 가드가 이 기준으로 남은 여유를 잰다.
+    run_started_at = time.monotonic()
+
     # ═══════════════════════════════════════════════════════════════════
     # 자정 전환기 Selenium 스킵 (00:00~00:05)
     # ═══════════════════════════════════════════════════════════════════
@@ -236,7 +255,9 @@ def crawl_ibk_legacy_result() -> IbkLegacyResult:
         for attempt in range(3):
             try:
                 selenium_attempts += 1
-                write_return_count = crawl_and_save_ibk_routine_selenium(IBK_BANK_URL, IBK_BANK_SELECTORS, db)
+                write_return_count = crawl_and_save_ibk_routine_selenium(
+                    IBK_BANK_URL, IBK_BANK_SELECTORS, db, run_started_at=run_started_at
+                )
                 logger.info(f"✅ {BANK_NAME} Selenium 성공 (시도 {attempt+1}/3)")
                 return IbkLegacyResult(
                     IbkLegacyDisposition.SELENIUM_RETURNED,
@@ -581,6 +602,42 @@ def _fetch_ibk_rates_for_date(
     )
 
 
+OFFICIAL_RATE_TABLE_CAPTION = '일반고시환율 표'
+
+
+def _find_official_rate_table(soup):
+    """공식 고시 표를 caption 으로 특정한다.
+
+    ⛔ parser 와 관측이 **같은 표**를 봐야 대조가 성립한다. 문서 전체를 훑으면 페이지의
+       다른 표(안내·환전 수수료 등)가 섞여 들어와, 차이가 데이터 문제인지 범위 문제인지
+       사후에 가릴 수 없다(상호 검토에서 별도 표 주입으로 실증).
+    """
+    for table in soup.find_all('table'):
+        caption = table.find('caption')
+        if caption and caption.get_text(' ', strip=True) == OFFICIAL_RATE_TABLE_CAPTION:
+            return table
+    return None
+
+
+def _row_cells(row):
+    """행의 데이터 칸들. `th` 와 `td` 를 구분하지 않는다."""
+    return row.find_all(['th', 'td'])
+
+
+def _cell_currency_code(cells) -> str:
+    """첫 칸에서 통화 코드를 읽는다. **이 규칙의 단일 정의 위치**다.
+
+    ⛔ `th` 만 보면 코드 칸이 `td` 인 표에서 통화를 하나도 못 본다 — parser 는 통과시키는데
+       관측만 빈 목록이 되어 "표가 비었다" 로 오독된다(상호 검토에서 실증).
+    """
+    return cells[0].get_text(' ', strip=True).upper() if cells else ''
+
+
+def _row_currency_code(row) -> str:
+    """행에서 통화 코드를 읽는다(칸 분해까지 한 번에)."""
+    return _cell_currency_code(_row_cells(row))
+
+
 def _parse_ibk_official_response(
     response,
     *,
@@ -603,12 +660,7 @@ def _parse_ibk_official_response(
             f"IBK 요청 날짜 readback 불일치: expected={expected_date}, actual={actual_date or 'none'}"
         )
 
-    rate_table = None
-    for table in soup.find_all('table'):
-        caption = table.find('caption')
-        if caption and caption.get_text(' ', strip=True) == '일반고시환율 표':
-            rate_table = table
-            break
+    rate_table = _find_official_rate_table(soup)
 
     if rate_table is None:
         if 'ECBKFEX01589' in response.text:
@@ -633,17 +685,13 @@ def _parse_ibk_official_response(
     except ValueError as exc:
         raise ValueError("IBK 매매기준율 헤더 누락") from exc
 
-    code_to_pair = {
-        'USD': 'usd-krw',
-        'JPY': 'jpy-krw',
-        'EUR': 'eur-krw',
-    }
+    code_to_pair = IBK_CODE_TO_PAIR
     current_rates = {}
     for row in rate_table.find_all('tr')[1:]:
-        cells = row.find_all(['th', 'td'])
+        cells = _row_cells(row)
         if not cells:
             continue
-        code = cells[0].get_text(' ', strip=True).upper()
+        code = _cell_currency_code(cells)
         pair = code_to_pair.get(code)
         if pair is None:
             continue
@@ -742,7 +790,181 @@ def try_crawl_with_requests(
         return False
 
 
-def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) -> int:
+#: 관측용 `page_source` 읽기에서 **내가 기다리는 시간**의 상한(초).
+#: ⛔ 이 값은 명령을 **취소하지 않는다.** `join()` 대기를 끝낼 뿐이고, 멈춘 명령은 세션에
+#:    그대로 남아 이어지는 `driver.quit()` 을 막을 수 있다. 즉 "멈춘 읽기를 잘라 준다" 가
+#:    아니라 "멈춘 읽기에 무한정 매달리지 않는다" 까지가 이 값이 하는 일이다.
+SHADOW_PAGE_SOURCE_TIMEOUT = 3.0
+
+#: 부모 수집 제한(IBK 45초) 중 이만큼을 **넘겨** 썼으면(`spent > 값`) 관측을 건너뛴다.
+#: 정확히 이 값만큼 썼을 때는 관측한다 — 경계는 운영 의미가 없어 엄격 부등호로 고정한다.
+#: ⛔ 저장은 관측 앞에서 이미 commit 되지만, 멈춘 읽기가 `driver.quit()` 을 막아 부모 kill 을
+#:    부르면 그 회차가 실패로 **집계**된다. 시간이 빠듯할 때는 관측을 포기하는 쪽이 맞다.
+#: ⛔ 기준 시각은 **모듈 import 가 아니라 그 회차의 시작**이다. import 시각으로 재면 오래 산
+#:    프로세스에서 항상 건너뛴다 — 전체 스위트에서 실측으로 드러났다(격리 실행은 통과해
+#:    거짓 초록이었다). 기준을 모르면(`run_started_at=None`) 가드를 적용하지 않는다.
+SHADOW_BUDGET_GUARD_SECONDS = 30.0
+
+
+def _read_page_source_bounded(driver, *, timeout=None):
+    """`page_source` 를 시간 제한 안에서 읽는다. `(html, 실패사유)` 를 돌려준다.
+
+    ⛔ **hang 은 예외가 아니라서 try/except 로 못 막는다.** 이 읽기는 legacy 경로가 하지 않는
+       새 WebDriver 왕복(DOM 전체 직렬화)이므로, 제한 없이 두면 관측이 수집 제한시간을 먹고
+       부모가 자식을 죽여 legacy 라면 저장됐을 값이 사라진다(상호 검토에서 실증).
+
+    ⛔ 못 읽은 이유를 **시간 초과와 실패로 나눠** 남긴다. 합치면 "관측이 느리다" 와
+       "driver 가 죽었다" 를 사후에 구분할 수 없다.
+
+    ⛔ 상한을 넘긴 읽기 스레드는 daemon 으로 남는다 — 취소할 방법이 없다. 프로세스는
+       수집 1회짜리 subprocess 라 곧 끝나고, 그 스레드의 어떤 결과도 쓰지 않는다.
+    """
+    # ⛔ 기본 인자로 상수를 묶지 않는다 — 정의 시점에 값이 고정돼 모듈 상수를 바꿔도
+    #    반영되지 않고, 그 사실을 모른 채 "상한을 줄여 확인했다" 고 착각하게 된다(실측).
+    limit = SHADOW_PAGE_SOURCE_TIMEOUT if timeout is None else timeout
+    outcome = {}
+
+    def _read():
+        try:
+            outcome["html"] = driver.page_source
+        except BaseException:  # noqa: BLE001 — 별도 스레드다. 무엇이 나오든 여기서 끝낸다.
+            outcome["failed"] = True
+
+    worker = threading.Thread(target=_read, daemon=True)
+    worker.start()
+    worker.join(limit)
+    if "html" in outcome:
+        return outcome["html"], None
+    if outcome.get("failed"):
+        return None, "page_source_failed"
+    return None, "page_source_timeout"
+
+
+def _emit_selenium_shadow_observation(driver, *, query_date, legacy_rates, run_started_at=None):
+    """관측하고 기록한다. **어떤 실패도 호출자에게 전달하지 않는다.**
+
+    ⛔ 관측기 내부 방어만으로는 부족하다 — 비교 함수, 예외의 `__str__`, 로그 직렬화,
+       sink 전달 어디서든 터질 수 있고, 하나라도 새면 legacy 저장이 MIBANK 로 바뀐다(실측).
+       그래서 경계에서 한 번 더 삼킨다.
+    """
+    try:
+        # ⛔ 건너뛸 때는 **반드시 남긴다.** 조용히 꺼지면 "켜 뒀다" 고 믿은 채 표본이 비고,
+        #    그 공백을 "관측 대상이 없었다" 로 오독하게 된다.
+        spent = None if run_started_at is None else time.monotonic() - run_started_at
+        if spent is not None and spent > SHADOW_BUDGET_GUARD_SECONDS:
+            logger.info(
+                "IBK_SELENIUM_SHADOW_OBSERVATION_SKIPPED",
+                extra={"bank": BANK_NAME, "ibk_selenium_skip_reason": "budget_guard",
+                       "ibk_selenium_spent_seconds": round(spent, 1)},
+            )
+            return
+        observation = _observe_selenium_capture(
+            driver,
+            query_date=query_date,
+            reference_time=datetime.datetime.now(KST),
+            legacy_rates=dict(legacy_rates) if legacy_rates is not None else None,
+        )
+        logger.info(
+            "IBK_SELENIUM_SHADOW_OBSERVATION",
+            extra={"bank": BANK_NAME, **observation.as_log_extra()},
+        )
+    except Exception:  # noqa: BLE001 — 관측이 수집을 바꾸지 않는다는 것이 이 슬라이스의 계약이다
+        try:
+            logger.warning("IBK_SELENIUM_SHADOW_OBSERVATION_FAILED", extra={"bank": BANK_NAME})
+        except Exception:
+            pass
+
+
+def _observe_selenium_capture(driver, *, query_date, reference_time, legacy_rates):
+    """같은 캡처로 공식 parser 를 돌려 **관측만** 한다. 어떤 예외도 밖으로 내지 않는다.
+
+    ⛔ 이 함수가 실패해도 legacy 수집이 영향받으면 안 된다 — shadow 의 존재 이유가 사라진다.
+       그래서 모든 경로를 삼키고 관측을 "unavailable" 로 남긴다. 그 실패를 정상 판정으로
+       세지 않기 위해 verdict 를 따로 둔다.
+
+    ⛔ 브라우저 인스턴스나 HTTP 요청을 늘리지 않는다. 이미 열린 driver 의 현재 DOM 만 쓴다.
+    """
+    captured_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    observation = IbkSeleniumObservation(
+        requested_date=query_date.strftime('%Y.%m.%d') if query_date else None,
+        captured_at=captured_at,
+        parser_verdict="unavailable",
+    )
+    html, read_failure = _read_page_source_bounded(driver)
+    if read_failure is not None:
+        return dataclasses.replace(observation, notes=(read_failure,))
+
+    # 필드별로 독립 수집한다 — 하나가 실패해도 나머지 사실이 사라지지 않게.
+    input_value = completed_at = None
+    pairs: tuple[str, ...] = ()
+    soup = None
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+    except Exception:
+        pass
+    if soup is not None:
+        try:
+            node = soup.select_one(INPUT_SELECTOR)
+            input_value = node.get('value', '').strip() if node else None
+        except Exception:
+            pass
+        try:
+            marker = soup.select_one('p.standard')
+            completed_at = marker.get_text(strip=True) if marker else None
+        except Exception:
+            pass
+        try:
+            # ⛔ 통화 목록은 parser 전체 성공과 **독립**으로 모은다. 완료시각 형식 하나가
+            #    틀렸다고 "표에 어떤 통화가 있었나" 를 못 보면 원인을 못 가린다(실측).
+            #    행 번호가 아니라 **통화 코드**로 식별한다 — 순서가 바뀌어도 정직하다.
+            # ⛔ 다만 **표 특정과 코드 칸 판독은 parser 와 같은 규칙**을 쓴다. 독립이어야 하는
+            #    것은 "parser 가 최종 통과했는가" 이지 "어디를 보는가" 가 아니다.
+            rate_table = _find_official_rate_table(soup)
+            if rate_table is not None:
+                pairs = tuple(sorted({
+                    IBK_CODE_TO_PAIR[code]
+                    for row in rate_table.find_all('tr')[1:]
+                    for code in [_row_currency_code(row)]
+                    if code in IBK_CODE_TO_PAIR
+                }))
+        except Exception:
+            pass
+
+    verdict, reject_reason, validated = "unavailable", None, None
+    try:
+        parsed = _parse_ibk_official_response(
+            types.SimpleNamespace(text=html),
+            query_date=query_date,
+            reference_time=reference_time,
+        )
+        if parsed is None:
+            # ⛔ 정상 무고시다. 관측 실패로 세면 분모가 오염된다.
+            verdict = "no_session"
+        else:
+            rates, completed = parsed
+            verdict, validated = "accept", dict(rates)
+            completed_at = completed_at or completed
+    except ValueError as exc:
+        verdict, reject_reason = "reject", str(exc)[:200]
+    except Exception as exc:  # noqa: BLE001 — 관측이 수집을 깨뜨리지 않는다
+        reject_reason = f"{type(exc).__name__}: {str(exc)[:120]}"
+
+    comparison, diff = compare_mappings(legacy_rates, validated)
+    return dataclasses.replace(
+        observation,
+        input_value_date=input_value,
+        completed_at_text=completed_at,
+        observed_pairs=pairs,
+        parser_verdict=verdict,
+        parser_reject_reason=reject_reason,
+        mapping_comparison=comparison,
+        mapping_diff_pairs=diff,
+    )
+
+
+def crawl_and_save_ibk_routine_selenium(
+    url: str, selectors: dict, db: Session, *, run_started_at: float | None = None
+) -> int:
     """IBK 전용 Selenium 크롤링 + DB 저장 루틴 (변경 개수 반환)"""
     current_rates = {}
     try:
@@ -782,11 +1004,43 @@ def crawl_and_save_ibk_routine_selenium(url: str, selectors: dict, db: Session) 
                         logger.warning(f"⚠️ 날짜 변경 실패", extra={"selector": INPUT_SELECTOR, "bank": BANK_NAME})
                         break
 
-            # db 저장
-            if current_rates:
-                return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
-            else:
+            # ⛔ **추출 실패 분기에서는 관측하지 않는다.** 이 분기의 다음 단계는 Selenium
+            #    재시도 3회와 MIBANK 폴백인데, 관측의 읽기 대기가 시도마다 쌓여(3초 × 3회)
+            #    부모의 45초 제한 안에서 폴백 저장 기회를 통째로 없앨 수 있다(상호 검토에서
+            #    실증: 부모 제한 0.4초 대역에서 legacy 는 MIBANK 저장, shadow 는 저장 0회).
+            #    강제 적용 판단에 필요한 모집단은 "Selenium 은 값을 냈는데 공식 계약은 거절"
+            #    쪽이므로, 이 분기를 빼도 목적한 신호는 남는다.
+            if not current_rates:
                 raise Exception(f"환율 데이터 추출 실패 (셀렉터 오류 또는 데이터 없음)")
+
+            # db 저장
+            written = crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+
+            # 검증 관측(shadow)은 저장이 **commit 된 뒤**에만 돈다.
+            # ⛔ 관측의 `page_source` 는 legacy 가 하지 않는 새 WebDriver 왕복이라, 멈추면
+            #    예외가 아니어서 경계 wrapper 가 못 막는다. 저장 앞에 두면 부모의 45초 제한이
+            #    자식을 죽여 legacy 라면 저장됐을 값이 사라진다(상호 검토에서 실증).
+            #    `insert_bank_rates_into_db` 가 내부에서 `db.commit()` 하므로 이 지점에서
+            #    저장은 이미 확정이다.
+            # ⛔ **남는 위험은 집계에서 끝나지 않는다.** 멈춘 읽기가 `driver.quit()` 을 막으면
+            #    (ChromeDriver 는 세션마다 스레드 하나로 그 세션 명령을 큐 순서대로 처리한다)
+            #    부모가 자식을 kill 하고 `execute_with_timeout` 이 False 를 돌려주며, worker 는
+            #    `should_retry = not success` 로 **IBK 회차를 통째로 한 번 더 실행**한다
+            #    (추가 HTTP·Selenium 시도와 저장 호출, Selenium 큐 점유). 재시도 작업은 다시
+            #    재시도되지 않으므로 **원래 큐 항목당** 여분 실행이 최대 1회다(관측 기간
+            #    전체의 상한이 아니다 — 매 회차가 각자 이 상한을 가진다).
+            #    이미 commit 된 값은 남는다.
+            #    ⛔ 예산 가드(`SHADOW_BUDGET_GUARD_SECONDS`)는 **느린 읽기**에만 듣는다.
+            #       명령이 아예 멈추면 남은 예산과 무관하게 위 경로가 발생할 수 있다.
+            # ⛔ 관측 **과 로그 전달까지** 통째로 격리한다. 로그 sink 하나가 실패하는 것만으로
+            #    수집이 재시도·MIBANK 로 흘러가면 shadow 의 존재 이유가 사라진다(실측).
+            #    legacy 모드에서는 호출조차 하지 않는다.
+            if ibk_selenium_config.VALIDATION_MODE == ibk_selenium_config.MODE_SHADOW:
+                _emit_selenium_shadow_observation(
+                    driver, query_date=selected_date, legacy_rates=current_rates,
+                    run_started_at=run_started_at,
+                )
+            return written
 
     except Exception as e:
         error_msg = str(e)

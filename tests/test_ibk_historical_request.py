@@ -954,7 +954,12 @@ class TestIbkFallbackOrder(unittest.TestCase):
         db, current, history, selenium = self._run(now)
         current.assert_not_called()
         history.assert_called_once_with(db, reference_time=now)
-        selenium.assert_called_once_with(ibk.IBK_BANK_URL, ibk.IBK_BANK_SELECTORS, db)
+        # 위치 인자는 그대로 고정한다. `run_started_at` 은 shadow 예산 가드용 회차 기준이라
+        # 폴백 순서 계약과 무관하지만, **전달된다는 사실 자체**는 따로 잠근다
+        # (`test_ibk_legacy_result.py::test_selenium_call_carries_the_run_anchor`).
+        assert selenium.call_count == 1
+        assert selenium.call_args.args == (ibk.IBK_BANK_URL, ibk.IBK_BANK_SELECTORS, db)
+        assert set(selenium.call_args.kwargs) == {"run_started_at"}
         db.close.assert_called_once_with()
 
     def test_after_service_day_start_current_get_still_runs_first(self):

@@ -451,6 +451,52 @@ IBK를 포함한 모든 은행이 기존 경로로 흐른다. 생성기의 운�
 (3) *후속 작업*: 전체 IBK 실행 흐름 연결, Selenium 안전화, POST-first 정책 전환, 실제 경보 연결.
 이 검증은 로컬 경계에서 이뤄졌고 실제 HTTP·Selenium·운영 PostgreSQL·부모 경보 검증이 아니다.
 
+**Selenium 검증 관측(shadow) — 판정을 저장에 반영하지 않는다(그러나 공짜는 아니다):**
+`IBK_SELENIUM_VALIDATION_MODE`(`legacy` 기본 / `shadow`)로 켠다. `shadow`는 이미 열린 driver의
+현재 DOM에 공식 parser를 **한 번 더 돌려** 결과를 `IBK_SELENIUM_SHADOW_OBSERVATION` 구조화
+로그로 남긴다. 브라우저나 HTTP 요청을 늘리지 않는다 — 이미 열린 driver 의 현재 DOM 만 쓴다.
+
+행동 불변을 **네 층으로** 지킨다. 관측의 `page_source`는 legacy가 하지 않는 새 WebDriver
+왕복이고, **멈춤은 예외가 아니라** try/except로 막을 수 없다는 것이 이 설계의 출발점이다.
+(1) *예외*: 관측과 로그 전달까지 경계에서 삼키고 `IBK_SELENIUM_SHADOW_OBSERVATION_FAILED`만
+남긴다. (2) *경로*: **추출 성공 분기에서만** 관측한다. 실패 분기 뒤에는 Selenium 재시도 3회와
+MIBANK 폴백이 오는데, 관측 대기가 시도마다 쌓이면 45초 안에서 폴백 저장 기회가 사라진다.
+(3) *순서*: 관측은 DB 저장 **뒤**다. `insert_bank_rates_into_db`가 내부에서 commit하므로 이
+시점에 저장은 확정이고, 부모가 자식을 죽여도 값은 남는다. (4) *예산*: 그 회차가 이미
+`SHADOW_BUDGET_GUARD_SECONDS`(기본 30초)를 썼으면 관측 자체를 건너뛰고
+`IBK_SELENIUM_SHADOW_OBSERVATION_SKIPPED`로 남긴다(조용히 꺼지면 표본의 공백을 "관측 대상
+없음"으로 오독한다). 읽기에는 상한(`SHADOW_PAGE_SOURCE_TIMEOUT`, 기본 3초)을 두고, 초과는
+`page_source_timeout`으로 `page_source_failed`와 **구분해** 남긴다("느리다"와 "driver가
+죽었다"는 다른 사실이다).
+날짜 후퇴는 관측이 그 루프가 **끝난 뒤**에 놓여 구조적으로 닿지 않는다. 위 네 층과 저장 값·
+저장 반환 개수 동일성은 모두 회귀로 잠갔다.
+
+⛔ **남는 위험 — 활성화 전에 읽을 것.** 상한을 넘긴 읽기 스레드는 취소할 수 없고, ChromeDriver는
+세션마다 스레드 하나를 두고 그 세션을 대상으로 하는 **모든** 명령을 큐 순서대로 처리하므로
+(chromedriver `docs/threading.md`), 그 스레드가 `driver.quit()`을 막을 수 있다. 그러면 부모가
+자식을 kill하고 `execute_with_timeout`이 False를 돌려주며, Selenium worker는
+`should_retry = not success`로 **IBK 회차를 통째로 한 번 더 실행한다** — 추가 HTTP·Selenium
+시도와 저장 호출, Selenium 큐 점유가 발생한다. 재시도 작업은 다시 재시도되지 않으므로 여분
+실행은 **원래 큐 항목당 최대 1회**다 — 관측 기간 전체의 상한이 아니라 매 회차가 각자 갖는
+상한이다. 이미 commit된 값은 남는다.
+또한 부모의 강제 종료는 **직접 자식만** kill하고(`scheduler.py`), `quit()`이 멈추면
+`utils.py`의 예외 기반 Chrome 정리에도 도달하지 못한다 — 잔존 프로세스와 메모리는 재시도
+상한이 보장해 주지 않는다. `shadow`를 켤 때는 timeout·큐뿐 아니라 **잔존 프로세스와 메모리**도
+함께 본다.
+예산 가드는 **느린 읽기**에만 듣는다 — 명령이 아예 멈추면 남은 예산과 무관하게 이 경로가
+발생할 수 있다. 따라서 `shadow`는 "관측 기간을 정해 켜고 지켜보는" 모드이지 상시 모드가 아니다.
+`legacy` 기본값에서는 관측기를 호출조차 하지 않으므로 이 경로가 없다.
+로그 필드: 요청 조회일, `#inDate`의 value 속성, 고시완료시각 원문, 표에서 **통화 코드로**
+식별한 통화 목록(**공식 caption 으로 특정한 표만**, 코드 칸은 `th`·`td` 구분 없이 첫 칸 —
+parser 와 같은 규칙을 공유한다), parser 판정(`accept`/`reject`/`no_session`/`unavailable`)과 거부 사유,
+legacy 저장 후보와의 대조(`match`/`mismatch`/`incomparable`)와 차이 통화.
+⛔ 읽는 법의 한계: `accept`는 "캡처된 HTML이 현재 parser 계약을 통과했다"는 뜻뿐이며 요청한
+날짜의 표가 갱신 완료됐다는 증거가 아니다(`page_source`는 현재 DOM 직렬화라 "입력 날짜만
+바뀌고 표는 이전 결과"인 중간 상태도 통과할 수 있다). 불일치의 **원인**은 기록하지 않는다 —
+통화별 provenance를 추적하지 않아 날짜 혼합인지 DOM 갱신 시점 차이인지 단정할 근거가 없다.
+`enforce`는 아직 값으로 받지 않는다(오타는 조용히 기본값으로 떨어지지 않고 기동 시 실패).
+강제 적용 기준은 이 관측 데이터를 보고 별도 커밋에서 정한다.
+
 **행동보존 준비 단계 (로컬 구현, 미배포):** `crawl_ibk_legacy_result()`가 종료 분기,
 Selenium 시도 수, 직접 확보한 저장 함수 반환 개수만 `IbkLegacyResult`로 돌려준다.
 공개 진입 함수는 이를 버리고 기존 `None`/예외 계약을 유지한다. 이 타입은

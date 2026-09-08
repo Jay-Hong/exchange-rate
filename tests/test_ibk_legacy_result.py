@@ -123,6 +123,24 @@ def test_selenium_return_stops_retries_even_for_zero(flow, attempts):
     flow.db.close.assert_called_once_with()
 
 
+def test_selenium_call_carries_the_run_anchor(flow):
+    """운영 호출자가 회차 시작 시각을 넘겨야 shadow 예산 가드가 동작한다.
+
+    ⛔ 이 배선이 빠지면 가드는 예외도 실패도 없이 **조용히** 꺼진다 — 관측이 예산을 초과해도
+       건너뛰지 않는다. 기준을 모듈 import 시각으로 재던 판이 전체 스위트에서 드러났듯,
+       조용한 무력화는 격리 시험으로는 안 보인다.
+    """
+    import time as _time
+
+    before = _time.monotonic()
+    ibk.crawl_ibk_legacy_result()
+    after = _time.monotonic()
+
+    anchor_value = flow.selenium.call_args.kwargs.get("run_started_at")
+    assert anchor_value is not None, "회차 시작 시각이 전달되지 않으면 가드가 꺼진다"
+    assert before <= anchor_value <= after, "이 회차의 시각이어야 한다"
+
+
 @pytest.mark.parametrize("soft_fail,write_return", [(False, 0), (False, 3), (True, 3)])
 def test_all_selenium_failures_still_reach_legacy_mibank_writer(flow, soft_fail, write_return):
     flow.selenium.side_effect = RuntimeError("test failure")
