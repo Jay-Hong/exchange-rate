@@ -25,6 +25,7 @@ from app.ibk_run_context import SERVICE_DATE_ROLLOVER_TIME, IbkRunContext
 KST = ibk.KST
 RUN_ID = "d" * 32
 RATES = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
+FRI = datetime.date(2026, 8, 28)
 
 
 def _context(hour, minute, second=0, *, day=28):
@@ -104,9 +105,31 @@ class PreopenWindowResultTest(unittest.TestCase):
                 for row in fresh.query(models.BankExchangeRate).all()
             )
 
-    def _run(self, ctx):
-        with patch.object(ibk, "_fetch_ibk_rates_for_date",
-                          side_effect=ibk.IbkRateTableAbsentError("표 없음")):
+    @staticmethod
+    def _preopen_then_no_session(reference_date):
+        """당일은 표 부재(개장 전), 그 이전 날짜는 무고시 — 개장 전 창의 현실적 조합.
+
+        ⛔ 모든 날짜를 무고시로 만들면 당일이 '표 부재' 가 아니게 되어 개장 전 상황
+           자체가 사라진다. 그러면 이 시험이 검증하려던 것을 안 보게 된다.
+        """
+        def decide(query_date):
+            if query_date == reference_date:
+                raise ibk.IbkRateTableAbsentError("표 없음")
+            return None
+        return decide
+
+    def _run(self, ctx, decide=None):
+        """기본은 모든 날짜 표 부재. `decide` 로 과거 후보 존재를 주입할 수 있다.
+
+        ⛔ lookback 도입 뒤로 "창 안 표 부재" 하나만으로는 결과가 정해지지 않는다 —
+           그 다음 후보가 무엇을 주느냐가 최종 판정을 가른다.
+        """
+        def fetch(query_date, **_kw):
+            if decide is not None:
+                return decide(query_date)
+            raise ibk.IbkRateTableAbsentError("표 없음")
+
+        with patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch):
             return ibk.produce_ibk_dated_result(self.db, ctx, now=ctx.reference_time)
 
     def test_absent_table_inside_the_window_preserves(self):
@@ -116,10 +139,11 @@ class PreopenWindowResultTest(unittest.TestCase):
         before = self._snapshot()
 
         with patch.object(crud, "insert_bank_rates_into_db") as write:
-            result = self._run(ctx)
+            result = self._run(ctx, decide=self._preopen_then_no_session(FRI))
 
         self.assertEqual(result.status, IbkStatus.PRESERVED)
-        self.assertEqual(result.reason, IbkReason.PREOPEN_PENDING)
+        self.assertEqual(result.reason, IbkReason.PREOPEN_PENDING,
+                         "창 안 표 부재가 최초 사유이므로 무고시가 이를 덮지 않는다")
         self.assertEqual(result.source, IbkSource.DB_SNAPSHOT)
         self.assertEqual(sorted(result.preserved_pairs), sorted(RATES))
         write.assert_not_called()
@@ -145,7 +169,7 @@ class PreopenWindowResultTest(unittest.TestCase):
 
     def test_preopen_reason_is_not_overwritten_by_the_no_session_branch(self):
         """개장 전 보존이 무고시 보존으로 위조되면 두 상황을 구분할 수 없다."""
-        result = self._run(_context(8, 10))
+        result = self._run(_context(8, 10), decide=self._preopen_then_no_session(FRI))
         self.assertEqual(result.reason, IbkReason.PREOPEN_PENDING)
         self.assertNotEqual(result.reason, IbkReason.OFFICIAL_NO_SESSION)
 
@@ -153,7 +177,10 @@ class PreopenWindowResultTest(unittest.TestCase):
         """보존 승인을 DB 사실 확보 전에 만들면 실패와 공존해 FAILURE_IS_EXCLUSIVE 로 터진다."""
         ctx = _context(8, 10)
         with patch.object(crud, "get_last_bank_rates_with_ts", side_effect=RuntimeError("DB down")):
-            result = self._run(ctx)
+            # ⛔ 입력을 바꾸면 이 시험이 조용히 무력해진다. 모든 날짜를 무고시로 만들면
+            #    당일이 '표 부재' 가 아니게 되어 개장 전 승인 자체가 생기지 않고, 그러면
+            #    "승인 + 실패 공존" 을 검사할 수 없다(상호 검토에서 결함 재주입으로 실증).
+            result = self._run(ctx, decide=self._preopen_then_no_session(FRI))
 
         self.assertEqual(result.status, IbkStatus.FAILED)
         self.assertEqual(result.reason, IbkReason.DB_ERROR)
@@ -178,7 +205,8 @@ class PreopenWindowResultTest(unittest.TestCase):
             return real(*args, **kwargs)
 
         with patch.object(crud, "get_last_bank_rates_with_ts", side_effect=fail_once):
-            result = self._run(ctx)
+            # 위와 같은 이유로 개장 전 입력을 유지한다.
+            result = self._run(ctx, decide=self._preopen_then_no_session(FRI))
 
         self.assertGreaterEqual(calls["n"], 2, "최종 조회가 실제로 일어나야 이 사례가 성립한다")
         self.assertTrue(result.db_snapshot_complete, "최종 조회 자체는 성공했다")

@@ -33,7 +33,11 @@ from app.ibk_result_builder import (
     capture_write_mode,
     read_ibk_db_snapshot,
 )
-from app.ibk_candidate_policy import plan_candidate_dates
+from app.ibk_candidate_policy import (
+    CandidateSearchStop,
+    plan_candidate_dates,
+    search_candidates,
+)
 from app.ibk_result_protocol import IbkReason, IbkResult, IbkSource
 from app.ibk_run_context import SERVICE_DATE_ROLLOVER_TIME
 from app.database import SessionLocal
@@ -878,42 +882,81 @@ def _is_preopen_pending_window(service_date, reference_time) -> bool:
 
 
 def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkResult:
-    """한 서비스일의 공식 후보를 검증부터 최종 판정까지 연결한다. 아직 연결하지 않는다.
+    """공식 후보를 찾아 검증부터 최종 판정까지 연결한다. 아직 운영에 연결하지 않는다.
 
-    범위 밖: lookback, 당일 GET 우선순위, Selenium, MIBANK, 부모 경보.
+    범위 밖: 당일 GET 우선순위, Selenium, MIBANK, 부모 경보.
 
-    표 부재는 두 가지다. 개장 전 창 안(당일 조회기준일 + 08:00~08:34:59)에서는 첫 고시
-    전이라 표가 없는 것이 정상이므로 **보존 승인**(PREOPEN_PENDING)으로 접는다. 그 밖의
-    표 부재는 정상 개장 전 화면과 구분할 수 없으므로 실패 원인으로 남긴다.
-    ⛔ 이 보존은 "기존 DB 값을 유지한다" 는 뜻이지 이전 기준일 후보를 검증했다는 뜻이
-       아니다 — 그 lookback 은 아직 없다.
+    후보 탐색은 app/ibk_candidate_policy.py 가 계획하고, 의미적 거부(개장 전·무고시)에서만
+    더 과거로 간다. 기술적 실패에서는 그 자리에서 멈춘다 — 오래된 값을 쓰지 않기 위해서다.
+
+    ⛔ 과거 후보를 찾아도 **당일 관측으로 승격하지 않는다**. `official` 과 보존 승인을 함께
+       넘겨 PRESERVED 로 접고, 기대 서비스일은 부모 값을 그대로 둔다. 여기에 관측일을
+       넣으면 부모의 validate_result 가 결과를 전량 거부한다.
+    ⛔ 보존은 "기대 날짜의 고시를 못 봤다" 는 뜻이지 no-write 가 아니다. 회귀하지 않는
+       통화는 계속 catch-up 저장된다.
+
+    표 부재는 **조회한 날짜 기준**으로 가른다. 그 날짜의 개장 전 창(08:00~08:34:59) 안이면
+    보존 승인(PREOPEN_PENDING), 밖이면 실패 원인이다. 기대 날짜로 고정해 판정하면 과거
+    후보의 표 부재까지 개장 전으로 오인해 더 과거로 새어 나간다.
     """
-    service_date = datetime.date.fromisoformat(context.expected_service_date)
+    expected_date = datetime.date.fromisoformat(context.expected_service_date)
     observed_at = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
     official = preservation = failure = None
     # 공식 후보가 없을 때 쓸 보존 사유. 승인 자체는 DB 사실을 확보한 뒤에 만든다.
     preservation_reason = IbkReason.OFFICIAL_NO_SESSION
     intended = None
     write = IbkWriteAttempt.none()
+    deadline = time.monotonic() + IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS
 
-    try:
-        fetched = _fetch_ibk_rates_for_date(
-            service_date, reference_time=context.reference_time, timeout=timeout
-        )
-    except IbkRateTableAbsentError:
-        if _is_preopen_pending_window(service_date, context.reference_time):
-            # 이번 실행에 공식 후보가 없다는 점은 무고시와 같다. 아래 분기가 만드는
-            # 보존 상태를 그대로 쓰고 사유만 개장 전으로 남긴다.
-            # ⛔ 승인을 여기서 미리 만들지 않는다. 그러면 뒤따르는 DB 실패와 공존해
-            #    어댑터의 배타성(FAILURE_IS_EXCLUSIVE)을 깨고 결과가 예외로 끝난다.
-            fetched = None
+    def _classify(exc, query_date):
+        """예외를 '다음 후보로 계속'(None) 과 기술적 실패(사유) 로 가른다.
+
+        ⛔ 개장 전 창은 **실제 조회한 날짜**로 판정한다. 기대 날짜로 고정하면 과거 후보의
+           표 부재까지 개장 전으로 오인해 더 과거로 새어 나간다 — 과거 날짜의 표가 없는
+           것은 개장 전이 아니라 계약 이상이다.
+        """
+        if isinstance(exc, IbkRateTableAbsentError):
+            if _is_preopen_pending_window(query_date, context.reference_time):
+                return None
+            return IbkReason.AMBIGUOUS_TABLE_ABSENT
+        if isinstance(exc, requests.RequestException):
+            return IbkReason.TRANSPORT_ERROR
+        if isinstance(exc, ValueError):
+            return IbkReason.CONTRACT_ERROR
+        raise exc
+
+    search = search_candidates(
+        context.reference_time,
+        max_days_back=MAX_DAYS_LOOKBACK,
+        fetch=lambda query_date: _fetch_ibk_rates_for_date(
+            query_date, reference_time=context.reference_time, timeout=timeout
+        ),
+        has_budget=lambda: time.monotonic() < deadline,
+        classify=_classify,
+    )
+
+    historical = False
+    if search.stop is CandidateSearchStop.ACCEPTED:
+        service_date, fetched = search.service_date, search.payload
+        # ⛔ 기대 날짜보다 과거의 세션을 본 것이면 그 관측을 당일 OBSERVED 로 승격하지
+        #    않는다. 어댑터는 official + preservation 을 함께 받아 PRESERVED 로 접고
+        #    관측 메타데이터(날짜·완료시각)는 그대로 보존한다.
+        historical = service_date < expected_date
+        if historical and not (search.saw_no_session or search.saw_preopen_pending):
+            # 달력상 비세션일만 건너뛰어 닿은 후보다. HTTP 무고시 응답을 받은 적이
+            # 없으므로 그 사실을 지어내지 않고 근거를 달력에 둔다.
+            preservation_reason = IbkReason.OFFICIAL_NO_SESSION
+        elif historical and search.saw_preopen_pending:
             preservation_reason = IbkReason.PREOPEN_PENDING
-        else:
-            failure = IbkObservationFailure(IbkReason.AMBIGUOUS_TABLE_ABSENT)
-    except requests.RequestException:
-        failure = IbkObservationFailure(IbkReason.TRANSPORT_ERROR)
-    except ValueError:
-        failure = IbkObservationFailure(IbkReason.CONTRACT_ERROR)
+    else:
+        service_date, fetched = expected_date, None
+        if search.stop is CandidateSearchStop.TECHNICAL_FAILURE:
+            failure = IbkObservationFailure(search.failure_reason)
+        elif search.stop is CandidateSearchStop.BUDGET_EXHAUSTED:
+            failure = IbkObservationFailure(IbkReason.BUDGET_EXHAUSTED)
+        elif search.saw_preopen_pending:
+            # 기대 날짜가 개장 전이었다는 근거. 이후 무고시가 이 사유를 덮지 않는다.
+            preservation_reason = IbkReason.PREOPEN_PENDING
 
     if failure is None:
         try:
@@ -944,13 +987,19 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
             official = IbkOfficialObservation(
                 IbkSource.OFFICIAL_POST, service_date, dict(current_rates), completion
             )
+            if historical:
+                # 관측은 사실로 남기되 당일 고시로 승격하지 않는다. 저장은 계속 일어날 수
+                # 있다 — 보존은 "기대 날짜의 고시를 못 봤다" 는 뜻이지 no-write 가 아니다.
+                preservation = IbkPreservationGrant(preservation_reason)
             regressing = find_regressing_pairs(
                 current_rates, last_info, completion, IBK_DB_SAVE_LAG_TOLERANCE_SECONDS
             )
             intended = _intended_from_snapshot(before, regressing, current_rates)
             if intended is None:
                 # 유지하려는 기존 값을 쓸 수 없다. 관측을 승격하지 않고 결과로 종결한다.
-                official = None
+                # ⛔ 역사 후보였다면 보존 승인도 함께 거둔다. 실패와 승인이 공존하면
+                #    어댑터의 배타성(FAILURE_IS_EXCLUSIVE)을 깨고 결과가 예외로 끝난다.
+                official = preservation = None
                 failure = IbkObservationFailure(IbkReason.DB_ERROR)
 
         if failure is None and intended.submitted:
@@ -971,7 +1020,10 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
     db_after = read_ibk_db_snapshot(db, bank_name=BANK_NAME, ranges=MIBANK_RATE_RANGES)
     return build_ibk_result(
         run_id=context.run_id,
-        expected_service_date=service_date,
+        # ⛔ 부모가 정한 기대 서비스일 그대로다. 역사 후보를 관측해도 여기에 그 날짜를
+        #    넣으면 부모의 validate_result 가 SERVICE_DATE_MISMATCH 로 결과를 전량
+        #    거부한다. 실제 관측일은 official 이 따로 들고 간다.
+        expected_service_date=expected_date,
         observed_at=observed_at,
         db_after=db_after,
         intended=intended,
