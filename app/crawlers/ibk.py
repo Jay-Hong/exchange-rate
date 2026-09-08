@@ -33,6 +33,7 @@ from app.ibk_result_builder import (
     capture_write_mode,
     read_ibk_db_snapshot,
 )
+from app.ibk_candidate_policy import plan_candidate_dates
 from app.ibk_result_protocol import IbkReason, IbkResult, IbkSource
 from app.ibk_run_context import SERVICE_DATE_ROLLOVER_TIME
 from app.database import SessionLocal
@@ -326,18 +327,14 @@ def try_crawl_with_dated_requests(
         reference_time = reference_time.astimezone(KST)
 
     reference_date = reference_time.date()
-    first_days_back = 0 if reference_time.time() >= IBK_SERVICE_DATE_ROLLOVER_TIME else 1
     candidate_rank = 0
     saw_explicit_no_notice = False
     saw_preopen_pending = False
     deadline = time.monotonic() + IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS
-    for days_back in range(first_days_back, MAX_DAYS_LOOKBACK + 1):
-        query_date = reference_date - datetime.timedelta(days=days_back)
-
-        # 주말에 새 조회기준일 세션은 없다. 금요일 세션의 토요일 새벽 고시는
-        # 금요일 날짜를 조회하면 나오므로 이 skip으로 손실되지 않는다.
-        if query_date.weekday() >= 5:
-            continue
+    # 후보 날짜 계획(rollover 시작점·주말 skip·달력 범위)은 app/ibk_candidate_policy.py 가
+    # 소유한다. 새 결과 생성기가 같은 순서를 쓰게 하려고 분리했다 — 두 경로가 각자
+    # 계산하면 "왜 그 날짜를 조회했나" 를 사후에 설명할 수 없다.
+    for query_date in plan_candidate_dates(reference_time, max_days_back=MAX_DAYS_LOOKBACK):
 
         remaining_seconds = deadline - time.monotonic()
         if remaining_seconds <= 0:
