@@ -9,6 +9,11 @@ from app.ibk_result_protocol import IbkProtocolError, IbkResult, validate_ibk_ru
 KST = ZoneInfo("Asia/Seoul")
 CLOCK_TOLERANCE = timedelta(seconds=2)  # 같은 호스트의 부모/자식 관측시각 허용 오차
 
+# 조회기준일 rollover 경계. **이 모듈이 단일 소유한다** — 부모가 계산하는
+# expected_service_date 와 수집 측 판정이 갈라지면 validate_result 가 결과를
+# SERVICE_DATE_MISMATCH 로 전량 거부한다. 08:00 인 이유는 app/crawlers/ibk.py 참조.
+SERVICE_DATE_ROLLOVER_TIME = time(8, 0)
+
 
 @dataclass(frozen=True)
 class IbkRunContext:
@@ -23,7 +28,7 @@ class IbkRunContext:
     @property
     def expected_service_date(self) -> str:
         local = self.reference_time.astimezone(KST)
-        day = local.date() - timedelta(days=int(local.time() < time(8)))
+        day = local.date() - timedelta(days=int(local.time() < SERVICE_DATE_ROLLOVER_TIME))
         return day.isoformat()
 
     @classmethod

@@ -34,6 +34,7 @@ from app.ibk_result_builder import (
     read_ibk_db_snapshot,
 )
 from app.ibk_result_protocol import IbkReason, IbkResult, IbkSource
+from app.ibk_run_context import SERVICE_DATE_ROLLOVER_TIME
 from app.database import SessionLocal
 from app.crawlers.constants import (
     DEFAULT_TIMEOUT,
@@ -76,7 +77,9 @@ IBK_DB_SAVE_LAG_TOLERANCE_SECONDS = 120
 # 공식 상세 화면의 1회차가 08:26대에도 시작한 실측이 있어 08:30을 경계로
 # 쓰면 신규 고시를 놓칠 수 있다. 야간 꼬리 종료(06:00)와 주간 시작 사이의
 # 명확한 공백인 08:00을 조회기준일 rollover 경계로 사용한다.
-IBK_SERVICE_DATE_ROLLOVER_TIME = datetime.time(8, 0)
+# ⛔ 값을 여기 다시 적지 않는다. 부모의 expected_service_date 와 갈라지면 결과가
+#    SERVICE_DATE_MISMATCH 로 전량 거부된다(app/ibk_run_context.py 가 단일 소유).
+IBK_SERVICE_DATE_ROLLOVER_TIME = SERVICE_DATE_ROLLOVER_TIME
 # 당일 조회기준일 화면은 첫 고시 전까지 날짜 readback만 있고 환율표가 없을 수
 # 있다. 이 짧은 구간에 한해서만 직전 서비스 기준일을 검증하며, 이후에는 같은
 # 표 부재를 계약 이상으로 보고 Selenium 안전망을 유지한다.
@@ -861,16 +864,38 @@ def _intended_from_snapshot(before, regressing, current_rates):
     )
 
 
+def _is_preopen_pending_window(service_date, reference_time) -> bool:
+    """표가 없는 것이 정상인 짧은 창인가 — 조회 당일 08:00~08:34:59.
+
+    legacy 가 try_crawl_with_dated_requests 에서 쓰는 것과 같은 판정이다(:360-366).
+    ⛔ 과거 기준일 후보에는 적용하지 않는다. 그 날짜의 표가 없는 것은 개장 전이 아니라
+       계약 이상이다 — service_date 가 조회 시점의 기준일과 같을 때만 창 안으로 본다.
+    """
+    local = reference_time.astimezone(KST)
+    return (
+        service_date == local.date() - datetime.timedelta(
+            days=int(local.time() < IBK_SERVICE_DATE_ROLLOVER_TIME)
+        )
+        and IBK_SERVICE_DATE_ROLLOVER_TIME <= local.time() < IBK_PREOPEN_PENDING_END_TIME
+    )
+
+
 def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkResult:
     """한 서비스일의 공식 후보를 검증부터 최종 판정까지 연결한다. 아직 연결하지 않는다.
 
-    범위 밖: lookback, 당일 GET 우선순위, Selenium, MIBANK, 개장 전 보존 창 정책,
-    부모 경보. 표가 모호하게 없는 상태는 보존 승인이 아니라 실패 원인으로 분류한다 —
-    보존 승인에는 창 정책 판정이 필요하고 그것은 후속 단계다.
+    범위 밖: lookback, 당일 GET 우선순위, Selenium, MIBANK, 부모 경보.
+
+    표 부재는 두 가지다. 개장 전 창 안(당일 조회기준일 + 08:00~08:34:59)에서는 첫 고시
+    전이라 표가 없는 것이 정상이므로 **보존 승인**(PREOPEN_PENDING)으로 접는다. 그 밖의
+    표 부재는 정상 개장 전 화면과 구분할 수 없으므로 실패 원인으로 남긴다.
+    ⛔ 이 보존은 "기존 DB 값을 유지한다" 는 뜻이지 이전 기준일 후보를 검증했다는 뜻이
+       아니다 — 그 lookback 은 아직 없다.
     """
     service_date = datetime.date.fromisoformat(context.expected_service_date)
     observed_at = now if now is not None else datetime.datetime.now(datetime.timezone.utc)
     official = preservation = failure = None
+    # 공식 후보가 없을 때 쓸 보존 사유. 승인 자체는 DB 사실을 확보한 뒤에 만든다.
+    preservation_reason = IbkReason.OFFICIAL_NO_SESSION
     intended = None
     write = IbkWriteAttempt.none()
 
@@ -879,7 +904,15 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
             service_date, reference_time=context.reference_time, timeout=timeout
         )
     except IbkRateTableAbsentError:
-        failure = IbkObservationFailure(IbkReason.AMBIGUOUS_TABLE_ABSENT)
+        if _is_preopen_pending_window(service_date, context.reference_time):
+            # 이번 실행에 공식 후보가 없다는 점은 무고시와 같다. 아래 분기가 만드는
+            # 보존 상태를 그대로 쓰고 사유만 개장 전으로 남긴다.
+            # ⛔ 승인을 여기서 미리 만들지 않는다. 그러면 뒤따르는 DB 실패와 공존해
+            #    어댑터의 배타성(FAILURE_IS_EXCLUSIVE)을 깨고 결과가 예외로 끝난다.
+            fetched = None
+            preservation_reason = IbkReason.PREOPEN_PENDING
+        else:
+            failure = IbkObservationFailure(IbkReason.AMBIGUOUS_TABLE_ABSENT)
     except requests.RequestException:
         failure = IbkObservationFailure(IbkReason.TRANSPORT_ERROR)
     except ValueError:
@@ -901,7 +934,7 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
             reader=lambda *_args, **_kwargs: last_info,
         )
         if fetched is None:
-            preservation = IbkPreservationGrant(IbkReason.OFFICIAL_NO_SESSION)
+            preservation = IbkPreservationGrant(preservation_reason)
             keep = dict(before.rates or {})
             intended = IbkIntendedState(
                 retained=keep,
