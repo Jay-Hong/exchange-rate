@@ -950,3 +950,31 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
         failure=failure,
         write=write,
     )
+
+
+def run_ibk_dated_result(context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkResult:
+    """`crawler(context)` 1-인자 계약에 맞춰 생성기에 **DB 세션만** 붙여 준다.
+
+    생성기(`produce_ibk_dated_result`)는 세션을 만들지도 닫지도 않는다 — 그 소유권은
+    legacy 경로가 :188/:300 에서 하듯 호출자에게 있다. runner 가 crawler 호출 전에 부르는
+    `refresh_write_mode_cache` 는 제 세션만 열고 닫으므로 이 자리를 대신하지 않는다.
+
+    ⛔ 결과의 의미를 바꾸지 않는다. 예상 밖 예외를 가짜 FAILED 프레임으로 포장하지도
+       않는다 — semantic 프레임은 "관측하고 판정했다"는 주장이라, 판정 기구 자체가 실패한
+       경우에 그것을 내면 거짓이 된다. 예외는 그대로 올려 runner 의 기존 기술 오류·재시도
+       계약(app/crawlers/runner.py:79-81 → exit 1)을 그대로 쓴다.
+
+    ⛔ 범위 밖(생성기와 동일): lookback, 당일 GET 우선순위, Selenium, MIBANK,
+       개장 전 보존 창 정책, 부모 경보. 이 함수는 세션 수명만 책임진다.
+    """
+    db = SessionLocal()
+    try:
+        return produce_ibk_dated_result(db, context, timeout=timeout, now=now)
+    finally:
+        # close()가 던진 Exception은 잡아서 경고를 기록한다.
+        # KeyboardInterrupt·SystemExit은 잡지 않아 본문의 결과나 예외를 가릴 수 있다.
+        # 정리를 시도하며, close 실패 시 자원 반환 완료를 보장하지 않는다.
+        try:
+            db.close()
+        except Exception:
+            logger.warning("IBK_RESULT_SESSION_CLOSE_FAILED", extra={"bank": BANK_NAME})
