@@ -33,6 +33,7 @@ from app.ibk_selenium_strict import (
     UNAVAILABLE as SELENIUM_UNAVAILABLE,
     IbkSeleniumStrictCapture,
     IbkSeleniumStrictCapturer,
+    read_page_source_contract_error,
 )
 from app.ibk_regression_guard import find_regressing_pairs
 from app.ibk_result_builder import (
@@ -1197,6 +1198,18 @@ def _historical_preservation_reason(search):
     return IbkReason.OFFICIAL_NO_SESSION
 
 
+class IbkSeleniumWiringError(RuntimeError):
+    """안전망의 **배선** 이 틀렸다. 관측 실패가 아니다.
+
+    ⛔ 관측 실패로 접지 않는다. 접으면 `driver_failed:<종류>` 가 되고 그 사유는 HTTP 진단을
+       유지시켜 원인이 사라진다(실측). 이건 우리 쪽 오류이므로 결과를 만들지 않고 올린다 —
+       runner 의 기존 기술 오류 계약(exit 1)을 그대로 쓴다.
+    ⛔ 부모의 1회 재시도는 같은 구성으로 한 번 더 실행한다. 안전망은 공식 HTTP 후보 검색
+       **뒤에** 열리므로 **공식 HTTP 요청은 반복될 수 있다**. 재시도가 안전망에 닿으면 같은
+       배선 오류가 드라이버 생성·항해 전에 실패하므로 **Selenium 조회는 시작하지 않는다**.
+    """
+
+
 def _selenium_safety_net(context, query_date, *, deadline,
                          driver_context=None, capturer_factory=None):
     """공식 HTTP 가 **기술적으로** 실패했을 때만 여는 안전망. 저장하지 않는다.
@@ -1213,6 +1226,18 @@ def _selenium_safety_net(context, query_date, *, deadline,
     ⛔ 시계는 **호출 시점에** 읽는다. `monotonic=time.monotonic` 처럼 기본 인자로 묶으면
        정의 시점의 함수가 박혀 패치가 듣지 않는다(이 리포에서 두 번째 재발).
     """
+    # ⛔ 배선 검사는 **여기**, `opener()` 앞·아래 `try` 밖이어야 한다. 캡처러 생성은
+    #    `driver.get()` **뒤**라서 생성자 검사만으로는 이미 Chrome 을 띄우고 은행 페이지를
+    #    조회한 뒤가 되고, 그 예외는 바깥 `except Exception` 이 `driver_failed:` 로 접어
+    #    HTTP 진단을 유지시킨다 — 배선 오류가 상류 통신 장애로 기록된다(실측).
+    # ⛔ 예산 검사보다 **먼저** 본다. 뒤에 두면 예산이 모자란 회차에서 배선 오류가
+    #    조용히 숨는다 — 그 회차는 `None`(시도하지 않았다)로 끝난다.
+    # ⛔ 검사 대상은 **운영이 실제로 주입하는** 읽기 함수다. `capturer_factory` 주입은
+    #    시험용 이음매이고, 이 검사는 모듈 자신의 배선을 본다.
+    contract = read_page_source_contract_error(_read_page_source_bounded)
+    if contract is not None:
+        raise IbkSeleniumWiringError(f"read_page_source:{contract}")
+
     remaining = deadline - time.monotonic()
     if remaining < IBK_SELENIUM_ENTRY_BUDGET_SECONDS:
         logger.info("IBK_SELENIUM_NET_SKIPPED", extra={

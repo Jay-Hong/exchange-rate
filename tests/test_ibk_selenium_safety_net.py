@@ -301,6 +301,61 @@ class HistoricalPreservationMatchesThePostPath(unittest.TestCase):
             "OFFICIAL_NO_SESSION")
 
 
+class AWiringErrorFailsBeforeTheBrowserOpens(unittest.TestCase):
+    """⛔ 배선 오류가 **관측 실패로 접히면** 원인이 사라진다. 안전망의 바깥 `except` 는
+    무엇이든 `driver_failed:<종류>` 로 바꾸고, 그 사유는 `IBK_SELENIUM_NEVER_OBSERVED` 라
+    HTTP 진단을 그대로 유지시킨다 — 은행 통신 장애처럼 보인다(실측).
+
+    ⛔ 캡처러 생성은 `driver.get()` **뒤**라, 생성자 검사만으로는 이미 Chrome 을 띄우고
+    은행 페이지를 조회한 뒤가 된다. 그래서 `opener()` 앞에서 본다.
+    """
+
+    def _harness(self):
+        harness = Harness(IbkSeleniumStrictCapture(NO_SESSION))
+        harness.clock[0] = 0.0
+        return harness
+
+    def test_an_old_contract_reader_raises_instead_of_being_observed(self):
+        harness = self._harness()
+        with patch.object(ibk, "_read_page_source_bounded", lambda driver: ("", None)):
+            with self.assertRaises(ibk.IbkSeleniumWiringError) as caught:
+                harness.run(deadline=1000.0, now=0.0)
+        self.assertIn("read_page_source", str(caught.exception))
+
+    def test_the_browser_is_not_opened_for_a_wiring_error(self):
+        harness = self._harness()
+        with patch.object(ibk, "_read_page_source_bounded", lambda driver: ("", None)):
+            with self.assertRaises(ibk.IbkSeleniumWiringError):
+                harness.run(deadline=1000.0, now=0.0)
+        self.assertEqual(harness.opened, 0, "드라이버를 열었다")
+        harness.driver.get.assert_not_called()
+
+    def test_the_wiring_error_is_not_folded_into_a_driver_failure(self):
+        """⛔ 이 시험이 없으면 사전 검사를 `try` 안으로 옮겨도 통과한다 — 그 자리에서는
+        `driver_failed:IbkSeleniumWiringError` 라는 **관측 결과**가 되어 예외가 사라진다."""
+        harness = self._harness()
+        with patch.object(ibk, "_read_page_source_bounded", lambda driver: ("", None)):
+            try:
+                capture = harness.run(deadline=1000.0, now=0.0)
+            except ibk.IbkSeleniumWiringError:
+                return
+        self.fail(f"예외가 관측으로 접혔다: verdict={capture.verdict} reason={capture.reason}")
+
+    def test_a_short_budget_does_not_hide_the_wiring_error(self):
+        """⛔ 예산 검사 뒤에 두면 예산이 모자란 회차에서 배선 오류가 숨는다 — 그 회차는
+        `None`(시도하지 않았다)로 조용히 끝난다."""
+        harness = self._harness()
+        with patch.object(ibk, "_read_page_source_bounded", lambda driver: ("", None)):
+            with self.assertRaises(ibk.IbkSeleniumWiringError):
+                harness.run(deadline=1.0, now=0.0)      # 잔여 1초 — 진입 예산 미달
+        self.assertEqual(harness.opened, 0)
+
+    def test_the_real_wiring_passes_the_check(self):
+        """양성 대조 — 운영이 실제로 주입하는 읽기 함수는 계약을 만족한다."""
+        self.assertIsNone(
+            ibk.read_page_source_contract_error(ibk._read_page_source_bounded))
+
+
 class TheProductionCapturerCarriesTheReadCap(unittest.TestCase):
     """⛔ 상한을 정해 두고 **캡처러에 넘기지 않으면** 읽기가 잔여를 그대로 받는다. 잔여 30초
     에서 3초짜리 읽기가 30초를 쓸 수 있게 된다 — 배선 한 줄이 빠져도 다른 시험은 전부

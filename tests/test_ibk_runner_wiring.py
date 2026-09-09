@@ -334,6 +334,24 @@ def test_producer_crash_is_not_semantic_rejection(context, refresh, caplog):
     assert "PRIVATE_TEST_ERROR" not in caplog.text
 
 
+def test_a_selenium_wiring_error_exits_one_without_a_frame(context, refresh, monkeypatch, caplog):
+    """⛔ 배선 오류는 semantic 프레임이 아니라 **프로세스 실패**로 끝나야 한다. 프레임을
+    내면 부모는 "관측하고 판정했다" 를 받아들이고 원인이 사라진다.
+
+    ⛔ 사유 문자열이 로그로 새지 않는지도 본다 — 예외 원문에는 환경 정보가 섞일 수 있다.
+    """
+    from app.crawlers.ibk import IbkSeleniumWiringError
+
+    written = []
+    monkeypatch.setattr(runner.os, "write", lambda fd, data: written.append(data) or len(data))
+    producer = MagicMock(
+        side_effect=IbkSeleniumWiringError("read_page_source:call_contract:PRIVATE_TEST_DETAIL"))
+    assert runner.main(argv=context.arguments(), result_fd=9,
+                       ibk_result_crawler=producer) == 1
+    assert written == [], "프레임을 내면 안 된다"
+    assert "PRIVATE_TEST_DETAIL" not in caplog.text
+
+
 def test_emit_failure_is_process_error(context, refresh, monkeypatch):
     monkeypatch.setattr(runner.os, "write", MagicMock(side_effect=BrokenPipeError("PRIVATE")))
     assert runner.main(argv=context.arguments(), result_fd=9,

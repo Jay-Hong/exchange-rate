@@ -15,7 +15,7 @@ import datetime
 import gzip
 import pathlib
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.crawlers import ibk
 from app import ibk_selenium_strict as strict_module
@@ -853,6 +853,52 @@ class DocumentAgeIsCheckedAtRead(unittest.TestCase):
                 self.assertEqual(capture.reason, reason)
 
 
+class TheCallContractCheckNeverCallsTheOperation(unittest.TestCase):
+    """⛔ 호출로 확인하면 실제 브라우저 왕복이 일어난다. 서명만 본다."""
+
+    def test_it_does_not_invoke_the_operation(self):
+        calls = []
+        strict_module.call_contract_error(
+            lambda *a, **k: calls.append(1), object(), timeout=1.0)
+        self.assertEqual(calls, [], "검사가 조작을 호출했다")
+
+    def test_a_matching_and_a_mismatching_contract_are_told_apart(self):
+        cases = {
+            "새 계약": (lambda d, *, timeout=None: None, None),
+            "구 계약": (lambda d: None, "call_contract"),
+            "키워드 아닌 두 번째 인자": (lambda d, timeout: None, None),
+            "인자 없음": (lambda: None, "call_contract"),
+            "가변 인자": (lambda *a, **k: None, None),
+        }
+        for label, (fn, expected) in cases.items():
+            with self.subTest(case=label):
+                problem = strict_module.call_contract_error(fn, object(), timeout=1.0)
+                if expected is None:
+                    self.assertIsNone(problem, f"{label}: {problem}")
+                else:
+                    self.assertIsNotNone(problem, label)
+                    self.assertTrue(problem.startswith(expected), problem)
+
+    def test_a_non_callable_is_reported_rather_than_raised(self):
+        self.assertEqual(strict_module.call_contract_error(None), "not_callable")
+
+    def test_an_unreadable_signature_passes_as_unverified(self):
+        """⛔ 서명을 못 읽는 것과 서명이 틀린 것은 **다른 결과**여야 한다. 하나의 `try` 로
+        묶으면 잡아낸 불일치가 '판정 불가' 로 분류되어 조용히 통과한다."""
+        # `getattr` 은 CPython 이 서명 정보를 갖고 있지 않아 `ValueError` 가 난다(실측).
+        # `len` 처럼 서명이 **읽히는** 내장은 반대로 불일치로 잡힌다 — 둘을 섞으면 안 된다.
+        self.assertIsNone(strict_module.call_contract_error(getattr, object(), timeout=1.0),
+                          "서명을 못 읽으면 미검증으로 통과시킨다")
+        self.assertIsNotNone(
+            strict_module.call_contract_error(lambda d: None, object(), timeout=1.0),
+            "양성 대조 — 읽을 수 있는 서명의 불일치는 잡아야 한다")
+
+    def test_a_mock_is_permissive(self):
+        """양성 대조 — mock 기반 시험을 깨지 않는다."""
+        self.assertIsNone(
+            strict_module.call_contract_error(MagicMock(), object(), timeout=1.0))
+
+
 class DependencyValidation(unittest.TestCase):
     def test_bad_dependencies_are_refused(self):
         ok = dict(parse=lambda *a, **k: None, served_date=lambda d: "",
@@ -873,6 +919,25 @@ class DependencyValidation(unittest.TestCase):
             with self.subTest(override=sorted(override)):
                 with self.assertRaises(ValueError):
                     IbkSeleniumStrictCapturer(**{**ok, **override})
+
+    def test_an_old_contract_reader_is_refused_at_construction(self):
+        """⛔ 예산을 안 받는 읽기 함수를 주입하면 실행 중 `TypeError` 가 나고 `_guarded` 가
+        그것을 관측 실패로 접는다 — 배선 오류가 상류 통신 장애로 기록된다. 생성 시점에 막는다."""
+        ok = dict(parse=lambda *a, **k: None, served_date=lambda d: "",
+                  find_input=lambda d: None, submit=lambda e, t: None,
+                  document_root=lambda d: object(),
+                  read_page_source=lambda d, *, timeout=None: (None, "x"),
+                  wait_replaced=lambda r, t: True, take_alert=lambda d: None)
+        import functools
+        for label, reader in (
+                ("구 계약", lambda d: (None, "x")),
+                ("위치 인자만", lambda d, t: (None, "x")),
+                ("partial(구 계약)", functools.partial(lambda d: (None, "x"))),
+        ):
+            with self.subTest(reader=label):
+                with self.assertRaises(ValueError) as caught:
+                    IbkSeleniumStrictCapturer(**{**ok, "read_page_source": reader})
+                self.assertIn("READ_CONTRACT", str(caught.exception))
 
     def test_an_absent_read_timeout_is_allowed(self):
         """양성 대조 — 주입이 없으면 읽기 함수의 기본 상한을 쓴다(None 허용)."""

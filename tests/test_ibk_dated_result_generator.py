@@ -374,6 +374,23 @@ class DatedResultGeneratorTest(unittest.TestCase):
                     http_error=ValueError("계약 오류"))
                 self.assertIs(result.reason, IbkReason.CONTRACT_ERROR)
 
+    def test_a_wiring_error_is_not_turned_into_a_semantic_result(self):
+        """⛔ 배선 오류를 결과로 접으면 **은행 통신 장애처럼 보인다**. 판정 기구가 실패한
+        회차에 "관측하고 판정했다" 는 프레임을 내면 그것은 거짓이다 — 예외를 그대로 올려
+        runner 의 기술 오류 계약(exit 1)을 쓴다.
+
+        ⛔ 여기서는 안전망을 **가짜로 바꾸지 않는다**. 진짜 안전망이 읽기 계약을 보고
+           브라우저를 열기 전에 실패하는 것을 본다.
+        """
+        with patch.object(ibk, "_read_page_source_bounded", lambda driver: ("", None)), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date",
+                          side_effect=ValueError("계약 오류")), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=False):
+            with self.assertRaises(ibk.IbkSeleniumWiringError) as caught:
+                ibk.produce_ibk_dated_result(self.db, self.context, now=NOW)
+        self.assertIn("read_page_source", str(caught.exception))
+        self.assertEqual(self._rows(), 0, "배선 오류에서 아무것도 저장하지 않는다")
+
     def test_a_net_that_was_not_attempted_keeps_the_http_diagnosis(self):
         """⛔ None 은 "시도하지 않았다" 다. 실패를 만들지 않으면 결과가 통째로 어긋난다."""
         import requests

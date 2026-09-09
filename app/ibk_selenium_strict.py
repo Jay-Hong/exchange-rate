@@ -26,6 +26,7 @@ DB 를 건드리지 않는다.
 """
 
 import datetime
+import inspect
 import math
 import time
 from dataclasses import dataclass, field
@@ -36,6 +37,42 @@ SUBMIT_GUARD_SECONDS = 3.5
 STALENESS_TIMEOUT_SECONDS = 10.0
 #: 이보다 오래된 문서에서는 읽지 않는다 — 날짜가 맞아도 값이 낡았을 수 있다.
 MAX_PAGE_AGE_SECONDS = 60.0
+
+#: 계약 검사용 자리표. `bind` 는 값을 보지 않으므로 무엇이든 되지만, 실수로 드라이버가
+#: 흘러들어 오면 즉시 눈에 띄도록 이름을 붙여 둔다.
+_CONTRACT_PROBE = object()
+
+
+def call_contract_error(operation, *args, **kwargs):
+    """`operation(*args, **kwargs)` 로 **부를 수 있는지**만 본다. 부르지는 않는다.
+
+    돌려주는 것은 문제 설명 문자열 또는 None 이다.
+
+    ⛔ 배선 오류를 실행 중 예외로 발견하면 늦다. IBK 안전망에서 그 예외는 바깥
+       `except Exception` 에 걸려 `driver_failed:<종류>` 가 되고, 그 사유는 HTTP 진단을
+       그대로 유지시켜 **원인이 사라진다**(실측). 그래서 부르기 전에 본다.
+    ⛔ 서명을 **못 읽는 경우**와 서명이 **맞지 않는 경우**를 다른 `try` 로 가른다. 하나로
+       묶으면 실제로 잡아낸 불일치가 "판정 불가" 로 분류되어 조용히 통과한다.
+    ⛔ 보장 범위는 **바깥 호출 형태**뿐이다. `def wrapper(*args, **kwargs)` 가 안에서 구
+       계약 함수를 부르면 여기서는 통과하고 실행 중에 실패한다. 반환값 계약도 보지 않는다.
+    """
+    if not callable(operation):
+        return "not_callable"
+    try:
+        signature = inspect.signature(operation)
+    except (TypeError, ValueError):
+        # 서명을 읽을 수 없다(내장·C 확장 등). 미검증으로 통과시킨다 — 검증했다고 적지 않는다.
+        return None
+    try:
+        signature.bind(*args, **kwargs)
+    except TypeError as exc:
+        return f"call_contract:{exc}"
+    return None
+
+
+def read_page_source_contract_error(reader):
+    """읽기 함수가 `(driver, timeout=...)` 계약을 받는지. 사유 또는 None."""
+    return call_contract_error(reader, _CONTRACT_PROBE, timeout=1.0)
 
 ACCEPTED = "accepted"
 NO_SESSION = "no_session"
@@ -79,6 +116,12 @@ class IbkSeleniumStrictCapturer:
                 read_page_source, wait_replaced, take_alert, monotonic, sleep)
         if not all(callable(dep) for dep in deps):
             raise ValueError("INVALID_IBK_SELENIUM_STRICT_DEPENDENCY")
+        # ⛔ 읽기 함수는 예산을 받는다. 구 계약(`(driver)` 만)을 주입하면 실행 중
+        #    `TypeError` 가 나고 `_guarded` 가 그것을 관측 실패로 접는다 — 배선 오류가
+        #    상류 통신 장애로 기록된다. 여기서 먼저 막는다.
+        contract = read_page_source_contract_error(read_page_source)
+        if contract is not None:
+            raise ValueError(f"INVALID_IBK_SELENIUM_STRICT_READ_CONTRACT:{contract}")
         for name, value in (("SUBMIT_GUARD", submit_guard_seconds),
                             ("STALENESS_TIMEOUT", staleness_timeout),
                             ("MAX_PAGE_AGE", max_page_age_seconds)):
