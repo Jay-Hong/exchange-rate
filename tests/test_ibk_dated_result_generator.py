@@ -87,9 +87,13 @@ class DatedResultGeneratorTest(unittest.TestCase):
         # ⛔ 안전망이 **진짜 크롬을 띄우지 않게** 막는다. 막지 않으면 예산이 남는 사례마다
         #    드라이버 생성이 일어나 시험이 26초로 늘어난다(실측). 브라우저가 필요한 사례는
         #    각자 명시적으로 주입한다.
-        driver_guard = patch.object(
-            ibk, "selenium_driver_context",
+        # ⛔ 이 가드의 `AssertionError` 는 **안전망의 바깥 `except Exception` 이 삼킨다** —
+        #    `driver_failed:AssertionError` 라는 관측 결과가 되어 흐름이 계속되고, 가드가
+        #    발화해도 시험은 통과한다. 그래서 "부르지 않았다" 를 주장하려면 예외가 아니라
+        #    **호출 횟수**(`self.driver_opens.assert_not_called()`)를 봐야 한다.
+        self.driver_opens = MagicMock(
             side_effect=AssertionError("시험에서 드라이버를 띄우면 안 된다"))
+        driver_guard = patch.object(ibk, "selenium_driver_context", self.driver_opens)
         driver_guard.start()
         self.addCleanup(driver_guard.stop)
 
@@ -390,6 +394,14 @@ class DatedResultGeneratorTest(unittest.TestCase):
                 ibk.produce_ibk_dated_result(self.db, self.context, now=NOW)
         self.assertIn("read_page_source", str(caught.exception))
         self.assertEqual(self._rows(), 0, "배선 오류에서 아무것도 저장하지 않는다")
+
+    def test_a_semantic_rejection_never_reaches_the_driver_boundary(self):
+        """⛔ 예외 가드는 증거가 아니다 — 안전망이 그것을 삼켜 관측 결과로 바꾼다.
+        의미적 거부에서 드라이버 경계에 **닿지 않았음**을 호출 횟수로 본다."""
+        with patch.object(ibk, "_fetch_ibk_rates_for_date", return_value=None), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=False):
+            ibk.produce_ibk_dated_result(self.db, self.context, now=NOW)
+        self.driver_opens.assert_not_called()
 
     def test_a_net_that_was_not_attempted_keeps_the_http_diagnosis(self):
         """⛔ None 은 "시도하지 않았다" 다. 실패를 만들지 않으면 결과가 통째로 어긋난다."""

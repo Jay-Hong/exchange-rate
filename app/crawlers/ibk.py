@@ -1325,7 +1325,8 @@ def _build_selenium_capturer(driver):
 def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkResult:
     """공식 후보를 찾아 검증부터 최종 판정까지 연결한다. 아직 운영에 연결하지 않는다.
 
-    범위 밖: 당일 GET 우선순위, Selenium, MIBANK, 부모 경보.
+    범위 밖: 당일 GET 우선순위, MIBANK, 부모 경보. Selenium 은 **범위 안**이다 —
+    공식 HTTP 가 기술적으로 실패했을 때만 안전망을 연다.
 
     후보 탐색은 app/ibk_candidate_policy.py 가 계획하고, 의미적 거부(개장 전·무고시)에서만
     더 과거로 간다. 기술적 실패에서는 그 자리에서 멈춘다 — 오래된 값을 쓰지 않기 위해서다.
@@ -1550,8 +1551,9 @@ def run_ibk_dated_result(context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkRe
        경우에 그것을 내면 거짓이 된다. 예외는 그대로 올려 runner 의 기존 기술 오류·재시도
        계약(app/crawlers/runner.py:79-81 → exit 1)을 그대로 쓴다.
 
-    ⛔ 범위 밖(생성기와 동일): lookback, 당일 GET 우선순위, Selenium, MIBANK,
-       개장 전 보존 창 정책, 부모 경보. 이 함수는 세션 수명만 책임진다.
+    ⛔ 범위 밖(생성기와 동일): 당일 GET 우선순위, MIBANK, 부모 경보. 이 함수는 세션 수명만
+       책임진다. lookback·Selenium 안전망·개장 전 보존 창 정책은 생성기가 **수행한다** —
+       예전에 범위 밖이었으나 지금은 아니다.
     """
     db = SessionLocal()
     try:
