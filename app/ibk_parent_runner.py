@@ -19,10 +19,22 @@ from app.ibk_result_protocol import (
     IbkExecutionFailure, IbkParentDecision, IbkProtocolError, IbkStatus,
     decide_ibk_process_result,
 )
-from app.ibk_run_context import IbkRunContext
+from app.ibk_run_context import MAX_WORK_BUDGET_SECONDS, IbkRunContext
 from app.ibk_subprocess_capture import IbkProcessCapture, capture_ibk_subprocess
 
 BOOTSTRAP = Path(__file__).resolve().parents[1] / "scripts" / "ibk_subprocess_bootstrap.py"
+
+# 자식의 **작업** 기한을 실행 제한에서 뺄 몫. 정리(quit·세션 닫기)와 결과 프레임 출력·
+# 프로세스 종료에 쓸 시간이다. 45초 기본에서 작업 34 / 정리 6 / 출력·종료 5 로 나눈 것.
+# ⛔ 이 예약이 "정리가 그 안에 끝난다" 를 보장하지는 않는다 — 멈춘 `quit()` 은 부모 kill 로만
+#    끝난다. 예약은 정상 경로에서 결과를 낼 여지를 남기는 것이다.
+CHILD_RESERVE_SECONDS = 11.0
+# 자식에게 의미 있게 줄 수 있는 최소 작업 시간.
+MIN_CHILD_WORK_SECONDS = 1.0
+# ⛔ 이보다 작은 실행 제한은 **거부한다**. 하한을 강제로 부여하면 timeout 0.1초에도 자식이
+#    1초 예산을 받아 **부모 제한보다 큰 예산**이 생긴다(실측). 없는 예산을 지어내는 대신
+#    지원하지 않는 값이라고 말한다.
+MIN_SUPPORTED_TIMEOUT_SECONDS = CHILD_RESERVE_SECONDS + MIN_CHILD_WORK_SECONDS
 
 
 def _now():
@@ -149,8 +161,22 @@ class IbkParentRunner:
     async def execute(self, *, is_retry=False, timeout=45, cleanup_timeout=2):
         if type(is_retry) is not bool:
             raise ValueError("INVALID_RETRY_FLAG")
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+                or timeout < MIN_SUPPORTED_TIMEOUT_SECONDS
+                or timeout - CHILD_RESERVE_SECONDS > MAX_WORK_BUDGET_SECONDS):
+            # 자식을 띄우지 않는다 — 줄 수 있는 예산이 없거나 계약 상한을 넘는다.
+            # 상한을 넘겨 보내면 자식이 그 기한을 거부해 결과 없이 끝난다.
+            raise ValueError("UNSUPPORTED_EXECUTION_TIMEOUT")
         async with self._lock:
-            context = IbkRunContext(uuid4().hex, self.clock())
+            # ⛔ 자식이 자기 예산을 새로 시작하면 안 된다. spawn·app import·설정 캐시
+            #    갱신도 이 timeout 을 쓰므로, **부모 시각 기준의 절대 기한**을 넘긴다.
+            #    그래야 timeout 을 바꿀 때 자식 예산도 함께 줄어든다.
+            # 작업 기한은 **monotonic 기준**이다 — 부모의 asyncio timeout 과 같은 축이어야
+            # 시스템 시각이 밀려도 잔여 예산이 늘지 않는다. `reference_time` 은 서비스일
+            # 판정용 달력 시각으로 그대로 둔다.
+            context = IbkRunContext(
+                uuid4().hex, self.clock(),
+                self.monotonic() + (timeout - CHILD_RESERVE_SECONDS))
             if self.cleanup_blocked:
                 decision = _protocol_failure("CLEANUP_UNCONFIRMED")
             else:

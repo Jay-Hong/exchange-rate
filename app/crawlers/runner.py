@@ -7,7 +7,8 @@ scheduler.py에서 asyncio.create_subprocess_exec()로 호출됩니다.
 
 Usage:
     python -m app.crawlers.runner <bank_name>
-    python scripts/ibk_subprocess_bootstrap.py ibk --run-id <id> --reference-time <aware ISO>
+    python scripts/ibk_subprocess_bootstrap.py ibk --run-id <id> \
+        --reference-time <aware ISO> --work-deadline <monotonic float>
     두 번째 경로는 결과 adapter 미연결 상태이므로 현재는 수집 전에 종료한다.
 
 Exit Codes:

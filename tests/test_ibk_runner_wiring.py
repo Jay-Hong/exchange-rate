@@ -78,14 +78,30 @@ def test_parent_rollover_is_timezone_aware(stamp, day):
     assert IbkRunContext.from_arguments(context.arguments()) == context
 
 
-@pytest.mark.parametrize("args", [(), ("ibk",), ("nh", "--run-id", "x", "--reference-time", "bad"),
-    ("ibk", "--run-id", "!", "--reference-time", "2026-09-07T08:00:00+09:00"),
-    ("ibk", "--run-id", "x", "--reference-time", "2026-09-07T08:00:00"),
-    ("ibk", "--run-id", "x", "--reference-time", "bad"), None,
+# ⛔ 길이 검사 뒤의 검증을 실제로 시험하려면 **유효한 --work-deadline 을 붙인 7개 인자**여야
+#    한다. 5개로 두면 길이에서 먼저 걸려 reference_time 검증에 닿지 않는다.
+_OK_DEADLINE = ("--work-deadline", "1000.0")
+
+
+@pytest.mark.parametrize("args,code", [
+    ((), "INVALID_RUN_ARGUMENTS"),
+    (("ibk",), "INVALID_RUN_ARGUMENTS"),
+    (None, "INVALID_RUN_ARGUMENTS"),
+    (("nh", "--run-id", "x" * 32, "--reference-time",
+      "2026-09-07T08:00:00+09:00", *_OK_DEADLINE), "INVALID_RUN_ARGUMENTS"),
+    (("ibk", "--run-id", "!", "--reference-time",
+      "2026-09-07T08:00:00+09:00", *_OK_DEADLINE), "INVALID_EXPECTED_RUN_ID"),
+    (("ibk", "--run-id", "x" * 32, "--reference-time",
+      "2026-09-07T08:00:00", *_OK_DEADLINE), "INVALID_REFERENCE_TIME"),
+    (("ibk", "--run-id", "x" * 32, "--reference-time", "bad", *_OK_DEADLINE),
+     "INVALID_REFERENCE_TIME"),
+    (("ibk", "--run-id", "x" * 32, "--reference-time",
+      "2026-09-07T08:00:00+09:00", "--work-deadline", "bad"), "INVALID_WORK_DEADLINE"),
 ])
-def test_invalid_context_arguments_fail_closed(args):
-    with pytest.raises(IbkProtocolError):
+def test_invalid_context_arguments_fail_closed(args, code):
+    with pytest.raises(IbkProtocolError) as caught:
         IbkRunContext.from_arguments(args)
+    assert code in str(caught.value), f"기대 오류 {code}, 실제 {caught.value}"
 
 
 def test_unbound_adapter_stops_before_refresh_or_legacy(context, refresh, monkeypatch):
@@ -115,6 +131,149 @@ def test_no_private_channel_uses_legacy_usage_before_any_crawler(args, refresh, 
     assert "IBK_RESULT_ARGUMENTS_REJECTED" not in caplog.text
     producer.assert_not_called()
     refresh.assert_not_called()
+
+
+# ── 자식은 예산을 다시 시작하지 않는다 ──────────────────────────────────────
+# 부모가 정한 **절대 기한**을 넘겨야 spawn·app import·설정 캐시 갱신 지연도 그 예산을
+# 소비한다. 자식이 진입 시점에 새로 시작하면 그 시간이 공짜가 된다.
+
+
+def test_the_parent_passes_a_work_deadline_derived_from_its_timeout():
+    async def scenario():
+        seen, clock = [], [1000.0]
+
+        async def capture(argv, **kwargs):
+            seen.append(IbkRunContext.from_arguments(argv[3:]))
+            return capture_result(seen[-1])
+
+        parent = IbkParentRunner(capture=capture, event_sink=lambda _: True,
+                                 monotonic=lambda: clock[0])
+        await parent.execute(timeout=45)
+        await parent.execute(timeout=20)
+        return seen, clock[0]
+
+    contexts, at = asyncio.run(scenario())
+    budgets = [c.work_deadline - at for c in contexts]
+    assert budgets == [45 - 11, 20 - 11], f"실행 제한에서 정리 몫을 뺀 값이어야 한다: {budgets}"
+
+
+@pytest.mark.parametrize("timeout", [0.1, 1, 5, 11.9, 0, -1, float("nan"), float("inf"), "45"])
+def test_a_timeout_that_cannot_fund_the_work_is_refused_before_spawning(timeout):
+    """⛔ 하한을 강제로 부여하면 timeout 0.1초에도 자식이 1초 예산을 받는다 — **부모 제한보다
+    큰 예산**이다. 없는 예산을 지어내는 대신 자식을 띄우지 않는다."""
+    async def scenario():
+        calls = []
+
+        async def capture(argv, **kwargs):
+            calls.append(argv)
+            return capture_result(IbkRunContext.from_arguments(argv[3:]))
+
+        parent = IbkParentRunner(capture=capture, event_sink=lambda _: True)
+        with pytest.raises(ValueError):
+            await parent.execute(timeout=timeout)
+        return calls
+
+    assert asyncio.run(scenario()) == [], "예산이 없으면 자식을 띄우지 않는다"
+
+
+def test_the_smallest_supported_timeout_still_spawns():
+    """양성 대조 — 거부가 모든 값을 삼키는 것이 아님을 보인다."""
+    async def scenario():
+        calls = []
+
+        async def capture(argv, **kwargs):
+            calls.append(IbkRunContext.from_arguments(argv[3:]))
+            return capture_result(calls[-1])
+
+        parent = IbkParentRunner(capture=capture, event_sink=lambda _: True,
+                                 monotonic=lambda: 500.0)
+        await parent.execute(timeout=12)
+        return calls
+
+    contexts = asyncio.run(scenario())
+    assert len(contexts) == 1
+    assert contexts[0].work_deadline - 500.0 == pytest.approx(1.0)
+
+
+def test_the_work_deadline_is_monotonic_not_wall_clock():
+    """⛔ 달력 시각으로 빼면 시스템 시각이 뒤로 밀릴 때 잔여 예산이 **늘어난다**
+    (실측: 60초 역행 시 24초 → 84초). 작업 기한은 단조 시계 축이어야 한다."""
+    reference = datetime.now(timezone.utc)
+    context = IbkRunContext("d" * 32, reference, 1000.0)
+    assert IbkRunContext.from_arguments(context.arguments()) == context
+    assert context.remaining_work_seconds(990.0) == pytest.approx(10.0)
+    # 달력 시각을 아무리 밀어도 작업 기한은 영향받지 않는다.
+    shifted = IbkRunContext("d" * 32, reference - timedelta(hours=1), 1000.0)
+    assert shifted.remaining_work_seconds(990.0) == pytest.approx(10.0)
+
+
+def test_remaining_keeps_the_overrun_instead_of_clamping():
+    """0 으로 잘라도 만료 판정은 되지만, **얼마나 초과했는지**가 사라진다."""
+    context = IbkRunContext("e" * 32, datetime.now(timezone.utc), 1000.0)
+    assert context.remaining_work_seconds(1006.0) == pytest.approx(-6.0)
+
+
+def test_an_implausibly_large_remaining_is_refused_not_clamped():
+    """⛔ 숫자만 상한으로 바꾸면 방어가 아니라 위장이다 — 한 시간이 지나도 잔여가 계속
+    300초로 나와 소비자가 새 작업을 무한히 시작한다(실측). 그래서 거부한다."""
+    context = IbkRunContext("f" * 32, datetime.now(timezone.utc), 1_000_000.0)
+    for elapsed in (0.0, 300.0, 3600.0):
+        with pytest.raises(IbkProtocolError):
+            context.remaining_work_seconds(elapsed)
+
+
+def test_the_contract_ceiling_itself_is_allowed():
+    """양성 대조 — 거부가 정상 경계까지 삼키지 않는다."""
+    context = IbkRunContext("h" * 32, datetime.now(timezone.utc), 1000.0)
+    assert context.remaining_work_seconds(700.0) == pytest.approx(300.0)
+    assert context.remaining_work_seconds(701.0) == pytest.approx(299.0)
+    assert context.remaining_work_seconds(1006.0) == pytest.approx(-6.0)
+
+
+def test_a_timeout_above_the_contract_ceiling_is_refused():
+    """부모가 상한을 넘겨 보내면 자식이 그 기한을 거부해 결과 없이 끝난다."""
+    async def scenario():
+        calls = []
+
+        async def capture(argv, **kwargs):
+            calls.append(argv)
+            return capture_result(IbkRunContext.from_arguments(argv[3:]))
+
+        parent = IbkParentRunner(capture=capture, event_sink=lambda _: True)
+        with pytest.raises(ValueError):
+            await parent.execute(timeout=312)
+        return calls
+
+    assert asyncio.run(scenario()) == []
+
+
+@pytest.mark.parametrize("bad", ["x", float("nan"), float("inf"), True])
+def test_a_non_finite_work_deadline_is_rejected(bad):
+    with pytest.raises(IbkProtocolError):
+        IbkRunContext("g" * 32, datetime.now(timezone.utc), bad)
+
+
+
+
+# ── 자식은 예산을 다시 시작하지 않는다 ──────────────────────────────────────
+# 부모가 정한 **절대 기한**을 넘겨야 spawn·app import·설정 캐시 갱신 지연도 그 예산을
+# 소비한다. 자식이 진입 시점에 새로 시작하면 그 시간이 공짜가 된다.
+
+
+@pytest.mark.parametrize("args", [
+    ("ibk", "--run-id", "e" * 32, "--reference-time", "2026-09-09T00:00:00+00:00"),
+    ("ibk", "--run-id", "e" * 32, "--reference-time", "2026-09-09T00:00:00+00:00",
+     "--work-deadline"),
+    ("ibk", "--run-id", "e" * 32, "--reference-time", "2026-09-09T00:00:00+00:00",
+     "--budget", "1000.0"),
+    ("ibk", "--run-id", "e" * 32, "--reference-time", "2026-09-09T00:00:00+00:00",
+     "--work-deadline", "not-a-number"),
+    ("ibk", "--run-id", "e" * 32, "--reference-time", "2026-09-09T00:00:00+00:00",
+     "--work-deadline", "nan"),
+])
+def test_arguments_without_a_usable_work_deadline_are_rejected(args):
+    with pytest.raises(IbkProtocolError):
+        IbkRunContext.from_arguments(args)
 
 
 def test_legacy_launcher_cannot_select_bootstrap(monkeypatch):
