@@ -1167,28 +1167,75 @@ def _is_preopen_pending_window(service_date, reference_time) -> bool:
 IBK_SELENIUM_NEVER_OBSERVED = ("driver_failed", "deadline_passed")
 
 #: Selenium 관측 불가 사유 → 결과 사유. 합의한 분류다.
-#: 취득·제출·항해·읽기 실패는 TRANSPORT_ERROR(브라우저 취득 실패를 포함하는 분류),
-#: 읽을 수 있는 문서의 요소·계약 이상은 CONTRACT_ERROR, 기한 소진은 BUDGET_EXHAUSTED.
-IBK_SELENIUM_UNAVAILABLE_REASONS = (
-    ("deadline_passed", IbkReason.BUDGET_EXHAUSTED),
-    ("page_too_old", IbkReason.BUDGET_EXHAUSTED),
+#: 조작 콜백이 예외로 끝난 사유는 `<라벨>:<예외 종류>` 꼴이다. `_guarded` 가 알려주는 것은
+#: **어느 콜백에서 났는지**뿐이고, 브라우저 통신까지 갔는지는 증명하지 않는다(실측: 어댑터의
+#: `clock() + timeout` 에 `None` 을 주면 드라이버 호출 0회로 `confirm_failed:TypeError` 가
+#: 된다). 그래서 조작 예외는 라벨과 무관하게 **출처 미확정**으로 본다 — 라벨마다 다르게
+#: 접으면 같은 예외가 발생 위치만으로 다른 분류가 된다.
+#:
+#: 요소를 **찾는** 조작만 예외다 — 거기서 난 `NoSuchElementException` 은 "문서에 그 요소가
+#: 없다" 는 관측이므로 계약 이상이다. 같은 자리의 다른 예외는 역시 출처를 모른다.
+IBK_SELENIUM_LOOKUP_LABELS = ("document_root:", "find_input:", "served_date_unreadable:")
+IBK_SELENIUM_OPERATION_LABELS = ("submit_failed:", "alert_check:", "confirm_failed:",
+                                 "page_source:")
+IBK_SELENIUM_ELEMENT_ABSENT = "NoSuchElementException"
+
+#: **확정된 관측** 사유 → 결과 사유. 접두사가 아니라 **정확히 일치**할 때만 쓴다 — 넓은
+#: 접두사는 새 사유를 조용히 삼킨다(`submit` 이 `submit_failed:TypeError` 를 삼켜 출처 미확정
+#: 예외를 통신 오류로 만들던 것이 그 예다).
+IBK_SELENIUM_CONFIRMED_REASONS = {
+    # 문서에 요소가 없다고 관측했다.
+    "document_root_absent": IbkReason.CONTRACT_ERROR,
+    "input_absent": IbkReason.CONTRACT_ERROR,
+    # 브라우저와 주고받은 결과를 실제로 보고 판정했다.
+    "submit_blocked_by_alert": IbkReason.TRANSPORT_ERROR,
+    "submit_not_confirmed": IbkReason.TRANSPORT_ERROR,
+    "alert_present": IbkReason.TRANSPORT_ERROR,
+    # 우리 쪽 시계·입력이 못 쓸 값이라고 캡처러가 이름 붙였다.
+    "clock_unusable": IbkReason.UNATTRIBUTED_ERROR,
+    "clock_went_backwards": IbkReason.UNATTRIBUTED_ERROR,
+    "page_loaded_at_unusable": IbkReason.UNATTRIBUTED_ERROR,
+    "document_ready_at_unusable": IbkReason.UNATTRIBUTED_ERROR,
+    # 읽기 실패는 종류가 버려지고, 시간 초과는 **우리가 정한 상한** 안에 결과가 없었다는
+    # 사실만 증명한다. 어느 쪽도 원인을 확정하지 못한다.
+    "page_source_failed": IbkReason.UNATTRIBUTED_ERROR,
+    "page_source_timeout": IbkReason.UNATTRIBUTED_ERROR,
+}
+
+#: 뒤에 단계 이름이 붙어 정확히 일치할 수 없는 것들.
+IBK_SELENIUM_PREFIXED_REASONS = (
+    ("deadline_passed", IbkReason.BUDGET_EXHAUSTED),   # deadline_passed:before_read 등
+    ("page_too_old", IbkReason.BUDGET_EXHAUSTED),      # page_too_old_after_read
+    # 안전망 바깥에서 잡은 것. produce 는 이 사유에서 HTTP 진단을 유지하므로 이 분류에
+    # 실제로 닿지 않는다(`IBK_SELENIUM_NEVER_OBSERVED`).
     ("driver_failed", IbkReason.TRANSPORT_ERROR),
-    ("submit", IbkReason.TRANSPORT_ERROR),
-    ("alert", IbkReason.TRANSPORT_ERROR),
-    ("confirm_failed", IbkReason.TRANSPORT_ERROR),
-    ("page_source", IbkReason.TRANSPORT_ERROR),
-    ("clock", IbkReason.TRANSPORT_ERROR),
-    ("page_loaded_at", IbkReason.TRANSPORT_ERROR),
 )
 
 
 def _selenium_unavailable_reason(detail):
-    """세부 사유를 결과 사유로 접는다. 모르는 것은 계약 이상으로 본다."""
+    """세부 사유를 결과 사유로 접는다. **확정하지 못한 것은 확정하지 않는다.**
+
+    ⛔ 기본값이 CONTRACT_ERROR 이면 안 된다. 그건 "읽을 수 있는 문서의 요소·계약이 어긋났다"
+       는 주장이라, 우리 시계가 NaN 이거나 읽기 스레드가 종류도 없이 죽은 회차까지 문서
+       탓으로 적게 된다.
+    """
     text = str(detail or "")
-    for prefix, reason in IBK_SELENIUM_UNAVAILABLE_REASONS:
+    for label in IBK_SELENIUM_LOOKUP_LABELS:
+        if text.startswith(label):
+            # 요소를 못 찾은 것만 문서 탓이다. 같은 자리의 다른 예외는 출처를 모른다.
+            return (IbkReason.CONTRACT_ERROR
+                    if text[len(label):] == IBK_SELENIUM_ELEMENT_ABSENT
+                    else IbkReason.UNATTRIBUTED_ERROR)
+    if text.startswith(IBK_SELENIUM_OPERATION_LABELS):
+        # 어느 콜백에서 났는지만 알 뿐 브라우저까지 갔는지는 모른다.
+        return IbkReason.UNATTRIBUTED_ERROR
+    confirmed = IBK_SELENIUM_CONFIRMED_REASONS.get(text)
+    if confirmed is not None:
+        return confirmed
+    for prefix, reason in IBK_SELENIUM_PREFIXED_REASONS:
         if text.startswith(prefix):
             return reason
-    return IbkReason.CONTRACT_ERROR
+    return IbkReason.UNATTRIBUTED_ERROR
 
 
 def _historical_preservation_reason(search):

@@ -231,21 +231,54 @@ class TheClockIsReadWhenCalled(unittest.TestCase):
 
 class UnavailableReasonsAreNotOverwritten(unittest.TestCase):
     """⛔ Selenium 이 관측하지 못한 사유를 HTTP 사유로 덮으면 원인이 사라진다
-    (실측: alert 차단이 CONTRACT_ERROR 로, 요소 부재가 TRANSPORT_ERROR 로 기록됐다)."""
+    (실측: alert 차단이 CONTRACT_ERROR 로, 요소 부재가 TRANSPORT_ERROR 로 기록됐다).
+
+    ⛔ 그리고 **확정하지 못한 것을 확정해서도 안 된다.** TRANSPORT_ERROR 는 브라우저와
+       실제로 주고받다가 실패했을 때만, CONTRACT_ERROR 는 문서에 그 요소가 없다고 관측했을
+       때만 쓴다. 나머지는 UNATTRIBUTED_ERROR 다.
+    """
 
     CASES = {
+        # 브라우저와 주고받은 **결과를 보고** 판정했다 — 관측된 사실이다.
         "submit_blocked_by_alert": "TRANSPORT_ERROR",
         "submit_not_confirmed": "TRANSPORT_ERROR",
         "alert_present": "TRANSPORT_ERROR",
-        "confirm_failed:TimeoutException": "TRANSPORT_ERROR",
-        "page_source_timeout": "TRANSPORT_ERROR",
+        # 안전망 바깥에서 잡은 것. produce 는 이 사유에서 HTTP 진단을 유지하므로 이 분류에
+        # 실제로 닿지 않는다.
         "driver_failed:WebDriverException": "TRANSPORT_ERROR",
-        "clock_went_backwards": "TRANSPORT_ERROR",
+        # ⛔ 조작 콜백 예외는 **어느 콜백에서 났는지만** 알려준다. 브라우저까지 갔는지는
+        #    증명하지 않으므로 종류와 무관하게 출처 미확정이다.
+        "submit_failed:WebDriverException": "UNATTRIBUTED_ERROR",
+        "submit_failed:TypeError": "UNATTRIBUTED_ERROR",
+        "alert_check:TypeError": "UNATTRIBUTED_ERROR",
+        "confirm_failed:TimeoutException": "UNATTRIBUTED_ERROR",
+        "confirm_failed:TypeError": "UNATTRIBUTED_ERROR",
+        # 예산·신선도.
         "deadline_passed:after_driver": "BUDGET_EXHAUSTED",
         "page_too_old": "BUDGET_EXHAUSTED",
+        "page_too_old_after_read": "BUDGET_EXHAUSTED",
+        # 문서에 요소가 없다 — 이것도 관측된 사실이다.
         "input_absent": "CONTRACT_ERROR",
         "document_root_absent": "CONTRACT_ERROR",
-        "served_date_unreadable:RuntimeError": "CONTRACT_ERROR",
+        "find_input:NoSuchElementException": "CONTRACT_ERROR",
+        "document_root:NoSuchElementException": "CONTRACT_ERROR",
+        "served_date_unreadable:NoSuchElementException": "CONTRACT_ERROR",
+        # 우리 쪽 시계·입력이 못 쓸 값이었다 — 은행 쪽 사실이 아니다.
+        "clock_unusable": "UNATTRIBUTED_ERROR",
+        "clock_went_backwards": "UNATTRIBUTED_ERROR",
+        "page_loaded_at_unusable": "UNATTRIBUTED_ERROR",
+        "document_ready_at_unusable": "UNATTRIBUTED_ERROR",
+        # 읽기 — 실패는 종류가 버려지고, 시간 초과는 우리가 정한 상한 안에 결과가 없었다는
+        # 사실만 증명한다.
+        "page_source_failed": "UNATTRIBUTED_ERROR",
+        "page_source_timeout": "UNATTRIBUTED_ERROR",
+        "page_source:TypeError": "UNATTRIBUTED_ERROR",
+        # 요소를 찾는 자리의 **다른** 예외는 출처를 모른다.
+        "find_input:WebDriverException": "UNATTRIBUTED_ERROR",
+        "document_root:TypeError": "UNATTRIBUTED_ERROR",
+        "served_date_unreadable:RuntimeError": "UNATTRIBUTED_ERROR",
+        # 파서가 낸 예상 밖 예외는 종류 이름만 남는다.
+        "TypeError": "UNATTRIBUTED_ERROR",
     }
 
     def test_each_detail_folds_into_the_agreed_reason(self):
@@ -253,10 +286,110 @@ class UnavailableReasonsAreNotOverwritten(unittest.TestCase):
             with self.subTest(detail=detail):
                 self.assertEqual(ibk._selenium_unavailable_reason(detail).value, expected)
 
-    def test_an_unknown_detail_is_a_contract_error_not_a_transport_one(self):
-        self.assertEqual(ibk._selenium_unavailable_reason("something_new").value,
+    def test_an_unknown_detail_is_not_attributed_to_the_document_or_the_transport(self):
+        """⛔ 기본값이 CONTRACT_ERROR 이면 다음 미등록 사유에서 같은 문제가 재발한다 —
+        모르는 것을 문서 탓으로 적게 된다."""
+        for detail in ("something_new", None, "", "brand_new_reason:Whatever"):
+            with self.subTest(detail=detail):
+                self.assertEqual(ibk._selenium_unavailable_reason(detail).value,
+                                 "UNATTRIBUTED_ERROR")
+
+    def test_a_confirmed_reason_is_matched_exactly_not_by_prefix(self):
+        """⛔ 확정 사유를 접두사로 맞추면 **그 이름으로 시작하는 새 사유를 조용히 삼킨다.**
+        캡처러가 나중에 `input_absent_but_recovered` 같은 사유를 내면 우리가 검토한 적 없는
+        상태가 "문서에 요소가 없다" 는 확정 관측으로 기록된다. 모르는 것은 중립이어야 한다."""
+        for grown in ("input_absent_but_recovered", "alert_present_and_dismissed",
+                      "clock_unusable_but_recovered", "page_source_failed_then_retried"):
+            with self.subTest(detail=grown):
+                self.assertEqual(ibk._selenium_unavailable_reason(grown).value,
+                                 "UNATTRIBUTED_ERROR")
+        # 양성 대조 — 정확히 같은 이름은 그대로 확정 사유다.
+        self.assertEqual(ibk._selenium_unavailable_reason("input_absent").value,
                          "CONTRACT_ERROR")
-        self.assertEqual(ibk._selenium_unavailable_reason(None).value, "CONTRACT_ERROR")
+
+    def test_the_lookup_labels_carry_a_colon_so_they_do_not_swallow_absences(self):
+        """⛔ 조작 라벨은 `document_root:` 처럼 **콜론까지** 포함해야 한다. 콜론을 빼면
+        `document_root_absent` 가 그 라벨에 걸리고, 뒤가 `NoSuchElementException` 이 아니므로
+        요소 부재가 **중립 사유로 떨어진다** — 관측한 사실을 잃는다."""
+        for label in ibk.IBK_SELENIUM_LOOKUP_LABELS:
+            with self.subTest(label=label):
+                self.assertTrue(label.endswith(":"), f"콜론이 빠졌다: {label}")
+        self.assertEqual(ibk._selenium_unavailable_reason("document_root_absent").value,
+                         "CONTRACT_ERROR")
+        self.assertEqual(ibk._selenium_unavailable_reason("input_absent").value,
+                         "CONTRACT_ERROR")
+
+
+class TheSameExceptionIsNotSortedByWhereItFired(unittest.TestCase):
+    """⛔ 문자열 매핑 시험만으로는 부족하다. **서명이 정상인 콜백 안에서** 예외를 내어
+    실제 캡처러가 붙이는 사유를 받고, 그것이 어떻게 분류되는지 본다.
+
+    ⛔ 같은 `TypeError` 인데 제출·경고 확인·교체 확인에서 나면 통신 오류가 되고 읽기에서
+       나면 출처 미확정이 되던 것이 이 시험이 막는 것이다(실측). `_guarded` 가 알려주는 것은
+       **어느 콜백에서 났는지**뿐이고, 브라우저 통신까지 갔는지는 증명하지 않는다.
+    """
+
+    REFERENCE = datetime.datetime(2026, 9, 9, 3, 0, tzinfo=datetime.timezone.utc)
+    QUERY_DATE = datetime.date(2026, 9, 4)
+
+    def _capturer(self, **overrides):
+        from app.ibk_selenium_strict import IbkSeleniumStrictCapturer
+
+        base = dict(
+            parse=lambda html, *, query_date, reference_time: ({"usd-krw": 1.0}, "06:00:02"),
+            served_date=lambda d: "2026.09.01", find_input=lambda d: MagicMock(),
+            submit=lambda e, t: None, document_root=lambda d: object(),
+            read_page_source=lambda d, *, timeout=None: ("<html/>", None),
+            wait_replaced=lambda r, t: True, take_alert=lambda d: None,
+            monotonic=lambda: 1000.0, sleep=lambda seconds: None)
+        return IbkSeleniumStrictCapturer(**{**base, **overrides})
+
+    def _capture(self, **overrides):
+        return self._capturer(**overrides).capture(
+            MagicMock(), query_date=self.QUERY_DATE, reference_time=self.REFERENCE,
+            page_loaded_at=1000.0)
+
+    def test_a_healthy_run_is_accepted(self):
+        """양성 대조 — 아무것도 던지지 않으면 관측이 성립한다. 이게 없으면 아래 사례들이
+        다른 이유로 실패해도 알 수 없다."""
+        capture = self._capture()
+        self.assertEqual(capture.verdict, "accepted", capture.reason)
+
+    def test_an_internal_error_in_any_operation_is_unattributed(self):
+        def boom(*args, **kwargs):
+            raise TypeError("내부 오류")
+
+        cases = {"제출": ("submit", "submit_failed:TypeError"),
+                 "경고 확인": ("take_alert", "alert_check:TypeError"),
+                 "교체 확인": ("wait_replaced", "confirm_failed:TypeError"),
+                 "화면 읽기": ("read_page_source", "page_source:TypeError")}
+        for label, (operation, expected_detail) in cases.items():
+            with self.subTest(where=label):
+                capture = self._capture(**{operation: boom})
+                self.assertEqual(capture.reason, expected_detail)
+                self.assertEqual(
+                    ibk._selenium_unavailable_reason(capture.reason).value,
+                    "UNATTRIBUTED_ERROR",
+                    f"{label} 에서 난 같은 예외가 다른 분류가 됐다")
+
+    def test_a_missing_element_is_still_a_contract_error(self):
+        """⛔ 출처 미확정으로 옮기면서 **관측된 요소 부재까지** 중립으로 만들면 안 된다."""
+        from selenium.common.exceptions import NoSuchElementException
+
+        def absent(*args, **kwargs):
+            raise NoSuchElementException("없다")
+
+        capture = self._capture(find_input=absent)
+        self.assertEqual(capture.reason, "find_input:NoSuchElementException")
+        self.assertEqual(ibk._selenium_unavailable_reason(capture.reason).value,
+                         "CONTRACT_ERROR")
+
+    def test_a_confirmed_site_guard_is_still_a_transport_error(self):
+        """⛔ 브라우저와 주고받은 **결과를 보고** 판정한 것은 그대로 남는다."""
+        capture = self._capture(take_alert=lambda d: "새로고침은 연속으로 할 수 없습니다")
+        self.assertEqual(capture.reason, "alert_present")
+        self.assertEqual(ibk._selenium_unavailable_reason(capture.reason).value,
+                         "TRANSPORT_ERROR")
 
 
 class WhoseDiagnosisSurvives(unittest.TestCase):

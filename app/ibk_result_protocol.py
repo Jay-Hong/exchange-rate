@@ -39,6 +39,10 @@ class IbkReason(str, Enum):
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     WRITE_POLICY_BLOCKED = "WRITE_POLICY_BLOCKED"
     SELENIUM_STRICT_REJECTED = "SELENIUM_STRICT_REJECTED"
+    # 관측을 완성하지 못했고 원인을 **어느 쪽으로도 확정하지 못했다**. 우리 시계·입력이
+    # 못 쓸 값이었을 수도, 라이브러리 이상이었을 수도 있다. 확정하지 못한 것을 전송
+    # 오류나 문서 계약 이상으로 적으면 운영자가 없는 사실을 읽는다.
+    UNATTRIBUTED_ERROR = "UNATTRIBUTED_ERROR"
 
 
 class IbkSource(str, Enum):
