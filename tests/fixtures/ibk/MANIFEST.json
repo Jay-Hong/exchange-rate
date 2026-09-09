@@ -1,0 +1,60 @@
+{
+  "출처": "https://www.ibk.co.kr/fxtr/excRateList.ibk",
+  "캡처일": "2026-09-09 (KST)",
+  "성격": "실제 응답 원본이다. 코드로 조립한 fixture 가 아니다.",
+  "보관": "/Users/jay/logs/ibk_html_capture_20260909",
+  "제약": [
+    "DB·Redis·알림 어디에도 연결하지 않았다",
+    "HTTP 3요청 / 브라우저 로드 2회 / 제출 1회. 상한과 스로틀을 걸었다",
+    "운영 요청을 일부러 실패시키지 않았다. 무고시 날짜 조회는 정상 응답을 받는 정당한 질의다"
+  ],
+  "교차 대조": "http_dated_20260904 와 selenium_after_submit_20260904 의 3통화·고시완료가 2026-09-07 Playwright 관측(USD 1351.80 / JPY 865.26 / EUR 1569.85, 06:00:02)과 일치한다",
+  "관측된 사이트 가드": "연속 제출 시 '새로고침은 연속으로 할 수 없습니다' 경고 대화상자가 뜬 사례가 있다(2026-09-09 14:27 KST).",
+  "fixtures": [
+    {
+      "fixture": "http_today_get.html.gz",
+      "설명": "당일 GET(HTTP). 조회기준일 2026.09.09, 고시완료 14:24:52.",
+      "취득": "GET",
+      "응답 날짜": "2026-09-09",
+      "원본 bytes": 222904,
+      "원본 sha256": "910a01686fd8ac1221dc642c473a96152146a6ef84dd0a07b87d49b44d01d6c3",
+      "원본 파일": "A_today_get.html"
+    },
+    {
+      "fixture": "http_dated_20260904.html.gz",
+      "설명": "과거 영업일 날짜 지정 POST(HTTP). 2026.09.04. 2026-09-07 Playwright 관측과 값이 일치한다.",
+      "취득": "POST inDate=2026.09.04",
+      "응답 날짜": "2026-09-04",
+      "원본 bytes": 231587,
+      "원본 sha256": "172453cc8182a96c4fd782de791f094d752588b841e41b5b813cdcfb2a1c85b9",
+      "원본 파일": "B_dated_20260904.html"
+    },
+    {
+      "fixture": "http_dated_no_session_20260717.html.gz",
+      "설명": "공식 무고시 응답(HTTP). 2026.07.17, 표 없음, ECBKFEX01589 존재.",
+      "취득": "POST inDate=2026.07.17",
+      "응답 날짜": "2026-07-17",
+      "원본 bytes": 100260,
+      "원본 sha256": "f1f3ccc7608be61886f6d78342a9dfe196ae95ad17d664ecfe910976dbb8212d",
+      "원본 파일": "C_dated_20260717.html"
+    },
+    {
+      "fixture": "selenium_stale_typed_not_submitted.html.gz",
+      "설명": "Selenium page_source. 운영과 같은 send_keys 로 2026.09.04 를 입력했으나 **제출하지 않은** 상태. #inDate value 속성은 서버 렌더 날짜 2026.09.09 로 남는다.",
+      "취득": "Selenium(제출 없음)",
+      "응답 날짜": "2026-09-09",
+      "원본 bytes": 339443,
+      "원본 sha256": "40438965ac279b6a91415f3cc56976621fbb6bc46b7dff9d84068eaa4fe074e3",
+      "원본 파일": "F_selenium_send_keys_no_submit.html"
+    },
+    {
+      "fixture": "selenium_after_submit_20260904.html.gz",
+      "설명": "Selenium page_source. ENTER 제출이 성공해 2026.09.04 로 이동한 상태. #inDate value 속성도 2026.09.04 로 갱신된다.",
+      "취득": "Selenium(ENTER 제출)",
+      "응답 날짜": "2026-09-04",
+      "원본 bytes": 339425,
+      "원본 sha256": "2a3b86725707d36eb0ae61b5708e647d5c6f7ec1d5b2be508059a99cbcce037f",
+      "원본 파일": "G_selenium_after_submit.html"
+    }
+  ]
+}
