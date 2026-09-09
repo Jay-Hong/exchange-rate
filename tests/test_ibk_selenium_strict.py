@@ -33,6 +33,7 @@ FIXTURES = pathlib.Path(__file__).parent / "fixtures" / "ibk"
 DAY_0904 = datetime.date(2026, 9, 4)
 DAY_0909 = datetime.date(2026, 9, 9)
 DAY_0717 = datetime.date(2026, 7, 17)
+DAY_0901 = datetime.date(2026, 9, 1)
 REFERENCE = ibk.KST.localize(datetime.datetime(2026, 9, 9, 18, 0))
 OBSERVED_0904 = {"usd-krw": 1351.80, "jpy-krw": 865.26, "eur-krw": 1569.85}
 
@@ -77,6 +78,7 @@ class Harness:
                  stale_raises=None, clock=None, advance=None):
         self.driver = driver
         self.slept = []
+        self.read_budgets = []          # 읽기가 실제로 받은 상한
         self._submit_raises = submit_raises
         self._read_failure = read_failure
         self._stale_raises = stale_raises
@@ -109,8 +111,9 @@ class Harness:
     def _after_submit_html(self, text):
         return fixture("selenium_after_submit_20260904")
 
-    def read_page_source(self, driver):
+    def read_page_source(self, driver, *, timeout=None):
         driver.page_source_reads += 1
+        self.read_budgets.append(timeout)
         if self._read_failure:
             return None, self._read_failure
         return driver.html, None
@@ -374,6 +377,65 @@ class TheDeadlineIsConsumedInsideTheCapture(unittest.TestCase):
         self.assertGreater(given[0], 0, f"음수·0 예산을 넘겼다: {given}")
         self.assertLessEqual(given[0], 1.0 + 1e-9, f"잔여를 넘겼다: {given}")
 
+    def test_the_read_gets_no_more_than_the_remaining(self):
+        """⛔ 읽기 **시작 여부**만 검사하면 잔여 0.2초에서도 상한 3초를 배정해 기한을 2.8초
+        넘겨 읽는다(실측). `page_source` 에는 드라이버 명령 제한이 걸리지 않아 이 상한이
+        유일한 경계다."""
+        harness = self._harness(999.8)
+        harness.capturer(read_timeout=3.0).capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=995.0, document_ready_at=995.0, deadline=1000.0)
+        self.assertEqual(len(harness.read_budgets), 1,
+                         f"읽기를 한 번 해야 한다: {harness.read_budgets}")
+        self.assertLessEqual(harness.read_budgets[0], 0.2 + 1e-9,
+                             f"잔여보다 큰 상한을 줬다: {harness.read_budgets}")
+        self.assertGreater(harness.read_budgets[0], 0,
+                           f"음수·0 상한을 줬다: {harness.read_budgets}")
+
+    def test_a_wide_remaining_keeps_the_configured_read_cap(self):
+        """양성 대조 — 잔여가 넉넉하면 설정 상한이 이긴다. 잔여를 그대로 주면 3초짜리
+        읽기가 10초를 쓸 수 있게 된다."""
+        harness = self._harness(990.0)
+        harness.capturer(read_timeout=3.0).capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=990.0, document_ready_at=990.0, deadline=1000.0)
+        self.assertEqual(harness.read_budgets, [3.0],
+                         f"잔여 10초에서도 상한 3초여야 한다: {harness.read_budgets}")
+
+    def test_without_a_deadline_the_read_keeps_its_own_default(self):
+        """양성 대조 — 기한이 없고 상한 주입도 없으면 읽기 함수의 기본값을 쓰도록 None 을
+        넘긴다. 여기서 임의의 숫자를 지어내면 읽기 함수의 상한이 두 곳으로 갈라진다."""
+        harness = self._harness(999.0)
+        harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=999.0, document_ready_at=999.0)
+        self.assertEqual(harness.read_budgets, [None], f"{harness.read_budgets}")
+
+    def test_a_clock_that_moves_between_check_and_read_budget_never_yields_a_negative(self):
+        """⛔ 읽기에서도 만료 검사와 예산 계산이 시계를 각각 읽으면 음수 상한이 전달된다.
+        확인 대기에서 고친 것과 같은 경합이다."""
+        harness = self._harness(995.0)
+        # 서비스 날짜가 이미 맞아 제출을 건너뛰는 경로다(계측: 시계 읽기 5회). 읽기 예산이
+        # 시계를 읽는 시점이 **네 번째**이므로 그것을 기한 직전 999.9 로 두어 만료 검사를
+        # 통과시키고, 다음 읽기부터 기한을 넘긴다. 한 번만 읽는 구현은 잔여 0.1 을 그대로
+        # 쓰고, 두 번 읽는 구현은 두 번째 읽기에서 -19 를 만든다.
+        reads = {"n": 0}
+
+        def creeping():
+            reads["n"] += 1
+            if reads["n"] < 4:
+                return 995.0
+            return 999.9 if reads["n"] == 4 else 1019.0
+
+        harness.monotonic = creeping
+        harness.capturer(read_timeout=3.0).capture(
+            harness.driver, query_date=DAY_0901, reference_time=REFERENCE,
+            page_loaded_at=990.0, document_ready_at=990.0, deadline=1000.0)
+        self.assertEqual(len(harness.read_budgets), 1,
+                         f"만료 검사를 통과했으면 한 번 읽는다: {harness.read_budgets}")
+        self.assertGreater(harness.read_budgets[0], 0,
+                           f"음수·0 상한을 줬다: {harness.read_budgets}")
+
     def test_the_confirm_wait_gets_no_more_than_the_remaining(self):
         """양성 대조 — 잔여가 있으면 시작하되 설정 상한과 잔여 중 작은 값을 준다."""
         harness = self._harness(996.0)
@@ -433,7 +495,7 @@ class TheDefaultClockIsAlsoReadWhenCalled(unittest.TestCase):
                 _Text(html), query_date=query_date, reference_time=reference_time),
             served_date=lambda d: d.served, find_input=lambda d: d.element,
             submit=lambda e, t: None, document_root=lambda d: d.root,
-            read_page_source=lambda d: (d.html, None),
+            read_page_source=lambda d, *, timeout=None: (d.html, None),
             wait_replaced=lambda r, t: True, take_alert=lambda d: None)
         # monotonic 을 **주입하지 않는다** — 모듈 시계를 패치해 그것이 쓰이는지 본다.
         with patch.object(strict_module.time, "monotonic", lambda: 10_000.0):
@@ -452,7 +514,7 @@ class TheDefaultClockIsAlsoReadWhenCalled(unittest.TestCase):
                 _Text(html), query_date=query_date, reference_time=reference_time),
             served_date=lambda d: d.served, find_input=lambda d: d.element,
             submit=lambda e, t: None, document_root=lambda d: d.root,
-            read_page_source=lambda d: (d.html, None),
+            read_page_source=lambda d, *, timeout=None: (d.html, None),
             wait_replaced=lambda r, t: True, take_alert=lambda d: None)
         with patch.object(strict_module.time, "monotonic", lambda: 10_000.0):
             capture = capturer.capture(
@@ -732,9 +794,9 @@ class DocumentAgeIsCheckedAtRead(unittest.TestCase):
         harness = Harness(driver, clock=lambda: clock[0])
         original = harness.read_page_source
 
-        def slow_read(d):
+        def slow_read(d, *, timeout=None):
             clock[0] += 61.0
-            return original(d)
+            return original(d, timeout=timeout)
 
         harness.read_page_source = slow_read
         capture = run(harness, DAY_0904)
@@ -796,7 +858,7 @@ class DependencyValidation(unittest.TestCase):
         ok = dict(parse=lambda *a, **k: None, served_date=lambda d: "",
                   find_input=lambda d: None, submit=lambda e, t: None,
                   document_root=lambda d: object(),
-                  read_page_source=lambda d: (None, "x"),
+                  read_page_source=lambda d, *, timeout=None: (None, "x"),
                   wait_replaced=lambda r, t: True, take_alert=lambda d: None)
         for override in ({"parse": None}, {"submit": "x"}, {"take_alert": 3},
                          {"served_date": None}, {"document_root": 1},
@@ -804,10 +866,23 @@ class DependencyValidation(unittest.TestCase):
                          {"submit_guard_seconds": -1}, {"staleness_timeout": "x"},
                          {"max_page_age_seconds": -0.5},
                          {"max_page_age_seconds": float("nan")},
-                         {"submit_guard_seconds": float("inf")}):
+                         {"submit_guard_seconds": float("inf")},
+                         # 읽기 상한 0 은 "읽지 않는다" 가 되어 관측이 조용히 사라진다.
+                         {"read_timeout": 0}, {"read_timeout": -1},
+                         {"read_timeout": float("nan")}, {"read_timeout": "3"}):
             with self.subTest(override=sorted(override)):
                 with self.assertRaises(ValueError):
                     IbkSeleniumStrictCapturer(**{**ok, **override})
+
+    def test_an_absent_read_timeout_is_allowed(self):
+        """양성 대조 — 주입이 없으면 읽기 함수의 기본 상한을 쓴다(None 허용)."""
+        IbkSeleniumStrictCapturer(
+            parse=lambda *a, **k: None, served_date=lambda d: "",
+            find_input=lambda d: None, submit=lambda e, t: None,
+            document_root=lambda d: object(),
+            read_page_source=lambda d, *, timeout=None: (None, "x"),
+            wait_replaced=lambda r, t: True, take_alert=lambda d: None,
+            read_timeout=None)
 
 
 if __name__ == "__main__":

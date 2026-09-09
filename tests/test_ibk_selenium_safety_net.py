@@ -301,5 +301,50 @@ class HistoricalPreservationMatchesThePostPath(unittest.TestCase):
             "OFFICIAL_NO_SESSION")
 
 
+class TheProductionCapturerCarriesTheReadCap(unittest.TestCase):
+    """⛔ 상한을 정해 두고 **캡처러에 넘기지 않으면** 읽기가 잔여를 그대로 받는다. 잔여 30초
+    에서 3초짜리 읽기가 30초를 쓸 수 있게 된다 — 배선 한 줄이 빠져도 다른 시험은 전부
+    통과한다(변이로 실증). 그래서 주입한 가짜가 아니라 **운영이 만드는 캡처러**로 본다.
+    """
+
+    def _run(self, *, budget_seconds):
+        import time as _time
+
+        from selenium.common.exceptions import NoAlertPresentException
+
+        recorded = []
+
+        def recording_read(driver, *, timeout=None):
+            recorded.append(timeout)
+            return "<html></html>", None
+
+        element = MagicMock()
+        driver = MagicMock()
+        driver.find_element.return_value = element
+        # 서비스 날짜가 이미 맞으면 제출을 건너뛴다 — 이 시험이 보려는 것은 읽기 예산이다.
+        driver.execute_script.return_value = QUERY_DATE.strftime("%Y.%m.%d")
+        type(driver).switch_to = property(
+            lambda self: (_ for _ in ()).throw(NoAlertPresentException()))
+
+        with patch.object(ibk, "_read_page_source_bounded", recording_read):
+            capturer = ibk._build_selenium_capturer(driver)
+        started = _time.monotonic()
+        capturer.capture(driver, query_date=QUERY_DATE, reference_time=REFERENCE,
+                         page_loaded_at=started, document_ready_at=started,
+                         deadline=started + budget_seconds)
+        return recorded
+
+    def test_a_wide_budget_keeps_the_modules_read_cap(self):
+        recorded = self._run(budget_seconds=30.0)
+        self.assertEqual(recorded, [ibk.SHADOW_PAGE_SOURCE_TIMEOUT],
+                         f"운영 배선이 상한을 안 넘겼다: {recorded}")
+
+    def test_a_tight_budget_wins_over_the_read_cap(self):
+        recorded = self._run(budget_seconds=0.5)
+        self.assertEqual(len(recorded), 1, f"읽기를 한 번 해야 한다: {recorded}")
+        self.assertLessEqual(recorded[0], 0.5, f"잔여를 넘겼다: {recorded}")
+        self.assertGreater(recorded[0], 0, f"음수·0 상한: {recorded}")
+
+
 if __name__ == "__main__":
     unittest.main()

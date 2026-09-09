@@ -193,7 +193,8 @@ class TheOperationBundleMatchesTheCapturerContract(unittest.TestCase):
         from app.ibk_selenium_strict import IbkSeleniumStrictCapturer
 
         ops = adapter.build_operations(MagicMock(), input_selector="#inDate",
-                                       read_page_source=lambda d: ("<html/>", None))
+                                       read_page_source=lambda d, *, timeout=None:
+                                       ("<html/>", None))
         # 캡처러가 받아들이면 계약이 맞는 것이다 — 이름·개수를 따로 적지 않는다.
         IbkSeleniumStrictCapturer(parse=lambda *a, **k: None, **ops)
         for name, value in ops.items():

@@ -69,7 +69,8 @@ class IbkSeleniumStrictCapturer:
                  monotonic=None, sleep=None,
                  submit_guard_seconds=SUBMIT_GUARD_SECONDS,
                  staleness_timeout=STALENESS_TIMEOUT_SECONDS,
-                 max_page_age_seconds=MAX_PAGE_AGE_SECONDS):
+                 max_page_age_seconds=MAX_PAGE_AGE_SECONDS,
+                 read_timeout=None):
         # ⛔ 기본값을 `time.monotonic` 으로 묶으면 정의 시점의 함수가 박혀 모듈 패치가 듣지
         #    않는다. 주입이 없으면 **호출 시점에** 모듈 속성을 읽는다.
         monotonic = monotonic or (lambda: time.monotonic())
@@ -90,9 +91,16 @@ class IbkSeleniumStrictCapturer:
         self._document_root, self._read_page_source = document_root, read_page_source
         self._wait_replaced, self._take_alert = wait_replaced, take_alert
         self._monotonic, self._sleep = monotonic, sleep
+        # 읽기 상한은 주입이 없으면 읽기 함수 자신의 기본값을 쓴다(None 허용). 0 은 설정
+        # 오류다 — 읽지 않겠다는 뜻이 되어 관측이 조용히 사라진다.
+        if read_timeout is not None and (
+                type(read_timeout) not in (int, float)
+                or not math.isfinite(read_timeout) or read_timeout <= 0):
+            raise ValueError("INVALID_IBK_SELENIUM_STRICT_READ_TIMEOUT")
         self._submit_guard_seconds = submit_guard_seconds
         self._staleness_timeout = staleness_timeout
         self._max_page_age_seconds = max_page_age_seconds
+        self._read_timeout = read_timeout
 
     def capture(self, driver, *, query_date, reference_time,
                 page_loaded_at, document_ready_at=None,
@@ -157,9 +165,23 @@ class IbkSeleniumStrictCapturer:
         if stale_reason:
             return _unavailable(stale_reason, notes, submitted=submitted)
 
-        if deadline is not None and self._monotonic() >= deadline:
-            return _unavailable("deadline_passed:before_read", notes, submitted=submitted)
-        read, failed = self._guarded("page_source", self._read_page_source, driver)
+        # ⛔ 읽기에 **주는 시간**도 공유 기한을 따른다. 시작 여부만 검사하면 잔여 0.2초에서도
+        #    상한 3초를 그대로 배정해 기한을 2.8초 넘겨 읽는다(실측).
+        # ⛔ `page_source` 는 드라이버 명령 제한(page load·script)이 묶지 않는다. 그래서 이
+        #    상한이 **호출자가 기다리는 시간**의 유일한 경계다 — 상한을 넘긴 읽기 스레드는
+        #    daemon 으로 남고 WebDriver 명령 자체는 취소되지 않는다. 막는 것은 캡처가 그만큼
+        #    붙잡혀 있는 것이지 명령의 종료가 아니다.
+        # ⛔ 잔여를 **한 번 읽어** 만료 검사와 예산 계산에 함께 쓴다. 각각 읽으면 그 사이
+        #    시간이 흘러 음수 예산이 전달된다.
+        read_budget = self._read_timeout
+        if deadline is not None:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return _unavailable("deadline_passed:before_read", notes,
+                                    submitted=submitted)
+            read_budget = remaining if read_budget is None else min(read_budget, remaining)
+        read, failed = self._guarded("page_source", self._read_page_source, driver,
+                                     timeout=read_budget)
         if failed:
             return _unavailable(failed, notes, submitted=submitted)
         html, read_failure = read
@@ -190,13 +212,13 @@ class IbkSeleniumStrictCapturer:
             ACCEPTED, service_date=query_date, rates=dict(rates), completed_at=completed_at,
             submitted=submitted, notes=tuple(notes))
 
-    def _guarded(self, label, operation, *args):
+    def _guarded(self, label, operation, *args, **kwargs):
         """드라이버 조작을 감싼다. 예외는 **종류만** 남기고 결과로 바꾼다.
 
         ⛔ 원문을 그대로 옮기지 않는다 — 드라이버 예외에는 세션 주소 같은 환경 정보가 섞인다.
         """
         try:
-            return operation(*args), None
+            return operation(*args, **kwargs), None
         except Exception as exc:
             return None, f"{label}:{type(exc).__name__}"
 

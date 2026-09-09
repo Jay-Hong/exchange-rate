@@ -1279,7 +1279,11 @@ def _limit_driver_to_deadline(driver, deadline):
 
 
 def _build_selenium_capturer(driver):
-    """운영 조작을 묶어 캡처러를 만든다. 읽기는 기존 시간제한 읽기를 그대로 쓴다."""
+    """운영 조작을 묶어 캡처러를 만든다. 읽기는 기존 시간제한 읽기를 그대로 쓴다.
+
+    읽기 상한은 여기서 한 번만 정해 캡처러에 넘긴다. 캡처러가 남은 예산과 비교해 작은 쪽을
+    주므로, 상수를 읽기 함수와 캡처러 양쪽에 적어 두 값이 갈라지는 일을 만들지 않는다.
+    """
     operations = build_selenium_operations(
         driver, input_selector=INPUT_SELECTOR,
         read_page_source=_read_page_source_bounded,
@@ -1288,6 +1292,7 @@ def _build_selenium_capturer(driver):
         parse=lambda html, *, query_date, reference_time: _parse_ibk_official_response(
             types.SimpleNamespace(text=html),
             query_date=query_date, reference_time=reference_time),
+        read_timeout=SHADOW_PAGE_SOURCE_TIMEOUT,
         **operations,
     )
 
