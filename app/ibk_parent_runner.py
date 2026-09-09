@@ -1,8 +1,10 @@
-"""IBK bootstrap→capture→결과 검증→배타적 계측의 호출 가능한 연결 후보.
+"""IBK bootstrap→capture→결과 검증→배타적 계측.
 
-worker에 명시적으로 주입할 수 있으나 운영 시작 지점은 아직 주입하지 않는다. child adapter와 실제 경보
-dispatcher가 없으므로 deploy 후보가 아니다. event_sink는 비차단 enqueue 포트이며
-True는 큐 접수이지 Telegram 전송 성공이 아니다. 기존 crawler_stats와 중복 집계하지 않는다.
+`IBK_RESULT_PATH_ENABLED` 가 켜졌을 때만 `scheduler` 가 이 객체를 만들어 worker 에 주입한다.
+꺼져 있으면 만들지 않는다. ⛔ 최초 기동과 헬스체크 재시작은 **같은 인스턴스**를 써야 한다 —
+새로 만들면 `cleanup_blocked` 와 경보 억제 상태가 사라진다.
+event_sink는 비차단 enqueue 포트이며 True는 큐 접수이지 Telegram 전송 성공이 아니다.
+기존 crawler_stats와 중복 집계하지 않는다.
 """
 
 import asyncio

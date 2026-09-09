@@ -37,6 +37,7 @@ ADMIN = {
     ("GET", "/admin/api/monitor/current", "get_current_monitor_stats"),
     ("GET", "/admin/api/monitor/history", "get_monitor_history"),
     ("GET", "/admin/api/crawler/stats", "get_crawler_stats"),
+    ("GET", "/admin/api/ibk-result-path", "get_ibk_result_path_status"),
     ("GET", "/admin/api/queue-status", "get_queue_status"),
     ("GET", "/admin/api/redis-status", "get_redis_status"),
     ("GET", "/admin/api/atomic-write-control-status", "get_atomic_write_control_status"),

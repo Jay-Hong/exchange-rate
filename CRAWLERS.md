@@ -446,10 +446,17 @@ MIBANK 값은 DB에 저장하지 않고, 기존 비신뢰 시간대 제한을 �
 선택적 부모 배선, 판정 어댑터, 회귀 가드 순수 함수 추출, 결과 생성기(세션 소유·개장 전
 보존 창·후보 날짜 계획·과거 후보 lookback 까지 연결). 과거 후보를 찾아도 당일 관측으로
 승격하지 않고 PRESERVED 로 접으며, 기대 서비스일은 부모 값을 유지한다.
-(2) *기본 운영 경로 미전환*: `IBK_RESULT_CRAWLER = None`이고 worker는 인자 없이 생성되므로
-IBK를 포함한 모든 은행이 기존 경로로 흐른다. 생성기의 운영 호출자는 없다.
-(3) *후속 작업*: 전체 IBK 실행 흐름 연결, Selenium 안전화, POST-first 정책 전환, 실제 경보 연결.
-이 검증은 로컬 경계에서 이뤄졌고 실제 HTTP·Selenium·운영 PostgreSQL·부모 경보 검증이 아니다.
+(2) *기본 운영 경로 미전환 — 이제 **env 게이트**로 지킨다*: `IBK_RESULT_PATH_ENABLED`
+(기본 `false`). false 면 `IBK_RESULT_CRAWLER = None`, worker 에 부모 미주입, 경보 전달
+객체·스레드 미생성이라 IBK 를 포함한 모든 은행이 기존 경로로 흐른다. **배포가 곧 동작
+변화가 되지 않는다.** true 로 켜면 자식이 `run_ibk_dated_result` 를 바인딩하고 worker 가
+`IbkParentRunner` 를 쓰며 경보 전달이 뜬다. 활성화는 배포와 **분리된 별도 GO** 다.
+⛔ false 로 되돌리면 legacy 의 MIBANK 저장·기존 재시도 정책도 함께 복원된다. **이미 저장된
+데이터는 되돌아가지 않는다.**
+상태 조회: `GET /admin/api/ibk-result-path`(부모 계측 + 경보 전달 지표, 읽기 전용).
+(3) *후속 작업*: 운영 활성화와 그 관찰, POST-first 정책 전환.
+이 검증은 로컬 경계에서 이뤄졌고 실제 HTTP·Selenium·운영 PostgreSQL·Telegram 발송 검증이
+아니다.
 
 **Selenium 검증 관측(shadow) — 판정을 저장에 반영하지 않는다(그러나 공짜는 아니다):**
 `IBK_SELENIUM_VALIDATION_MODE`(`legacy` 기본 / `shadow`)로 켠다. `shadow`는 이미 열린 driver의

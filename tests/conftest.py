@@ -286,7 +286,11 @@ def _no_real_browser():
     #    경로로 들어올 때를 위한 선제 경계이지, 지금 회귀가 잠겨 있다는 뜻이 아니다.
     # ⚠️ 이 가드가 닿는 범위는 **pytest 프로세스 안**이다. hana.py:136 처럼 별도 파이썬
     #    프로세스를 띄우는 경로에는 이 patch 가 전달되지 않는다.
-    targets = [("selenium.webdriver", "Chrome"),
+    # ⛔ 생성만 막으면 부족하다. `cleanup_zombie_chrome_processes()` 는 **이미 떠 있는**
+    #    Chrome 을 psutil 로 훑어 죽인다 — 시험이 그 경로에 닿아 개발자 기계의 브라우저
+    #    렌더러 16개를 종료시킨 적이 있다(2026-09-10 실측). 죽이는 쪽도 함께 막는다.
+    targets = [("app.scheduler", "cleanup_zombie_chrome_processes"),
+               ("selenium.webdriver", "Chrome"),
                ("app.crawlers.utils", "create_selenium_driver"),
                ("app.crawlers.utils", "selenium_driver_context"),
                ("app.crawlers.ibk", "selenium_driver_context")]

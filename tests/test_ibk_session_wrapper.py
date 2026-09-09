@@ -185,14 +185,14 @@ class SessionWrapperTest(unittest.TestCase):
 
         self.assertIsNone(runner.IBK_RESULT_CRAWLER)
 
-    def test_the_wrapper_has_no_direct_operational_reference(self):
-        """'호출자 0' 을 검색 결과가 아니라 **잠금**으로 만든다 — 다만 잠그는 범위는 유한하다.
+    def test_the_wrapper_is_referenced_only_from_the_gated_binding(self):
+        """바인딩됐다. 이제 잠그는 것은 **그 참조가 게이트 뒤 한 곳뿐인가**다.
 
         탐지하는 것: app/·scripts/ 안의 직접 Name·Attribute·import 참조.
         ⛔ 탐지하지 못하는 것: `getattr(ibk, "run_ibk_dated_result")`, `vars(ibk)[...]`,
            `importlib.import_module(...)` 같은 **동적 참조**(실제로 실행해 미탐지 확인).
-           이 시험을 "어떤 연결도 불가능" 으로 읽으면 안 된다 — 통상적인 바인딩을 잡을 뿐이다.
-        바인딩은 별도 단계에서 이 시험을 함께 고치며 이뤄진다.
+           이 시험을 "다른 연결이 불가능" 으로 읽으면 안 된다 — 통상적인 바인딩만 잡는다.
+        ⛔ 참조가 늘면 게이트를 우회하는 경로가 생겼다는 뜻이다. 그 자리에서 멈춰 확인한다.
         """
         import ast
         import pathlib
@@ -214,7 +214,19 @@ class SessionWrapperTest(unittest.TestCase):
                     if hit:
                         references.append(f"{path.relative_to(repo)}:{node.lineno}")
 
-        self.assertEqual(references, [], f"운영 호출자가 생겼다: {references}")
+        # 게이트 뒤 바인딩 한 곳(app/crawlers/runner.py)만 참조한다. 줄 번호는 바뀔 수 있어
+        # 파일 단위로 본다.
+        files = sorted({reference.split(":")[0] for reference in references})
+        self.assertEqual(files, ["app/crawlers/runner.py"],
+                         f"게이트를 우회하는 참조가 생겼다: {references}")
+        self.assertEqual(len(references), 1,
+                         f"한 곳에서만 바인딩한다: {references}")
+
+        # ⛔ 그 한 곳이 **게이트 뒤**인지도 본다. 참조 개수만 세면 게이트를 지우고 무조건
+        #    바인딩해도 통과한다.
+        binding = (repo / "app/crawlers/runner.py").read_text()
+        self.assertIn("IBK_RESULT_PATH_ENABLED", binding,
+                      "바인딩이 게이트를 보지 않는다")
 
 
 if __name__ == "__main__":

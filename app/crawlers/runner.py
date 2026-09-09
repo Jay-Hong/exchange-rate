@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 
 from app.ibk_result_protocol import IbkProtocolError, decode_ibk_result, encode_ibk_result
 from app.ibk_run_context import IbkRunContext
+from app import config
 from app.crawlers import (
     shinhan,
     ibk,
@@ -56,7 +57,13 @@ CRAWLER_MAP = {
 
 # No implicit LegacyResult/None -> OBSERVED adapter. Bind only a separately verified
 # final-result crawler here. Until then the new bootstrap path stops BEFORE DB refresh.
-IBK_RESULT_CRAWLER = None
+#
+# ⛔ 자식은 **자기 프로세스에서** 게이트를 읽는다. 부모가 켜져 있어도 자식이 꺼져 있으면
+#    (배포 중 env 불일치) 자식은 결과를 만들지 않고 어댑터 부재로 끝난다 — 조용히 legacy
+#    결과를 지어내지 않는다.
+IBK_RESULT_CRAWLER = (
+    ibk.run_ibk_dated_result if config.IBK_RESULT_PATH_ENABLED else None
+)
 
 
 def _ibk_result_main(args, result_fd, crawler):

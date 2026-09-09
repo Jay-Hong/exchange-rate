@@ -8,7 +8,11 @@
    하나뿐이라 그럴 수단 자체가 없다. 실패는 계수와 로그로만 남는다.
 ⛔ `sent` 는 **발송 콜러블이 성공을 보고했다**는 뜻뿐이다. 사용자가 그 알림을 봤다는 증거가
    아니다. 전달 계층은 열람을 관측할 수 없다.
-⛔ 이 모듈은 아직 어디에도 배선되지 않았다 — 운영 코드에 생성자 호출이 없다. 배선은 별도 결정이다.
+⛔ 배선은 `start_ibk_result_path()` **한 곳**이 소유한다(`IBK_RESULT_PATH_ENABLED` 게이트 뒤).
+   참조가 퍼지면 누가 `close()` 를 부르는지, 헬스체크 재시작이 같은 객체를 쓰는지가
+   코드에서 안 보인다. 게이트가 꺼져 있으면 이 객체도 소비자 스레드도 만들지 않는다.
+⛔ 이 모듈은 프로세스를 제어하지 않는다 — 그것을 지키는 시험이 **원문 문자열**로 훑으므로
+   여기 산문에 소유자 모듈 이름을 적으면 가드가 산문에 걸린다(실측). 함수 이름으로 가리킨다.
 ⛔ 예외의 문자열·traceback 은 자격증명이 든 요청 URL 을 담을 수 있으므로 종류(type name)만 남긴다.
 """
 
@@ -216,6 +220,8 @@ class IbkNoticeDelivery:
             snapshot = dict(self._counts)
         snapshot["queued"] = self._queue.qsize()
         snapshot["running"] = self.is_running()
+        # ⛔ `running` 만으로는 "꺼 놨다" 와 "떠 있어야 하는데 죽었다" 가 구분되지 않는다.
+        snapshot["enabled"] = self.enabled
         return snapshot
 
     def unsent(self) -> tuple:
@@ -225,7 +231,7 @@ class IbkNoticeDelivery:
 
 
 def build_default_delivery(**kwargs) -> IbkNoticeDelivery:
-    """운영용 조립기 — 호출하는 곳이 아직 없다(배선은 별도 결정).
+    """운영용 조립기 — `start_ibk_result_path()` 가 게이트 뒤에서 부른다.
 
     Telegram 설정을 여기서 읽어 클래스가 env 에 의존하지 않게 한다.
     """

@@ -836,6 +836,10 @@ async def lifespan(app: FastAPI):
         # Selenium Queue Worker 종료
         await scheduler.shutdown_selenium_queue()
 
+        # ⛔ IBK 경보 전달은 **워커를 합류시킨 뒤에** 닫는다. 먼저 닫으면 남은 회차의 경보가
+        #    접수되지 못하고, 부모는 그것을 접수 실패로만 기록한 채 끝난다.
+        await scheduler.shutdown_ibk_result_path()
+
         # 스케줄러 종료
         scheduler.scheduler.shutdown()
 
@@ -1576,6 +1580,25 @@ def get_crawler_stats():
     """
     from app.admin.crawler_stats import crawler_stats
     return crawler_stats.get_stats()
+
+
+@app.get("/admin/api/ibk-result-path", dependencies=[Depends(verify_admin)])
+def get_ibk_result_path_status():
+    """IBK 결과 경로 상태 — 부모 계측과 경보 전달 지표.
+
+    ⛔ `snapshot()`·`stats()` 는 메모리 조회 함수일 뿐이라 **내보내지 않으면 운영자는 못 본다.**
+       runbook 에 함수 이름을 적는 것은 관측 수단이 아니다.
+    ⛔ 읽기 전용이고 절대 던지지 않는다 — 진단 경로가 죽으면 진단이 안 된다.
+
+    꺼져 있으면 `{"enabled": false, "wired": false}` 만 돌려준다. `wired` 는 부모 객체가
+    있다는 뜻이고 worker 생존이 아니다 — 소비자 스레드 상태는 `notice.running` 이 낸다.
+    """
+    try:
+        return scheduler.ibk_result_path_snapshot()
+    except Exception as exc:  # noqa: BLE001 — 진단이 서비스를 깨지 않는다
+        logger.warning("IBK_RESULT_PATH_STATUS_ERROR",
+                       extra={"bank": "ibk", "error_type": type(exc).__name__})
+        return {"enabled": None, "wired": None, "error": "unavailable"}
 
 
 @app.get("/admin/api/queue-status", dependencies=[Depends(verify_admin)])

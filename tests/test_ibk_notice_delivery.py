@@ -20,7 +20,7 @@ import pathlib
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.ibk_notice_delivery import (
     IbkNoticeDelivery,
@@ -458,12 +458,20 @@ class DependencyValidation(unittest.TestCase):
         self.assertEqual(delivery.stats()["rejected_inactive"], 1)
 
 
-class NotWiredYet(unittest.TestCase):
+class TheWiringIsGatedAndOwnedInOnePlace(unittest.TestCase):
+    """배선됐다. 이 클래스가 잠그는 것은 **어디서 소유하는가**와 **꺼져 있을 때 무엇도 만들지
+    않는가**다.
+
+    ⛔ 참조가 여러 곳으로 퍼지면 lifecycle 주인이 흐려진다 — 누가 `close()` 를 부르는지,
+       헬스체크 재시작이 같은 객체를 쓰는지가 코드에서 안 보이게 된다.
+    """
+
     # `scripts` 도 함께 본다 — 부모가 실제로 띄우는 진입점(ibk_subprocess_bootstrap.py)이
     # 거기 있어서 배선이 app 밖에서 일어날 수 있다. 한쪽만 잠그면 보장이 산문보다 좁아진다.
     ROOTS = ("app", "scripts")
+    OWNER = "app/scheduler.py"
 
-    def test_no_production_module_constructs_the_delivery(self):
+    def test_only_the_owner_module_references_the_delivery(self):
         searched, callers = [], []
         for root in self.ROOTS:
             for path in sorted(pathlib.Path(root).rglob("*.py")):
@@ -475,7 +483,205 @@ class NotWiredYet(unittest.TestCase):
         # 양성 대조 — 검색이 실제로 파일을 훑었는지. 경로가 어긋나면 공허하게 통과한다.
         for root in self.ROOTS:
             self.assertTrue(any(p.parts[0] == root for p in searched), f"{root} 를 훑지 못했다")
-        self.assertEqual(callers, [], f"배선은 별도 결정이다 — 지금 참조하는 곳: {callers}")
+        self.assertEqual(callers, [self.OWNER],
+                         f"소유는 한 곳이어야 한다 — 지금 참조하는 곳: {callers}")
+
+
+class TheGateDecidesWhetherAnythingIsBuilt(unittest.TestCase):
+    """⛔ 꺼져 있으면 **객체도 소비자 스레드도 만들지 않는다.** "만들어 두고 안 쓴다" 는
+    배포가 곧 동작 변화가 되지 않는다는 약속을 깨뜨린다."""
+
+    def setUp(self):
+        from app import scheduler
+
+        self.scheduler = scheduler
+        self.addCleanup(setattr, scheduler, "_ibk_parent", scheduler._ibk_parent)
+        self.addCleanup(setattr, scheduler, "_ibk_notice_delivery",
+                        scheduler._ibk_notice_delivery)
+        scheduler._ibk_parent = None
+        scheduler._ibk_notice_delivery = None
+
+    def test_an_off_gate_builds_nothing(self):
+        from app import config, ibk_notice_delivery
+
+        builder = MagicMock()
+        with patch.object(config, "IBK_RESULT_PATH_ENABLED", False), \
+             patch.object(ibk_notice_delivery, "build_default_delivery", builder):
+            self.assertFalse(self.scheduler.start_ibk_result_path())
+        builder.assert_not_called()
+        self.assertIsNone(self.scheduler._ibk_parent)
+        self.assertIsNone(self.scheduler._ibk_notice_delivery)
+        # ⛔ `wired` 는 부모 객체 유무다. worker 생존이 아니다 — 이름을 `running` 으로 두면
+        #    운영자가 "돌고 있다" 로 읽는다.
+        self.assertEqual(self.scheduler.ibk_result_path_snapshot(),
+                         {"enabled": False, "wired": False})
+
+    def test_an_on_gate_builds_once_and_keeps_the_same_parent(self):
+        """⛔ 두 번째 호출이 새 부모를 만들면 헬스체크 재시작에서 `cleanup_blocked` 와 경보
+        억제 상태가 사라진다."""
+        from app import config, ibk_notice_delivery
+
+        # ⛔ 여기서 `start()` 하지 않는다 — lifecycle 이 시작하는 것이 계약이고, 미리 띄우면
+        #    두 번 시작해 `RuntimeError` 가 난다(실측).
+        delivery = IbkNoticeDelivery(send=lambda text: True)
+        self.addCleanup(delivery.close, 2.0)
+        builder = MagicMock(return_value=delivery)
+        with patch.object(config, "IBK_RESULT_PATH_ENABLED", True), \
+             patch.object(ibk_notice_delivery, "build_default_delivery", builder):
+            self.assertTrue(self.scheduler.start_ibk_result_path())
+            first = self.scheduler._ibk_parent
+            self.assertTrue(self.scheduler.start_ibk_result_path())
+
+        self.assertEqual(builder.call_count, 1, "두 번 만들면 안 된다")
+        self.assertIs(self.scheduler._ibk_parent, first, "같은 부모를 유지해야 한다")
+        snapshot = self.scheduler.ibk_result_path_snapshot()
+        self.assertTrue(snapshot["wired"], "부모 객체가 있다")
+        self.assertIn("parent", snapshot)
+        # 소비자 스레드 생존은 `notice.running` 이 낸다 — `wired` 와 다른 사실이다.
+        self.assertTrue(snapshot["notice"]["running"])
+        self.assertIn("enabled", snapshot["notice"])
+
+    def test_an_assembly_failure_does_not_leave_a_consumer_thread(self):
+        """⛔ 조립에 실패하면 소비자 스레드만 남기고 죽으면 안 된다. 그리고 조용히 legacy 로
+        돌아가지도 않는다 — 예외를 올린다."""
+        from app import config, ibk_notice_delivery
+        from app import ibk_parent_runner
+
+        delivery = IbkNoticeDelivery(send=lambda text: True)
+        self.addCleanup(delivery.close, 2.0)
+        with patch.object(config, "IBK_RESULT_PATH_ENABLED", True), \
+             patch.object(ibk_notice_delivery, "build_default_delivery",
+                          MagicMock(return_value=delivery)), \
+             patch.object(ibk_parent_runner, "IbkParentRunner",
+                          MagicMock(side_effect=RuntimeError("PRIVATE_ASSEMBLY"))):
+            with self.assertRaises(RuntimeError):
+                self.scheduler.start_ibk_result_path()
+
+        self.assertFalse(delivery.is_running(), "띄운 소비자 스레드를 정리해야 한다")
+        self.assertIsNone(self.scheduler._ibk_parent)
+
+
+class ShutdownAlwaysLeavesARecord(unittest.TestCase):
+    """⛔ 소비자가 **정상 종료하면서도** 남은 큐를 발송 없이 폐기할 수 있다
+    (`dropped_at_shutdown`). `close()` 가 True 라고 조용히 넘기면 그 기록이 참조가 사라진
+    객체에만 남아 아무도 못 본다 — 종료 결과는 **스레드 종료 여부와 독립적으로** 남긴다."""
+
+    def setUp(self):
+        from app import scheduler
+
+        self.scheduler = scheduler
+        self.addCleanup(setattr, scheduler, "_ibk_parent", scheduler._ibk_parent)
+        self.addCleanup(setattr, scheduler, "_ibk_notice_delivery",
+                        scheduler._ibk_notice_delivery)
+
+    def _shutdown_with(self, delivery):
+        import asyncio
+
+        self.scheduler._ibk_notice_delivery = delivery
+        self.scheduler._ibk_parent = object()
+        with self.assertLogs("exchange_rate.scheduler", level="INFO") as captured:
+            asyncio.run(self.scheduler.shutdown_ibk_result_path())
+        return captured.records
+
+    def test_a_clean_stop_that_dropped_work_is_still_recorded(self):
+        """⛔ 폐기는 `_stop` 이 선 **뒤 남은 큐**에서만 일어난다. 발송이 빠르면 소비자가
+        먼저 다 보내 버려 이 창이 안 열린다(실측: 폐기 0). 한 건을 붙잡아 둔다."""
+        import time as _time
+
+        def slow_send(text):
+            _time.sleep(0.2)
+            return True
+
+        delivery = IbkNoticeDelivery(send=slow_send, poll_seconds=0.01)
+        delivery.start()
+        for index in range(2):
+            self.assertTrue(delivery.event_sink(notice(run_id=f"drop{index}")))
+        records = self._shutdown_with(delivery)
+
+        shutdown = [r for r in records if r.getMessage() == "IBK_NOTICE_DELIVERY_SHUTDOWN"]
+        self.assertEqual(len(shutdown), 1, [r.getMessage() for r in records])
+        self.assertTrue(shutdown[0].stopped, "소비자는 정상 종료했다")
+        self.assertGreaterEqual(shutdown[0].dropped_at_shutdown, 1,
+                                "폐기한 회차를 기록해야 한다")
+        self.assertEqual(shutdown[0].levelname, "WARNING",
+                         "폐기가 있으면 경고로 남긴다")
+
+    def test_a_quiet_shutdown_is_recorded_too(self):
+        """양성 대조 — 폐기가 없어도 종료 결과는 남는다(정보 수준)."""
+        delivery = IbkNoticeDelivery(send=lambda text: True)
+        delivery.start()
+        records = self._shutdown_with(delivery)
+
+        shutdown = [r for r in records if r.getMessage() == "IBK_NOTICE_DELIVERY_SHUTDOWN"]
+        self.assertEqual(len(shutdown), 1)
+        self.assertEqual(shutdown[0].dropped_at_shutdown, 0)
+        self.assertEqual(shutdown[0].levelname, "INFO")
+
+
+class TheHealthcheckDoesNotResurrectAWorkerDuringShutdown(unittest.TestCase):
+    """⛔ 헬스체크가 기존 worker 를 합류시키는 `await` **사이에** 종료가 시작될 수 있다.
+    그 뒤에 새 worker 를 만들면 lifespan 이 기다린 객체와 전역 worker 가 달라지고, 새 worker
+    가 부모를 들고 남아 다음 lifespan 과 겹친다.
+
+    ⛔ 진입 시점 한 번만 보면 이 창을 못 막는다 — **합류 뒤에 다시** 봐야 한다.
+    """
+
+    def setUp(self):
+        from app import scheduler
+
+        self.scheduler = scheduler
+        for name in ("selenium_worker_task", "selenium_queue",
+                     "selenium_worker_current_job", "selenium_worker_last_heartbeat",
+                     "_collector_shutdown_initiated"):
+            self.addCleanup(setattr, scheduler, name, getattr(scheduler, name))
+
+    def _run(self, *, shutdown_during_await):
+        import asyncio
+        import time as _time
+
+        scheduler = self.scheduler
+        # ⛔ 헬스체크는 재시작 전에 **실제 Chrome 프로세스를 죽인다.** 막지 않으면 시험이
+        #    개발자 기계의 브라우저를 종료시킨다(실측: 렌더러 16개 종료).
+        killer = patch.object(scheduler, "cleanup_zombie_chrome_processes", MagicMock())
+        killer.start()
+        self.addCleanup(killer.stop)
+
+        async def scenario():
+            scheduler._collector_shutdown_initiated = False
+            scheduler.selenium_queue = asyncio.PriorityQueue(maxsize=1)
+            scheduler.selenium_worker_current_job = "ibk"      # 작업 처리 중으로 보이게
+            scheduler.selenium_worker_last_heartbeat = _time.time() - 999   # 멈춤 판정
+
+            async def stuck():
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    if shutdown_during_await:
+                        # ⛔ 합류를 기다리는 **그 사이에** 종료가 시작된 상황.
+                        scheduler._collector_shutdown_initiated = True
+                    raise
+
+            original = asyncio.get_event_loop().create_task(stuck())
+            # ⛔ **한 번 돌려 놓고** 취소해야 한다. 시작 전에 취소하면 코루틴 본문이 아예
+            #    실행되지 않아 `except CancelledError` 가 돌지 않는다 — 그러면 이 시험이
+            #    노리는 "합류 사이에 종료가 시작되는" 창이 열리지 않는다(실측).
+            await asyncio.sleep(0)
+            self.assertFalse(original.done(), "양성 대조 — 기존 worker 가 살아 있다")
+            scheduler.selenium_worker_task = original
+            await scheduler.check_worker_health()
+            return original, scheduler.selenium_worker_task
+
+        return asyncio.run(scenario())
+
+    def test_a_shutdown_that_starts_during_the_join_cancels_the_restart(self):
+        original, current = self._run(shutdown_during_await=True)
+        self.assertIs(current, original, "종료 중에는 새 worker 를 만들지 않는다")
+
+    def test_without_a_shutdown_the_worker_is_restarted(self):
+        """양성 대조 — 이게 없으면 위 시험이 '재시작 자체가 없어서' 통과해도 모른다."""
+        original, current = self._run(shutdown_during_await=False)
+        self.assertIsNot(current, original, "정상 상황에서는 재시작한다")
+        current.cancel()
 
 
 class TheParentSuppressesAfterAcceptance(unittest.TestCase):

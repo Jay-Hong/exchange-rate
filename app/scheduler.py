@@ -410,11 +410,115 @@ async def execute_with_timeout(bank_name: str) -> bool:
 # ═════════════════════════════════════════════════════════════
 # AsyncIO PriorityQueue Worker (Selenium 크롤러 순차 실행)
 # ═════════════════════════════════════════════════════════════
+#: IBK 결과 경로의 부모와 경보 전달. **scheduler 가 소유하고 lifespan 이 시작·종료를 부른다.**
+#:
+#: ⛔ 최초 기동과 헬스체크 재시작이 **같은 부모**를 써야 한다. 재시작 때 새로 만들면
+#:    `cleanup_blocked` 와 경보 억제 상태가 사라져, 정리를 확인하지 못한 회차 뒤에도 다시
+#:    자식을 띄우고 같은 문제로 경보를 반복한다.
+#: ⛔ 게이트가 꺼져 있으면 **객체도 스레드도 만들지 않는다**. "만들어 두고 안 쓴다" 는 배포가
+#:    곧 동작 변화가 되지 않는다는 약속을 깨뜨린다.
+_ibk_parent = None
+_ibk_notice_delivery = None
+
+
+def start_ibk_result_path():
+    """게이트가 켜졌을 때만 경보 전달과 부모를 만든다. 켜졌는지를 돌려준다.
+
+    ⛔ **워커보다 먼저** 불러야 한다. 워커가 먼저 뜨면 그 사이 들어온 작업이 부모 없이
+       legacy 로 처리된다.
+    ⛔ 조립에 실패하면 **조용히 legacy 로 돌아가지 않는다**. 이미 띄운 소비자 스레드를
+       정리하고 예외를 올린다 — 켜 뒀다고 믿은 채 꺼져 있는 상태가 가장 나쁘다.
+    """
+    global _ibk_parent, _ibk_notice_delivery
+
+    if not config.IBK_RESULT_PATH_ENABLED:
+        return False
+    if _ibk_parent is not None:
+        return True                      # 이미 소유하고 있다 — 상태를 버리지 않는다
+
+    from app.ibk_notice_delivery import build_default_delivery
+    from app.ibk_parent_runner import IbkParentRunner
+
+    delivery = build_default_delivery()
+    delivery.start()
+    try:
+        parent = IbkParentRunner(event_sink=delivery.event_sink)
+    except BaseException:
+        # 소비자 스레드만 남기고 죽지 않는다.
+        try:
+            delivery.close(timeout=2.0)
+        except BaseException:  # noqa: BLE001 — 원래 예외를 가리지 않는다
+            logger.exception("IBK 경보 전달 정리 실패", extra={"bank": "ibk"})
+        raise
+    _ibk_notice_delivery, _ibk_parent = delivery, parent
+    logger.info("IBK_RESULT_PATH_STARTED", extra={
+        "bank": "ibk", "notice_enabled": delivery.stats().get("enabled"),
+        "notice_running": delivery.stats().get("running")})
+    return True
+
+
+async def shutdown_ibk_result_path():
+    """경보 전달을 닫는다. **워커를 합류시킨 뒤에** 부른다.
+
+    ⛔ `close()` 는 동기 `join()` 이다. loop 에서 그대로 부르면 그 시간만큼 이벤트 루프가
+       멈춘다 — 스레드로 보내고 유한 대기한다.
+    ⛔ 드레인하지 못한 것은 **기록한다**. 조용히 넘기면 못 보낸 경보가 흔적 없이 사라진다.
+    """
+    global _ibk_parent, _ibk_notice_delivery
+
+    delivery, _ibk_notice_delivery, _ibk_parent = _ibk_notice_delivery, None, None
+    if delivery is None:
+        return
+    try:
+        # ⛔ 반환값은 **소비자 스레드가 시간 안에 끝났는지**다. 발송 성공 여부가 아니다.
+        stopped = await asyncio.to_thread(delivery.close, 5.0)
+    except BaseException:  # noqa: BLE001 — 종료 경로라 재전파하지 않는다
+        logger.exception("IBK 경보 전달 종료 실패", extra={"bank": "ibk"})
+        return
+    # ⛔ 종료 결과를 **스레드 종료 여부와 독립적으로** 남긴다. 소비자는 정상 종료하면서도
+    #    남은 큐를 **발송 없이 폐기**할 수 있다(`dropped_at_shutdown`). `stopped` 가 True 라고
+    #    조용히 넘기면 그 폐기 기록이 참조가 사라진 객체에만 남아 아무도 못 본다(실측:
+    #    accepted=2 / sent=1 / dropped_at_shutdown=1 인데 종료 로그 0건).
+    # ⛔ `unsent()` 는 **최종 실패 이력**(최대 20건)이지 남은 작업이 아니다. 큐 잔량과 따로 적는다.
+    stats = delivery.stats()
+    dropped = stats.get("dropped_at_shutdown") or 0
+    abandoned = stats.get("abandoned_at_shutdown") or 0
+    record = {"bank": "ibk", "stopped": stopped,
+              "queued": stats.get("queued"),
+              "sent": stats.get("sent"),
+              "dropped_at_shutdown": dropped,
+              "abandoned_at_shutdown": abandoned,
+              "send_failed_final": stats.get("send_failed_final"),
+              "final_failure_history": len(delivery.unsent())}
+    if not stopped or dropped or abandoned:
+        logger.warning("IBK_NOTICE_DELIVERY_SHUTDOWN", extra=record)
+    else:
+        logger.info("IBK_NOTICE_DELIVERY_SHUTDOWN", extra=record)
+
+
+def ibk_result_path_snapshot():
+    """운영자가 조회할 수 있는 지표. 꺼져 있으면 그 사실만 돌려준다.
+
+    ⛔ `snapshot()`·`stats()` 는 메모리 조회 함수일 뿐이라, 어딘가에서 **내보내지 않으면**
+       운영자는 못 본다. runbook 에 함수 이름을 적는 것은 관측 수단이 아니다.
+    """
+    # ⛔ `wired` 는 **부모 객체가 있다**는 뜻이지 worker 가 살아 있다는 뜻이 아니다. 둘을
+    #    한 이름으로 묶으면 운영자가 "돌고 있다" 로 읽는다. worker 생존은 queue-status 가 낸다.
+    if _ibk_parent is None:
+        return {"enabled": config.IBK_RESULT_PATH_ENABLED, "wired": False}
+    return {"enabled": config.IBK_RESULT_PATH_ENABLED, "wired": True,
+            "parent": _ibk_parent.snapshot(),
+            # `notice.running` 이 소비자 스레드 생존이다.
+            "notice": _ibk_notice_delivery.stats() if _ibk_notice_delivery else None,
+            "final_failures": list(_ibk_notice_delivery.unsent())
+            if _ibk_notice_delivery else []}
+
+
 async def selenium_job_executor(*, ibk_parent=None):
     """우선순위 Queue Worker. IBK 결과 처리기는 명시적으로 주입할 때만 사용한다.
 
-    현재 시작 지점은 인자 없이 호출하므로 기존 경로다. 최종 IBK adapter·경보 검증
-    전에는 기본 바인딩을 바꾸지 않는다. typed 결과의 실패 집계와 재등록은 분리한다.
+    시작 지점은 `IBK_RESULT_PATH_ENABLED` 가 켜졌을 때만 부모를 주입한다(꺼져 있으면
+    `ibk_parent=None` 이라 기존 경로 그대로다). typed 결과의 실패 집계와 재등록은 분리한다.
     """
     global selenium_queue, selenium_worker_last_heartbeat, selenium_worker_current_job
     logger.info("🔧 Selenium Priority Queue Worker 시작")
@@ -578,9 +682,13 @@ def init_selenium_queue():
     # - 메모리 절약 + 과도한 작업 누적 방지
     selenium_queue = asyncio.PriorityQueue(maxsize=25)
 
+    # ⛔ 경보 전달을 **워커보다 먼저** 띄운다. 순서가 뒤집히면 그 사이 회차가 부모 없이
+    #    legacy 로 처리된다.
+    start_ibk_result_path()
+
     # Worker 시작 (백그라운드에서 계속 실행)
     loop = asyncio.get_event_loop()
-    selenium_worker_task = loop.create_task(selenium_job_executor())
+    selenium_worker_task = loop.create_task(selenium_job_executor(ibk_parent=_ibk_parent))
     logger.info("✅ Selenium Priority Queue 시스템 초기화 완료")
 
 
@@ -1415,6 +1523,11 @@ async def check_worker_health():
         if selenium_worker_task is None or selenium_queue is None:
             return
 
+        # ⛔ 종료가 시작됐으면 되살리지 않는다. 살려 두면 lifespan 이 워커를 합류시킨 뒤에
+        #    새 워커가 부모를 들고 남아, 다음 lifespan 과 겹친다.
+        if _collector_shutdown_initiated:
+            return
+
         # ═════════════════════════════════════════════════════════════
         # Worker가 Queue 대기 중일 때는 정상 상태 (작업 없음)
         # ═════════════════════════════════════════════════════════════
@@ -1449,9 +1562,18 @@ async def check_worker_health():
             except asyncio.CancelledError:
                 pass
 
-            # Worker 재시작
+            # ⛔ 합류 **뒤에 다시** 본다. 위 `await` 사이에 종료가 시작돼 lifespan 이 같은
+            #    task 를 합류시켰을 수 있다 — 그 뒤 새로 만들면 shutdown 이 기다린 객체와
+            #    전역 worker 가 달라지고, 새 worker 가 부모를 들고 남는다.
+            if _collector_shutdown_initiated:
+                logger.info("Selenium Worker 재시작 취소 — 종료 진행 중")
+                return
+
+            # Worker 재시작 — ⛔ **같은 부모**를 넘긴다. 새로 만들면 `cleanup_blocked` 와
+            #    경보 억제 상태가 사라진다.
             loop = asyncio.get_event_loop()
-            selenium_worker_task = loop.create_task(selenium_job_executor())
+            selenium_worker_task = loop.create_task(
+                selenium_job_executor(ibk_parent=_ibk_parent))
             selenium_worker_last_heartbeat = time.time()
             selenium_worker_current_job = None
 

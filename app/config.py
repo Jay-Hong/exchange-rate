@@ -150,6 +150,17 @@ USDT_WS_GOPAX_ENABLED = os.getenv("USDT_WS_GOPAX_ENABLED", "false").lower() == "
 # fresh 재시작(start_*). ①(silent-stale reconnect)은 살아있는 task 안의 reconnect라
 # task-death 미커버 → 본 supervisor가 마지막 안전망.
 USDT_WS_SUPERVISOR_ENABLED = os.getenv("USDT_WS_SUPERVISOR_ENABLED", "false").lower() == "true"
+
+# IBK_RESULT_PATH_ENABLED: IBK 결과 프로토콜 경로(자식 크롤러 바인딩 + 부모 계측 + 경보 전달)
+#   토글. **기본 false — 배포가 곧 동작 변화가 되지 않는다.**
+#   false: `IBK_RESULT_CRAWLER` 는 `None` 이고 worker 에 부모를 주입하지 않으며 경보 전달
+#          객체·스레드를 **만들지 않는다**. 현재 legacy 경로 그대로다.
+#   true : 자식이 `run_ibk_dated_result` 를 바인딩하고, worker 가 `IbkParentRunner` 를 쓰고,
+#          경보 전달이 뜬다.
+#   ⛔ 부모와 자식은 **다른 프로세스**다. 자식은 자기 프로세스에서 이 값을 읽어 바인딩한다.
+#   ⛔ false 로 되돌리면 legacy 의 MIBANK 저장·기존 재시도 정책도 함께 복원된다. **이미 저장된
+#      데이터는 되돌아가지 않는다.**
+IBK_RESULT_PATH_ENABLED = os.getenv("IBK_RESULT_PATH_ENABLED", "false").lower() == "true"
 # supervisor watchdog 주기 (초). done() 체크는 무비용이라 30s면 복구 지연 충분.
 USDT_WS_SUPERVISOR_INTERVAL_SECONDS = int(os.getenv("USDT_WS_SUPERVISOR_INTERVAL_SECONDS", "30"))
 if USDT_WS_SUPERVISOR_INTERVAL_SECONDS < 1:
