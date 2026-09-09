@@ -3,11 +3,11 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `aef3c5d0948f94877aebe30f181b3e12bafba4f3`
+- server 기준 commit: `e98406f2e2649e189c7d1adee49bab30c3407ada`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `509f0f3dfdc2c9434d4ff7971139a6b1617b8d0b666dfe1b3f67168c7b37d058`
-- baseline SHA: `7cad459bc03f9fa2a71abe165a689b9309caa00bd15947592e92904d20637984`
+- manifest SHA: `8313e99bc1a199021372680c0c69d7e3230995d55f367b089d708797e0b60555`
+- baseline SHA: `40977d20c51a8cf027520e771f8b8e80aeed1d973b32ca4cc4427fa991b268b9`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > **이 문서의 몫**: 클라이언트가 **구조적으로 판별할 수 없는** publisher 침묵을 무엇으로 덮는가 —
@@ -37,14 +37,14 @@
 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT
 coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초
 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다
-(`app/scheduler.py:1537-1543` · `app/main.py:976-999`).
+(`app/scheduler.py:1659-1665` · `app/main.py:980-1003`).
 
 **구멍이 어디서 생기는가.** LOAD-S3 구현으로 initial snapshot의 deadline·transient/fatal build
 실패는 1013/1011 close로 바뀌어 더는 조용하지 않다(baseline D3). 다만 builder가 `None`을 반환하는
 경로는 연결을 유지한 채 skip하므로([R-HAND-1](topic-snapshot-handoff.md#r-hand-1)), **연결·pong·ack·
 lease가 전부 정상인데 snapshot이 한 번도 오지 않는 상태**는 아직 표현된다. 그 뒤 **정상 발행되던
 publisher가 죽는 경우**도 침묵으로만 관측된다 — publisher 모듈에는 timer가 없고(baseline B1),
-외부 caller도 변경이 있을 때만 publish한다(`app/main.py:976-999`). transport ping/pong은 **연결
+외부 caller도 변경이 있을 때만 publish한다(`app/main.py:980-1003`). transport ping/pong은 **연결
 생존만** 증명하지 특정 topic publisher의 생존을 증명하지 않는다.
 
 코드 근거: baseline **B1**(data-plane heartbeat·주기적 재발행 부재) · **D3**(실패는 close,
@@ -73,7 +73,7 @@ publisher가 죽는 경우**도 침묵으로만 관측된다 — publisher 모�
 [R-DEC-2](../DECISIONS.md#r-dec-2) 의 `[제안·결정 대기]` **파생 숫자 숨김 정책** 제안의 채택
 여부와 **무관하다**.
 판별 불가의 코드 근거: baseline **D3**(`None` snapshot을 연결 유지 상태로 skip)
-· **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:976-999`(외부 caller 도 변경 시에만 publish).
+· **B1**(publisher 모듈 내부 timer 부재) · `app/main.py:980-1003`(외부 caller 도 변경 시에만 publish).
 
 **시장 세션을 반영한 _인과 기반_ publisher health / SLO** + **수치화된 탐지·대응 시간**
 

@@ -3,11 +3,11 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `aef3c5d0948f94877aebe30f181b3e12bafba4f3`
+- server 기준 commit: `e98406f2e2649e189c7d1adee49bab30c3407ada`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `509f0f3dfdc2c9434d4ff7971139a6b1617b8d0b666dfe1b3f67168c7b37d058`
-- baseline SHA: `7cad459bc03f9fa2a71abe165a689b9309caa00bd15947592e92904d20637984`
+- manifest SHA: `8313e99bc1a199021372680c0c69d7e3230995d55f367b089d708797e0b60555`
+- baseline SHA: `40977d20c51a8cf027520e771f8b8e80aeed1d973b32ca4cc4427fa991b268b9`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 > 이 문서가 소유하는 것은 **재검증(재구독)이 만드는 동시 부하** 하나다.
@@ -93,10 +93,10 @@ I/O 상한 · 서버 실패 cooldown).
 순차 순회한다. `app/topic_initial_snapshot.py:497-838`의 LOAD-S5/S6/S7 래퍼는 같은
 `(topic, generation, supported, enabled)` key를 shared build 하나로 합치고 성공 결과만 최대 1초
 cache하며, waiter마다 별도 payload 복사본과 요청 예산을 유지한다. 새 shared flight는
-`app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는
+`app/config.py:661-671`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리고, 실제 worker는
 `app/topic_initial_snapshot.py:841-895`에서 독립된 shared 예산과 S3 checkpoint·S2 I/O 상한을
 그대로 쓴다. transient build 실패는 exact key에 기본 1초 cooldown을 arm하고, 그동안 후속 요청은
-flight·admission·builder를 시작하지 않는다(`app/config.py:663-670` ·
+flight·admission·builder를 시작하지 않는다(`app/config.py:674-681` ·
 `app/topic_initial_snapshot.py:651-709` · `app/topic_initial_snapshot.py:733-817`). fatal·영구 DB
 오류와 caller 취소, admission 대기 deadline은 cooldown 대상이 아니다. **E2-inf [추론]** ⇒ 연결당
 topic 순회는 여전히 **순차**지만 같은 key의 요청은 shared task 하나에 합류하고 새 shared task의

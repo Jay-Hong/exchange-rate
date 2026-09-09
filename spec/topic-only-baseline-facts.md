@@ -29,7 +29,7 @@
 - **A1 [코드]** `exchange-rate/app/legacy_policy.py:35` — `LEGACY_RATE_SOURCES` = investing + 은행 9곳.
   같은 파일 docstring 에 doctest: `should_include_source_in_legacy_rates("upbit","usdt-krw") → False`.
   ⇒ legacy 에 USDT 거래소·KRX 없음.
-- **A2 [코드]** `exchange-rate/app/main.py:1317-1323` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
+- **A2 [코드]** `exchange-rate/app/main.py:1321-1327` — `/api/rates/{currency}` 가 usdt-krw 에 410 + `use_topic`.
   KRX·미등록 asset 은 **generic 404** 로 수렴한다(익명이 상품 존재·topic 이름을 열거할 수 없다, 2026-08-23).
 
 ## B. publish 의미론
@@ -55,7 +55,7 @@
 
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
-  stage 정의·엄격 파서·코드 기본값 `app/config.py:741-784` · **정책 정본**
+  stage 정의·엄격 파서·코드 기본값 `app/config.py:752-795` · **정책 정본**
   `app/topic_policy.py:237-275`(`plan_anonymous`) · 그 위임 wrapper
   `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:620-648` ·
   production 주입 `app/main.py:342-350`.
@@ -77,8 +77,8 @@
 - **C2 [코드]** `app/topic_initial_snapshot.py:354` — `per_user_gated_snapshot_topics()`.
   entitlement 전용 snapshot 판정 대상은 **KRX 뿐**이다. 이 집합은 FX/USDT premium 범위를
   나타내지 않는다.
-- **C3 [코드]** `exchange-rate/app/main.py:3207` `@app.get("/api/v2/topics/snapshot")` —
-  `app/main.py:3249` `verify_firebase_token(request)` → `app/main.py:3252`
+- **C3 [코드]** `exchange-rate/app/main.py:3263` `@app.get("/api/v2/topics/snapshot")` —
+  `app/main.py:3305` `verify_firebase_token(request)` → `app/main.py:3308`
   `require_premium(user_id, allow_empty=False)`. ⇒ REST twin 은 premium 을 **코드로 강제**한다.
   ⚠️ 초안은 이걸 [결정]으로 적어 "현재 구현 상태" 절에 뒀는데 **분류가 어긋났다** — 코드 사실이다.
 - **C4 [코드]** `app/topic_policy.py:78-85` — 인가 **정책표**(리터럴). 비-KRX = `PREMIUM_ONLY`,
@@ -130,13 +130,13 @@
   `for topic in topics: ... payload = await build_snapshot_observed(topic, budget=request_budget)`. 그 공유 래퍼가
   `app/topic_initial_snapshot.py:497-838` 에서 같은 topic generation의 동시 요청을 shared build 하나로
   합치고 성공 결과만 최대 1초 cache한다. 새 shared flight는
-  `app/config.py:650-660`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리며, join/cache hit는
+  `app/config.py:661-671`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리며, join/cache hit는
   slot을 쓰지 않는다. transient build 실패는 같은 exact key에서 기본 1초 동안 새 build를 억제한다
-  (`app/config.py:663-670` · `app/topic_initial_snapshot.py:651-709` ·
+  (`app/config.py:674-681` · `app/topic_initial_snapshot.py:651-709` ·
   `app/topic_initial_snapshot.py:733-817`). 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서
   독립된 shared 예산으로 `asyncio.to_thread(..., _run_snapshot_worker, topic, request_budget)`를
   감싼다 — **REST twin도 같은 single-flight·worker 래퍼를 쓴다**
-  (`app/main.py:3272-3273`).
+  (`app/main.py:3327-3330`).
   **E2-inf [추론]** ⇒ 연결당 topic 순회는 **순차**지만, 같은 key의 요청은 shared task 하나에
   합류하고 새 shared task의 admission 점유는 기본 4다. 서버 transient 실패의 즉시 재진입은
   cooldown으로 억제되지만 대기 **시간**만 bounded이고 queue 개수 hard cap은 없다. 기본 1초와
