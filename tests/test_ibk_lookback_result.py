@@ -53,6 +53,15 @@ class LookbackResultTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
+
+        # ⛔ 안전망이 **진짜 크롬을 띄우지 않게** 막는다. 막지 않으면 예산이 남는 사례마다
+        #    드라이버 생성이 일어나 시험이 26초로 늘어난다(실측). 브라우저가 필요한 사례는
+        #    각자 명시적으로 주입한다.
+        driver_guard = patch.object(
+            ibk, "selenium_driver_context",
+            side_effect=AssertionError("시험에서 드라이버를 띄우면 안 된다"))
+        driver_guard.start()
+        self.addCleanup(driver_guard.stop)
     def _seed(self, when):
         with self.Session() as seed:
             for pair, rate in RATES.items():

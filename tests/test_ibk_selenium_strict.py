@@ -15,9 +15,12 @@ import datetime
 import gzip
 import pathlib
 import unittest
+from unittest.mock import patch
 
 from app.crawlers import ibk
+from app import ibk_selenium_strict as strict_module
 from app.ibk_selenium_strict import (
+    SUBMIT_GUARD_SECONDS,
     ACCEPTED,
     NO_SESSION,
     REJECTED,
@@ -259,6 +262,240 @@ class TheConfirmationWatchesTheDocumentRoot(unittest.TestCase):
         self.assertEqual(capture.verdict, ACCEPTED)
         self.assertEqual(driver.confirm_calls, [8.0],
                          "확인 대기는 한 번, 하나의 예산으로 부른다")
+
+
+class TheAgeAnchorAndTheGuardAnchorAreDifferent(unittest.TestCase):
+    """⛔ 문서 나이는 **항해 시작**(보수적), 제출 가드는 **문서 준비** 기준이다. 둘을 합치면
+    항해가 오래 걸렸을 때 가드가 이미 지난 것으로 계산되어 대기 0초로 제출한다(실측)."""
+
+    def _capture(self, harness, *, page_loaded_at, document_ready_at, now):
+        harness._now = now
+        return harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=page_loaded_at, document_ready_at=document_ready_at)
+
+    def test_the_guard_is_measured_from_the_document_ready_time(self):
+        harness = Harness(FakeDriver(fixture("selenium_stale_typed_not_submitted"),
+                                     "2026.09.01"))
+        # 항해에 8초가 걸렸고 문서는 방금 준비됐다.
+        capture = self._capture(harness, page_loaded_at=900.0, document_ready_at=908.0,
+                                now=908.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
+        self.assertEqual(harness.slept, [SUBMIT_GUARD_SECONDS],
+                         "준비 직후이므로 가드만큼 기다려야 한다")
+
+    def test_merging_the_two_anchors_would_skip_the_guard(self):
+        """같은 상황에서 나이 기준을 가드에 쓰면 대기가 사라진다 — 그게 결함이다."""
+        harness = Harness(FakeDriver(fixture("selenium_stale_typed_not_submitted"),
+                                     "2026.09.01"))
+        capture = self._capture(harness, page_loaded_at=900.0, document_ready_at=900.0,
+                                now=908.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
+        self.assertEqual(harness.slept, [], "전제 — 합치면 대기가 없다")
+
+    def test_the_age_still_uses_the_navigation_start(self):
+        """가드를 분리해도 나이는 보수적으로 남는다 — 항해 시간도 나이에 포함된다."""
+        harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.04"))
+        capture = self._capture(harness, page_loaded_at=900.0, document_ready_at=965.0,
+                                now=965.0)
+        self.assertEqual(capture.verdict, UNAVAILABLE)
+        self.assertEqual(capture.reason, "page_too_old", "나이는 항해 시작 기준이다")
+
+
+class TheDeadlineIsConsumedInsideTheCapture(unittest.TestCase):
+    """⛔ 가드 대기가 기한을 넘길 수 있다 — 대기 뒤에 다시 보지 않으면 기한 1000 에 1002.5
+    에서 제출·읽기를 하고 `accepted` 가 나온다(실측)."""
+
+    def _harness(self, now):
+        harness = Harness(FakeDriver(fixture("selenium_stale_typed_not_submitted"),
+                                     "2026.09.01"))
+        harness._now = now
+        return harness
+
+    def test_a_guard_wait_that_crosses_the_deadline_stops_before_submitting(self):
+        """가드 대기가 기한을 넘기면 **대기를 시작하기도 전에** 접는다 — 기다린 뒤 접으면
+        그 시간만큼 부모 제한을 더 먹는다."""
+        harness = self._harness(999.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=999.0, document_ready_at=999.0, deadline=1000.0)
+        self.assertEqual(capture.verdict, UNAVAILABLE)
+        self.assertEqual(capture.reason, "deadline_passed:before_guard")
+        self.assertEqual(harness.slept, [])
+        self.assertEqual(harness.driver.submits, 0)
+        self.assertEqual(harness.driver.page_source_reads, 0)
+
+    def test_without_a_deadline_the_capture_behaves_as_before(self):
+        """양성 대조 — 기한을 주지 않으면 기존 흐름 그대로다."""
+        harness = self._harness(999.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=999.0, document_ready_at=999.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
+
+    def test_a_late_submit_does_not_start_a_fresh_confirm_wait(self):
+        """⛔ 제출이 늦게 반환하면 잔여가 없는데도 설정 상한 10초를 그대로 넘겨 새 대기를
+        시작했다(실측). 확인 대기도 공유 기한을 따라야 한다."""
+        harness = self._harness(999.0)
+        given = []
+        harness.wait_replaced = lambda root, timeout: given.append(timeout) or True
+        harness.submit = lambda element, text: harness.__setattr__("_now", 1019.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=995.0, document_ready_at=995.0, deadline=1000.0)
+        self.assertEqual(given, [], "잔여가 없으면 확인 대기를 시작하지 않는다")
+        self.assertEqual(capture.reason, "deadline_passed:before_confirm")
+
+    def test_a_clock_that_moves_between_check_and_budget_never_yields_a_negative_wait(self):
+        """⛔ 만료 검사와 예산 계산에서 시계를 각각 읽으면 그 사이 시간이 흘러 **음수 예산**이
+        전달된다. WebDriverWait(timeout=0) 도 조건을 한 번 평가하므로 어댑터 하한이 막지 못한다."""
+        harness = self._harness(995.0)
+        given = []
+        harness.wait_replaced = lambda root, timeout: given.append(timeout) or True
+
+        # 확인 블록이 시계를 처음 읽는 시점이 **여섯 번째** 읽기다(진입 나이·준비 시각·가드
+        # 계산·제출 기준·제출 직전 검사 다섯 번 뒤). 그 읽기를 기한 직전 999 로 맞춰 만료
+        # 검사를 **통과시키고**, 그 다음 읽기부터 기한을 넘겨 둔다. 시계를 한 번만 읽는
+        # 구현은 잔여 1 초를 그대로 쓰고, 두 번 읽는 구현은 두 번째 읽기에서 -19 를 만든다.
+        reads = {"n": 0}
+
+        def creeping():
+            reads["n"] += 1
+            if reads["n"] < 6:
+                return 995.0
+            return 999.0 if reads["n"] == 6 else 1019.0
+
+        harness.monotonic = creeping
+        harness.capturer(staleness_timeout=10.0).capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=990.0, document_ready_at=990.0, deadline=1000.0)
+        self.assertEqual(len(given), 1,
+                         f"만료 검사를 통과했으면 확인 대기를 한 번 시작한다: {given}")
+        self.assertGreater(given[0], 0, f"음수·0 예산을 넘겼다: {given}")
+        self.assertLessEqual(given[0], 1.0 + 1e-9, f"잔여를 넘겼다: {given}")
+
+    def test_the_confirm_wait_gets_no_more_than_the_remaining(self):
+        """양성 대조 — 잔여가 있으면 시작하되 설정 상한과 잔여 중 작은 값을 준다."""
+        harness = self._harness(996.0)
+        given = []
+        harness.wait_replaced = lambda root, timeout: given.append(timeout) or True
+        harness.capturer(staleness_timeout=10.0).capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=993.0, document_ready_at=993.0, deadline=1000.0)
+        self.assertEqual(len(given), 1)
+        self.assertLessEqual(given[0], 4.0 + 1e-9, f"잔여를 넘겼다: {given}")
+
+    def test_the_exact_deadline_is_already_expired(self):
+        """⛔ `>` 로 두면 시각 == 기한에서 제출·읽기가 그대로 진행돼 accepted 가 된다(실측)."""
+        harness = self._harness(1000.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=1000.0, document_ready_at=1000.0, deadline=1000.0)
+        self.assertEqual(capture.verdict, UNAVAILABLE)
+        self.assertEqual(harness.driver.submits, 0)
+        self.assertEqual(harness.driver.page_source_reads, 0)
+
+    def test_a_guard_wait_that_would_outlast_the_budget_is_not_started(self):
+        harness = self._harness(999.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=999.0, document_ready_at=999.0, deadline=1001.0)
+        self.assertEqual(capture.reason, "deadline_passed:before_guard")
+        self.assertEqual(harness.slept, [], "댈 수 없는 대기를 시작하지 않는다")
+
+    def test_the_exact_deadline_blocks_the_submit_itself(self):
+        """⛔ `>` 로 두면 시각 == 기한에서 **제출이 그대로 진행**된다. 가드 대기가 필요 없는
+        경우라 앞선 검사에 걸리지 않아, 이 지점의 부등호가 유일한 방어다."""
+        harness = self._harness(1000.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=990.0, document_ready_at=990.0, deadline=1000.0)
+        self.assertEqual(capture.reason, "deadline_passed:before_submit")
+        self.assertEqual(harness.slept, [], "전제 — 가드 대기가 필요 없는 상황이다")
+        self.assertEqual(harness.driver.submits, 0)
+
+    def test_a_deadline_with_room_still_completes(self):
+        harness = self._harness(900.0)
+        capture = harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=900.0, document_ready_at=900.0, deadline=1000.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
+
+
+class TheDefaultClockIsAlsoReadWhenCalled(unittest.TestCase):
+    """⛔ 생성자 기본값을 `time.monotonic` 으로 묶으면 **주입하지 않는 경로**에서 모듈 패치가
+    듣지 않는다. 주입 시험만 있으면 그 차이가 안 보인다."""
+
+    def test_the_module_clock_is_used_when_none_is_injected(self):
+        driver = FakeDriver(fixture("http_dated_20260904"), "2026.09.04")
+        capturer = IbkSeleniumStrictCapturer(
+            parse=lambda html, *, query_date, reference_time: ibk._parse_ibk_official_response(
+                _Text(html), query_date=query_date, reference_time=reference_time),
+            served_date=lambda d: d.served, find_input=lambda d: d.element,
+            submit=lambda e, t: None, document_root=lambda d: d.root,
+            read_page_source=lambda d: (d.html, None),
+            wait_replaced=lambda r, t: True, take_alert=lambda d: None)
+        # monotonic 을 **주입하지 않는다** — 모듈 시계를 패치해 그것이 쓰이는지 본다.
+        with patch.object(strict_module.time, "monotonic", lambda: 10_000.0):
+            capture = capturer.capture(
+                driver, query_date=DAY_0904, reference_time=REFERENCE,
+                page_loaded_at=0.0)
+        self.assertEqual(capture.verdict, UNAVAILABLE)
+        self.assertEqual(capture.reason, "page_too_old",
+                         "패치한 시계가 쓰였다면 문서가 낡은 것으로 판정된다")
+
+    def test_a_fresh_document_still_passes_with_the_module_clock(self):
+        """양성 대조 — 기본 시계 경로가 통째로 막힌 것이 아니다."""
+        driver = FakeDriver(fixture("http_dated_20260904"), "2026.09.04")
+        capturer = IbkSeleniumStrictCapturer(
+            parse=lambda html, *, query_date, reference_time: ibk._parse_ibk_official_response(
+                _Text(html), query_date=query_date, reference_time=reference_time),
+            served_date=lambda d: d.served, find_input=lambda d: d.element,
+            submit=lambda e, t: None, document_root=lambda d: d.root,
+            read_page_source=lambda d: (d.html, None),
+            wait_replaced=lambda r, t: True, take_alert=lambda d: None)
+        with patch.object(strict_module.time, "monotonic", lambda: 10_000.0):
+            capture = capturer.capture(
+                driver, query_date=DAY_0904, reference_time=REFERENCE,
+                page_loaded_at=10_000.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
+
+
+class TheReadyAnchorIsValidated(unittest.TestCase):
+    """⛔ NaN·-inf 를 주면 가드 대기가 사라져 **대기 0초로 제출**하고 accepted 가 된다(실측)."""
+
+    @staticmethod
+    def _capture(ready_at):
+        harness = Harness(FakeDriver(fixture("selenium_stale_typed_not_submitted"),
+                                     "2026.09.01"))
+        harness._now = 1000.0
+        return harness, harness.capturer().capture(
+            harness.driver, query_date=DAY_0904, reference_time=REFERENCE,
+            page_loaded_at=1000.0, document_ready_at=ready_at)
+
+    def test_non_finite_ready_times_are_refused(self):
+        for bad in (float("nan"), float("-inf"), float("inf"), "x"):
+            with self.subTest(ready_at=bad):
+                harness, capture = self._capture(bad)
+                self.assertEqual(capture.verdict, UNAVAILABLE)
+                self.assertEqual(capture.reason, "document_ready_at_unusable")
+                self.assertEqual(harness.driver.submits, 0)
+
+    def test_a_ready_time_before_the_navigation_is_refused(self):
+        harness, capture = self._capture(900.0)      # 항해(1000)보다 이르다
+        self.assertEqual(capture.reason, "document_ready_at_unusable")
+
+    def test_a_ready_time_in_the_future_is_refused_before_any_wait(self):
+        """⛔ 미래 준비 시각을 받으면 가드가 그만큼 기다리려 한다 — 준비 4600·현재 1000 에서
+        3603.5초 대기를 요청한 뒤에야 만료를 판정했다(실측)."""
+        harness, capture = self._capture(4600.0)
+        self.assertEqual(capture.reason, "document_ready_at_unusable")
+        self.assertEqual(harness.slept, [], "대기를 요청하기 전에 접어야 한다")
+
+    def test_a_sound_ready_time_still_passes(self):
+        """양성 대조 — 검증이 정상 입력까지 막지 않는다."""
+        harness, capture = self._capture(1000.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
 
 
 class TheConsecutiveSubmitGuardIsHonoured(unittest.TestCase):

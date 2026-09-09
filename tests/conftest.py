@@ -259,6 +259,58 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_path}"
 atexit.register(lambda: os.path.exists(_path) and os.remove(_path))
 
 
+# 2b. 시험이 **실제 브라우저를 띄우지 못하게** 막는다.
+#
+# ⛔ 2026-09-09 실측: IBK 안전망을 배선한 뒤 시험이 진짜 크롬을 띄우고 **은행 사이트를
+#    조회**했다(WebDriver manager 로그로 확인). 시험 시간이 1.5초에서 26초로 늘어난 것이
+#    유일한 신호였다. 파일마다 가드를 기억하는 방식은 새 파일에서 다시 샌다 — 여기서 막는다.
+# ⛔ 브라우저가 필요한 시험은 이 fixture 를 덮어쓰지 말고, 자기 시험 안에서 드라이버 컨텍스트를
+#    **명시적으로 주입**한다. 그래야 "브라우저를 쓰는 시험" 이 코드에 드러난다.
+@pytest.fixture(autouse=True)
+def _no_real_browser():
+    import unittest.mock as _mock
+
+    def _refuse(*args, **kwargs):
+        raise AssertionError(
+            "시험이 실제 브라우저를 띄우려 했다. 드라이버 컨텍스트를 명시적으로 주입하라.")
+
+    # ⛔ 헬퍼 이름만 막으면 **별칭이 통과한다**. hana·woori 는 `from ... import
+    #    create_selenium_driver` 로 자기 모듈에 이름을 박아 두어(hana.py:28 / woori.py:32),
+    #    utils 를 패치해도 그 참조는 원본을 가리킨다(실측: 패치 뒤 두 모듈의 참조 모두 mock
+    #    아님). 원본이 지나는 유일한 브라우저 경계는 utils.py 의 `webdriver.Chrome(...)` 이다.
+    #    그래서 **반드시 통과해야 하는 경계** — 드라이버 설치와 Chrome 생성 — 를 함께 막는다.
+    # ⚠️ hana·woori 의 상위 크롤러 시험은 있지만(test_crawler_failure_telemetry.py)
+    #    `_run_selenium_subprocess_fallback` 을 mock 하므로 별칭에서 원본 드라이버 생성
+    #    함수로 들어가는 경로는 밟지 않는다. 그래서 이 두 항목은 지금 어떤 시험으로도
+    #    판정되지 않는다 — Chrome 항목을 빼도 전체 스위트가 통과한다(실측). 새 시험이 별칭
+    #    경로로 들어올 때를 위한 선제 경계이지, 지금 회귀가 잠겨 있다는 뜻이 아니다.
+    # ⚠️ 이 가드가 닿는 범위는 **pytest 프로세스 안**이다. hana.py:136 처럼 별도 파이썬
+    #    프로세스를 띄우는 경로에는 이 patch 가 전달되지 않는다.
+    targets = [("selenium.webdriver", "Chrome"),
+               ("app.crawlers.utils", "create_selenium_driver"),
+               ("app.crawlers.utils", "selenium_driver_context"),
+               ("app.crawlers.ibk", "selenium_driver_context")]
+    try:
+        import webdriver_manager.chrome  # noqa: F401
+        targets.append(("webdriver_manager.chrome.ChromeDriverManager", "install"))
+    except ImportError:
+        pass
+
+    patches = []
+    for target, attribute in targets:
+        try:
+            patcher = _mock.patch(f"{target}.{attribute}", side_effect=_refuse)
+            patcher.start()
+            patches.append(patcher)
+        except (AttributeError, ModuleNotFoundError, TypeError):
+            pass
+    try:
+        yield
+    finally:
+        for patcher in patches:
+            patcher.stop()
+
+
 # 3. write-mode cache 기본 초기화 (incident 2026-06-21 fix 후속).
 #    fix로 write-mode 미확정(_INITIAL)은 모든 FX writer/mirror가 skip(legacy v1 write 금지 — post-flip
 #    v2 downgrade 방지). 대부분의 writer 테스트는 production steady-state(initialized legacy)를 가정하므로

@@ -66,10 +66,14 @@ class IbkSeleniumStrictCapturer:
 
     def __init__(self, *, parse, served_date, find_input, submit, document_root,
                  read_page_source, wait_replaced, take_alert,
-                 monotonic=time.monotonic, sleep=time.sleep,
+                 monotonic=None, sleep=None,
                  submit_guard_seconds=SUBMIT_GUARD_SECONDS,
                  staleness_timeout=STALENESS_TIMEOUT_SECONDS,
                  max_page_age_seconds=MAX_PAGE_AGE_SECONDS):
+        # ⛔ 기본값을 `time.monotonic` 으로 묶으면 정의 시점의 함수가 박혀 모듈 패치가 듣지
+        #    않는다. 주입이 없으면 **호출 시점에** 모듈 속성을 읽는다.
+        monotonic = monotonic or (lambda: time.monotonic())
+        sleep = sleep or (lambda seconds: time.sleep(seconds))
         deps = (parse, served_date, find_input, submit, document_root,
                 read_page_source, wait_replaced, take_alert, monotonic, sleep)
         if not all(callable(dep) for dep in deps):
@@ -91,12 +95,19 @@ class IbkSeleniumStrictCapturer:
         self._max_page_age_seconds = max_page_age_seconds
 
     def capture(self, driver, *, query_date, reference_time,
-                page_loaded_at) -> IbkSeleniumStrictCapture:
+                page_loaded_at, document_ready_at=None,
+                deadline=None) -> IbkSeleniumStrictCapture:
         """한 세션에서 한 번 관측한다. 어떤 경로로도 저장하지 않는다.
 
-        `page_loaded_at` 은 호출자가 문서를 띄운 monotonic 시각이다. 제출이 필요 없는
-        경우의 신선도는 그 항해에서 오므로, 문서가 오래됐으면 읽지 않고 접는다.
+        `page_loaded_at` 은 **항해를 시작한** monotonic 시각이다 — 문서 나이의 기준이며,
+        보수적이어야 하므로 로딩에 걸린 시간도 나이에 포함된다.
+
+        `document_ready_at` 은 **문서가 준비된** 시각이다 — 연속 제출 가드의 기준이다.
+        페이지 JS 가 `document.ready` 때 `lastD = 그때 + 3초` 를 두므로 가드는 **준비 시각**
+        에서 재야 한다. 둘을 같은 값으로 쓰면 항해가 8초 걸렸을 때 가드가 이미 지난 것으로
+        계산되어 **대기 0초로 제출**한다(실측). 생략하면 `page_loaded_at` 을 쓴다.
         """
+        ready_at = page_loaded_at if document_ready_at is None else document_ready_at
         notes = []
         pending, failed = self._guarded("alert_check", self._take_alert, driver)
         if failed:
@@ -108,6 +119,13 @@ class IbkSeleniumStrictCapturer:
         stale_reason = self._document_age_reason(page_loaded_at)
         if stale_reason:
             return _unavailable(stale_reason, notes)
+        # ⛔ 준비 시각도 쓰기 전에 본다. NaN·-inf 를 주면 가드 대기가 사라져 **대기 0초로
+        #    제출**한다(실측). 항해보다 이른 준비 시각도 성립하지 않는다.
+        # ⛔ 미래의 준비 시각을 받으면 가드가 그만큼 기다리려 한다 — 준비 4600·현재 1000 에서
+        #    **3603.5초 대기**를 요청한 뒤에야 만료를 판정했다(실측).
+        if (type(ready_at) not in (int, float) or not math.isfinite(ready_at)
+                or not (page_loaded_at <= ready_at <= self._monotonic())):
+            return _unavailable("document_ready_at_unusable", notes)
 
         # ⛔ 요소의 `get_attribute("value")` 를 쓰면 안 된다 — Selenium 은 input 에서
         #    **property 를 우선 반환**하므로, 입력만 되고 제출되지 않은 값이 그대로 나온다
@@ -123,7 +141,8 @@ class IbkSeleniumStrictCapturer:
         submitted = False
         document_at = page_loaded_at
         if served != expected:
-            outcome = self._submit_and_confirm(driver, expected, page_loaded_at, notes)
+            outcome = self._submit_and_confirm(driver, expected, ready_at, notes,
+                                               deadline=deadline)
             if isinstance(outcome, IbkSeleniumStrictCapture):
                 return outcome
             submitted, document_at = True, outcome
@@ -138,6 +157,8 @@ class IbkSeleniumStrictCapturer:
         if stale_reason:
             return _unavailable(stale_reason, notes, submitted=submitted)
 
+        if deadline is not None and self._monotonic() >= deadline:
+            return _unavailable("deadline_passed:before_read", notes, submitted=submitted)
         read, failed = self._guarded("page_source", self._read_page_source, driver)
         if failed:
             return _unavailable(failed, notes, submitted=submitted)
@@ -193,7 +214,8 @@ class IbkSeleniumStrictCapturer:
             return "page_too_old"
         return None
 
-    def _submit_and_confirm(self, driver, expected, page_loaded_at, notes):
+    def _submit_and_confirm(self, driver, expected, document_ready_at, notes,
+                            *, deadline=None):
         """제출하고 **문서가 실제로 교체됐는지** 확인한다.
 
         성공하면 **제출 직전** monotonic 시각을 돌려준다. 새 문서는 제출 이후에 생기므로
@@ -217,7 +239,10 @@ class IbkSeleniumStrictCapturer:
         if element is None:
             return _unavailable("input_absent", notes)
 
-        waited = self._submit_guard_seconds - (self._monotonic() - page_loaded_at)
+        waited = self._submit_guard_seconds - (self._monotonic() - document_ready_at)
+        if deadline is not None and waited > 0 and self._monotonic() + waited >= deadline:
+            # 필요한 가드 대기가 남은 예산을 넘는다 — 기다리지 않고 접는다.
+            return _unavailable("deadline_passed:before_guard", notes)
         if waited > 0:
             # 페이지 JS 의 연속 제출 가드. 기다리지 않으면 경고 대화상자로 세션이 막힌다.
             self._sleep(waited)
@@ -225,6 +250,10 @@ class IbkSeleniumStrictCapturer:
 
         # 새 문서 나이의 보수적 기준. 문서는 이 시점 **이후**에 생긴다.
         submitted_at = self._monotonic()
+        # ⛔ 가드 대기가 기한을 넘길 수 있다 — 대기 **뒤에** 다시 본다. 안 보면 기한이 지난
+        #    뒤에도 제출하고 읽는다(실측: 기한 1000 에 1002.5 에서 제출·읽기 후 accepted).
+        if deadline is not None and self._monotonic() >= deadline:
+            return _unavailable("deadline_passed:before_submit", notes)
         _, failed = self._guarded("submit_failed", self._submit, element, expected)
         if failed:
             return _unavailable(failed, notes)
@@ -238,10 +267,21 @@ class IbkSeleniumStrictCapturer:
                 UNAVAILABLE, reason="submit_blocked_by_alert",
                 notes=tuple(notes + [_short(blocked)]))
 
+        # ⛔ 확인 대기도 공유 기한을 따른다. 제출이 늦게 반환하면 잔여가 없는데도 설정 상한
+        #    10초를 그대로 넘겨 새 대기를 시작했다(실측).
+        # ⛔ 잔여를 **한 번 읽어 그 값을 검사하고 재사용**한다. 검사와 계산에서 시계를 각각
+        #    읽으면 그 사이 시간이 흘러 음수 예산이 전달된다 — `WebDriverWait(timeout=0)` 도
+        #    조건을 한 번 평가하므로 어댑터의 하한이 그것을 막지 못한다.
+        confirm_budget = self._staleness_timeout
+        if deadline is not None:
+            remaining = deadline - self._monotonic()
+            if remaining <= 0:
+                return _unavailable("deadline_passed:before_confirm", notes)
+            confirm_budget = min(confirm_budget, remaining)
         # 확인용 예산은 **하나**다. 루트 교체 대기와 새 문서 준비 대기가 각자 상한을 쓰면
         # 예산이 두 배가 된다 — 어댑터가 이 하나를 나눠 쓴다.
         replaced, failed = self._guarded("confirm_failed", self._wait_replaced,
-                                         root, self._staleness_timeout)
+                                         root, confirm_budget)
         if failed:
             return _unavailable(failed, notes)
         if not replaced:

@@ -25,6 +25,15 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud, models
 from app import ibk_selenium_config
+from app.ibk_selenium_adapter import build_operations as build_selenium_operations
+from app.ibk_selenium_strict import (
+    ACCEPTED as SELENIUM_ACCEPTED,
+    NO_SESSION as SELENIUM_NO_SESSION,
+    REJECTED as SELENIUM_REJECTED,
+    UNAVAILABLE as SELENIUM_UNAVAILABLE,
+    IbkSeleniumStrictCapture,
+    IbkSeleniumStrictCapturer,
+)
 from app.ibk_regression_guard import find_regressing_pairs
 from app.ibk_result_builder import (
     IbkIntendedState,
@@ -91,6 +100,11 @@ IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS = 12.0
 #:    상태에서도 0.5초짜리 요청을 걸어 "초과는 최대 0.5초" 가 거짓이 되고, (b) 호출자가
 #:    준 `timeout=0.1` 이 0.5 로 **늘어난다**(둘 다 실측). 부족하면 늘리지 말고 **멈춘다**.
 IBK_MIN_REQUEST_TIMEOUT_SECONDS = 0.5
+#: Selenium 안전망을 **시작할 만한** 최소 잔여(초). 드라이버 생성·항해·연속 제출 가드
+#: 3.5초·문서 교체 대기·읽기·정리를 합친 보수적 값이다.
+#: ⛔ 이것은 **시도를 허용하는 기준**이지 완료 보장이 아니다. 미달이면 드라이버를 만들지
+#:    않는다 — 예산이 없어 멈춘 자리에서 더 비싼 경로를 여는 것은 모순이다.
+IBK_SELENIUM_ENTRY_BUDGET_SECONDS = 12.0
 
 
 
@@ -1144,6 +1158,140 @@ def _is_preopen_pending_window(service_date, reference_time) -> bool:
     )
 
 
+#: 안전망이 **관측 자체를 시작하지 못한** 사유. 이 경우는 HTTP 진단을 덮지 않는다.
+#: ⛔ 드라이버를 못 얻거나 기한이 지난 것은 우리 쪽 사정이지 은행 응답에 대한 관측이 아니다.
+#:    HTTP 는 실제로 무언가를 보고 진단을 냈으므로(예: 과거 날짜의 표 부재) 그것이 남아야 한다.
+#: ⛔ 반면 제출 차단·확인 실패·요소 부재는 안전망이 **돌면서** 관측에 실패한 것이므로
+#:    그 사유가 남아야 한다 — HTTP 사유로 덮으면 원인이 사라진다.
+IBK_SELENIUM_NEVER_OBSERVED = ("driver_failed", "deadline_passed")
+
+#: Selenium 관측 불가 사유 → 결과 사유. 합의한 분류다.
+#: 취득·제출·항해·읽기 실패는 TRANSPORT_ERROR(브라우저 취득 실패를 포함하는 분류),
+#: 읽을 수 있는 문서의 요소·계약 이상은 CONTRACT_ERROR, 기한 소진은 BUDGET_EXHAUSTED.
+IBK_SELENIUM_UNAVAILABLE_REASONS = (
+    ("deadline_passed", IbkReason.BUDGET_EXHAUSTED),
+    ("page_too_old", IbkReason.BUDGET_EXHAUSTED),
+    ("driver_failed", IbkReason.TRANSPORT_ERROR),
+    ("submit", IbkReason.TRANSPORT_ERROR),
+    ("alert", IbkReason.TRANSPORT_ERROR),
+    ("confirm_failed", IbkReason.TRANSPORT_ERROR),
+    ("page_source", IbkReason.TRANSPORT_ERROR),
+    ("clock", IbkReason.TRANSPORT_ERROR),
+    ("page_loaded_at", IbkReason.TRANSPORT_ERROR),
+)
+
+
+def _selenium_unavailable_reason(detail):
+    """세부 사유를 결과 사유로 접는다. 모르는 것은 계약 이상으로 본다."""
+    text = str(detail or "")
+    for prefix, reason in IBK_SELENIUM_UNAVAILABLE_REASONS:
+        if text.startswith(prefix):
+            return reason
+    return IbkReason.CONTRACT_ERROR
+
+
+def _historical_preservation_reason(search):
+    """과거 후보의 보존 사유. POST·Selenium 경로가 같은 규칙을 쓴다."""
+    if search.saw_preopen_pending:
+        return IbkReason.PREOPEN_PENDING
+    return IbkReason.OFFICIAL_NO_SESSION
+
+
+def _selenium_safety_net(context, query_date, *, deadline,
+                         driver_context=None, capturer_factory=None):
+    """공식 HTTP 가 **기술적으로** 실패했을 때만 여는 안전망. 저장하지 않는다.
+
+    돌려주는 것은 관측(`IbkSeleniumStrictCapture`)뿐이다. 저장 여부·등급은 호출자가 정하고,
+    저장 경로는 POST 성공과 **완전히 같은 것**을 쓴다 — 저장 규칙을 두 벌 만들지 않는다.
+
+    ⛔ **이번 실행에서 새로 항해한 문서만** 본다. 캡처러는 제출이 필요 없을 때 문서 나이로만
+       신선도를 보는데, 그 나이의 기준이 되는 `page_loaded_at` 을 여기서 만든다. 기준은
+       **항해 시작 시각**이다 — `get()` 반환 시각을 쓰면 로딩에 걸린 시간만큼 문서 나이를
+       실제보다 작게 계산한다.
+    ⛔ 한 세션에 **한 번만** 관측한다. 거부·무고시·불가 어느 경우에도 재항해하지 않는다.
+    ⛔ 예산이 모자라면 **드라이버를 만들지 않는다**. 반환 None 은 "시도하지 않았다" 는 뜻이다.
+    ⛔ 시계는 **호출 시점에** 읽는다. `monotonic=time.monotonic` 처럼 기본 인자로 묶으면
+       정의 시점의 함수가 박혀 패치가 듣지 않는다(이 리포에서 두 번째 재발).
+    """
+    remaining = deadline - time.monotonic()
+    if remaining < IBK_SELENIUM_ENTRY_BUDGET_SECONDS:
+        logger.info("IBK_SELENIUM_NET_SKIPPED", extra={
+            "bank": BANK_NAME, "reason": "budget", "remaining_seconds": round(remaining, 2)})
+        return None
+
+    opener = driver_context or selenium_driver_context
+    build = capturer_factory or _build_selenium_capturer
+
+    def _expired(stage):
+        """단계 사이마다 기한을 다시 본다. 만료 뒤 **다음 작업을 시작하지 않는다**.
+
+        ⛔ 진입 시 한 번만 보면 드라이버 생성이 예산을 다 먹은 뒤에도 항해와 관측을 시작한다
+           (실측: 잔여 12초에서 생성에 20초를 쓰고도 get·capture 를 각각 1회 실행).
+        ⛔ 이것과 "이미 시작한 호출이 기한 안에 끝난다" 는 별개다. 후자는 보장하지 않는다.
+        """
+        left = deadline - time.monotonic()
+        if left > 0:
+            return None
+        logger.info("IBK_SELENIUM_NET_EXPIRED", extra={
+            "bank": BANK_NAME, "stage": stage, "overrun_seconds": round(-left, 2)})
+        return IbkSeleniumStrictCapture(
+            SELENIUM_UNAVAILABLE, reason=f"deadline_passed:{stage}")
+
+    try:
+        with opener() as driver:
+            expired = _expired("after_driver")
+            if expired is not None:
+                return expired
+            # 남은 예산 안에서만 문서를 기다린다. 기존 42초는 그 자체로 부모 45초를 넘지
+            # 않지만, 앞선 HTTP 와 드라이버 생성 시간을 합치면 넘길 수 있다.
+            _limit_driver_to_deadline(driver, deadline)
+            expired = _expired("after_limits")   # 제한 설정도 시간을 먹는다(실측)
+            if expired is not None:
+                return expired
+            navigated_at = time.monotonic()     # 항해 **시작** 시각이 문서 나이의 기준이다
+            driver.get(IBK_BANK_URL)
+            document_ready_at = time.monotonic()   # 연속 제출 가드의 기준
+            expired = _expired("after_navigation")
+            if expired is not None:
+                return expired
+            capturer = build(driver)
+            return capturer.capture(
+                driver, query_date=query_date, reference_time=context.reference_time,
+                page_loaded_at=navigated_at, document_ready_at=document_ready_at,
+                deadline=deadline,
+            )
+    except Exception as exc:  # noqa: BLE001 — 안전망 실패가 결과 구성을 깨뜨리지 않는다
+        logger.warning("IBK_SELENIUM_NET_UNAVAILABLE", extra={
+            "bank": BANK_NAME, "error_type": type(exc).__name__})
+        # ⛔ None 은 "시도하지 않았다" 로 예약한다. 여기는 시도했고 실패한 것이므로 구분한다.
+        return IbkSeleniumStrictCapture(
+            SELENIUM_UNAVAILABLE, reason=f"driver_failed:{type(exc).__name__}")
+
+
+def _limit_driver_to_deadline(driver, deadline):
+    """남은 예산을 드라이버 명령 제한으로 내린다. 실패해도 관측을 막지 않는다."""
+    left = max(deadline - time.monotonic(), 0.0)
+    for setter in ("set_page_load_timeout", "set_script_timeout"):
+        try:
+            getattr(driver, setter)(left)
+        except Exception:  # noqa: BLE001 — 제한을 못 걸어도 위 단계 검사가 남는다
+            logger.debug("IBK_SELENIUM_NET_LIMIT_SKIPPED", extra={"setter": setter})
+
+
+def _build_selenium_capturer(driver):
+    """운영 조작을 묶어 캡처러를 만든다. 읽기는 기존 시간제한 읽기를 그대로 쓴다."""
+    operations = build_selenium_operations(
+        driver, input_selector=INPUT_SELECTOR,
+        read_page_source=_read_page_source_bounded,
+    )
+    return IbkSeleniumStrictCapturer(
+        parse=lambda html, *, query_date, reference_time: _parse_ibk_official_response(
+            types.SimpleNamespace(text=html),
+            query_date=query_date, reference_time=reference_time),
+        **operations,
+    )
+
+
 def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) -> IbkResult:
     """공식 후보를 찾아 검증부터 최종 판정까지 연결한다. 아직 운영에 연결하지 않는다.
 
@@ -1222,6 +1370,7 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
     )
 
     historical = False
+    selenium_source = False
     if search.stop is CandidateSearchStop.ACCEPTED:
         service_date, fetched = search.service_date, search.payload
         # ⛔ 기대 날짜보다 과거의 세션을 본 것이면 그 관측을 당일 OBSERVED 로 승격하지
@@ -1237,7 +1386,45 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
     else:
         service_date, fetched = expected_date, None
         if search.stop is CandidateSearchStop.TECHNICAL_FAILURE:
-            failure = IbkObservationFailure(search.failure_reason)
+            # ⛔ 안전망은 **기술적 실패에서만** 연다. 무고시·개장 전 같은 의미적 거부는
+            #    정상 관측이므로 브라우저를 띄우지 않는다. 예산 소진에서도 열지 않는다 —
+            #    예산이 없어 멈춘 자리에서 더 비싼 경로를 여는 것은 모순이다.
+            #    (검색 정책이 예산 소진을 TECHNICAL_FAILURE 로 섞지 않도록 이미 분리했다.)
+            capture = _selenium_safety_net(
+                context, search.failure_date or expected_date, deadline=context.work_deadline)
+            if capture is None:
+                # 시도하지 않았다(예산 미달). HTTP 실패 사유를 그대로 둔다.
+                failure = IbkObservationFailure(search.failure_reason)
+            elif capture.usable:
+                service_date = capture.service_date
+                fetched = (capture.rates, capture.completed_at)
+                selenium_source = True
+                historical = service_date < expected_date
+                if historical:
+                    # ⛔ 보존 사유는 POST 경로와 **같은 규칙**으로 정한다. 여기만 무고시로
+                    #    고정하면 같은 상황에서 source 만 다른데 사유가 갈린다(실측:
+                    #    POST 는 PREOPEN_PENDING, Selenium 은 OFFICIAL_NO_SESSION).
+                    preservation_reason = _historical_preservation_reason(search)
+            elif capture.verdict == SELENIUM_NO_SESSION:
+                # ⛔ 무고시는 거부가 아니다. 기존 보존 정책으로 접는다.
+                preservation_reason = _historical_preservation_reason(search)
+            elif capture.verdict == SELENIUM_REJECTED:
+                failure = IbkObservationFailure(IbkReason.SELENIUM_STRICT_REJECTED)
+            elif str(capture.reason or "").startswith(IBK_SELENIUM_NEVER_OBSERVED):
+                # 안전망이 돌지 못했다. HTTP 가 낸 진단이 이 회차의 유일한 관측이다.
+                failure = IbkObservationFailure(search.failure_reason)
+                logger.info("IBK_SELENIUM_NET_NOT_OBSERVED", extra={
+                    "bank": BANK_NAME, "detail": capture.reason,
+                    "kept_reason": getattr(search.failure_reason, "value",
+                                           search.failure_reason)})
+            else:
+                # ⛔ Selenium 이 관측하지 못한 사유를 HTTP 사유로 덮지 않는다(실측: alert 차단이
+                #    CONTRACT_ERROR 로, 요소 부재가 TRANSPORT_ERROR 로 기록됐다).
+                failure = IbkObservationFailure(
+                    _selenium_unavailable_reason(capture.reason))
+                logger.info("IBK_SELENIUM_NET_UNUSABLE", extra={
+                    "bank": BANK_NAME, "verdict": capture.verdict,
+                    "detail": capture.reason})
         elif search.stop is CandidateSearchStop.BUDGET_EXHAUSTED:
             failure = IbkObservationFailure(IbkReason.BUDGET_EXHAUSTED)
         elif search.saw_preopen_pending:
@@ -1271,7 +1458,8 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
             current_rates, completed_at = fetched
             completion = _ibk_completion_kst(service_date, completed_at)
             official = IbkOfficialObservation(
-                IbkSource.OFFICIAL_POST, service_date, dict(current_rates), completion
+                IbkSource.OFFICIAL_SELENIUM if selenium_source else IbkSource.OFFICIAL_POST,
+                service_date, dict(current_rates), completion
             )
             if historical:
                 # 관측은 사실로 남기되 당일 고시로 승격하지 않는다. 저장은 계속 일어날 수

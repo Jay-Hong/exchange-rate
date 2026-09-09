@@ -17,6 +17,9 @@ from sqlalchemy.orm import sessionmaker
 from app import atomic_write_runtime as awr
 from app import crud, models
 from app.crawlers import ibk
+from app.ibk_selenium_strict import (
+    ACCEPTED, NO_SESSION, REJECTED, UNAVAILABLE, IbkSeleniumStrictCapture,
+)
 from app.ibk_candidate_policy import CandidateSearchStop
 from app.ibk_result_protocol import IbkProtocolError, IbkReason, IbkSource, IbkStatus
 from app.ibk_run_context import IbkRunContext
@@ -81,6 +84,15 @@ class DatedResultGeneratorTest(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.context = IbkRunContext(RUN_ID, REFERENCE)
+        # ⛔ 안전망이 **진짜 크롬을 띄우지 않게** 막는다. 막지 않으면 예산이 남는 사례마다
+        #    드라이버 생성이 일어나 시험이 26초로 늘어난다(실측). 브라우저가 필요한 사례는
+        #    각자 명시적으로 주입한다.
+        driver_guard = patch.object(
+            ibk, "selenium_driver_context",
+            side_effect=AssertionError("시험에서 드라이버를 띄우면 안 된다"))
+        driver_guard.start()
+        self.addCleanup(driver_guard.stop)
+
         self.assertEqual(self.context.expected_service_date, SERVICE_DATE.isoformat())
 
     def _seed(self, rates, saved_offset):
@@ -324,6 +336,78 @@ class DatedResultGeneratorTest(unittest.TestCase):
         self.assertEqual(len(timeouts), 1)
         self.assertLessEqual(timeouts[0], 0.6 + 1e-9)
         self.assertGreater(timeouts[0], 0)
+
+    # ── 안전망 결과가 생성기 판정으로 이어지는가 ─────────────
+    # ⛔ 매핑 헬퍼만 직접 부르면 "생성기를 통과한 결과" 는 보이지 않는다 — 변이가 그 창을
+    #    지나갔다. 여기서는 실제 생성기를 돌려 최종 사유를 본다.
+
+    def _run_with_net(self, capture, *, http_error):
+        """HTTP 를 기술적으로 실패시키고 안전망 결과를 주입해 최종 판정을 본다."""
+        with patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=http_error), \
+             patch.object(ibk, "_selenium_safety_net", return_value=capture), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=False):
+            return ibk.produce_ibk_dated_result(self.db, self.context, now=NOW)
+
+    def test_an_observed_selenium_failure_replaces_the_http_reason(self):
+        """⛔ alert 차단이 HTTP 의 CONTRACT_ERROR 로 기록되면 원인이 사라진다(실측)."""
+        import requests
+
+        result = self._run_with_net(
+            IbkSeleniumStrictCapture(UNAVAILABLE, reason="submit_blocked_by_alert"),
+            http_error=ValueError("계약 오류"))          # HTTP → CONTRACT_ERROR
+        self.assertIs(result.reason, IbkReason.TRANSPORT_ERROR,
+                      "안전망이 돌면서 실패한 사유가 남아야 한다")
+
+        result = self._run_with_net(
+            IbkSeleniumStrictCapture(UNAVAILABLE, reason="input_absent"),
+            http_error=requests.RequestException("전송 오류"))  # HTTP → TRANSPORT_ERROR
+        self.assertIs(result.reason, IbkReason.CONTRACT_ERROR,
+                      "요소 부재는 계약 이상이다")
+
+    def test_a_net_that_never_ran_keeps_the_http_diagnosis(self):
+        """돌지 못한 것은 우리 쪽 사정이다 — HTTP 가 낸 진단이 유일한 관측이다."""
+        for detail in ("driver_failed:WebDriverException", "deadline_passed:after_driver"):
+            with self.subTest(detail=detail):
+                self._reset_rates()
+                result = self._run_with_net(
+                    IbkSeleniumStrictCapture(UNAVAILABLE, reason=detail),
+                    http_error=ValueError("계약 오류"))
+                self.assertIs(result.reason, IbkReason.CONTRACT_ERROR)
+
+    def test_a_net_that_was_not_attempted_keeps_the_http_diagnosis(self):
+        """⛔ None 은 "시도하지 않았다" 다. 실패를 만들지 않으면 결과가 통째로 어긋난다."""
+        import requests
+
+        result = self._run_with_net(None, http_error=requests.RequestException("전송"))
+        self.assertIs(result.reason, IbkReason.TRANSPORT_ERROR)
+        self.assertIs(result.status, IbkStatus.FAILED)
+
+    def test_a_strict_rejection_is_its_own_reason(self):
+        result = self._run_with_net(
+            IbkSeleniumStrictCapture(REJECTED, reason="readback 불일치"),
+            http_error=ValueError("계약 오류"))
+        self.assertIs(result.reason, IbkReason.SELENIUM_STRICT_REJECTED)
+
+    def test_a_usable_capture_is_saved_through_the_shared_path(self):
+        """검증 통과분은 POST 와 같은 경로로 저장되고 source 만 다르다."""
+        import requests
+
+        capture = IbkSeleniumStrictCapture(
+            ACCEPTED, service_date=SERVICE_DATE, rates=dict(RATES),
+            completed_at=COMPLETED_AT)
+        result = self._run_with_net(capture, http_error=requests.RequestException("전송"))
+        self.assertIs(result.status, IbkStatus.OBSERVED)
+        self.assertEqual(result.source, IbkSource.OFFICIAL_SELENIUM)
+        self.assertEqual(self._rows(), len(RATES), "저장 경로는 POST 와 같다")
+
+    def test_a_selenium_no_session_is_preserved_not_rejected(self):
+        import requests
+
+        result = self._run_with_net(
+            IbkSeleniumStrictCapture(NO_SESSION, service_date=SERVICE_DATE),
+            http_error=requests.RequestException("전송"))
+        self.assertIsNot(result.reason, IbkReason.SELENIUM_STRICT_REJECTED)
+        self.assertIn(result.status, (IbkStatus.PRESERVED, IbkStatus.FAILED))
 
     # ── 정상 관측 ────────────────────────────────────────────
     def test_fresh_write_is_observed(self):
