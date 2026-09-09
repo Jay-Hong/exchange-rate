@@ -1,0 +1,245 @@
+"""IBK Selenium 보조 경로 — **저장하기 전에** 공식 계약을 검증한다.
+
+기존 legacy 루틴은 고정 셀렉터로 읽어 **먼저 저장하고** shadow 가 켜져 있으면 저장 뒤에
+관측한다. 여기서는 순서를 뒤집는다: 검증을 통과한 관측만 호출자에게 넘기고, 이 모듈은
+DB 를 건드리지 않는다.
+
+## 왜 날짜 readback 만으로는 부족한가
+
+`page_source` 는 입력 property 를 반영하지 않아 `#inDate` 의 value **속성**에는 서버가
+렌더한 날짜가 남는다(2026-09-09 실측). 그래서 "입력만 하고 제출되지 않은 화면"은 **다른**
+날짜를 기대할 때 readback 불일치로 걸린다.
+
+⛔ 그러나 **같은 날짜를 다시 조회하는 경우**는 걸리지 않는다 — 제출이 아예 일어나지 않아도
+   화면이 이미 그 날짜를 서비스하고 있으면 readback 은 통과한다(실측). 따라서 제출 완료는
+   **파싱 전에 따로 확인**해야 한다. 이 모듈은 그 순서를 강제한다.
+
+## 연속 제출 가드
+
+페이지 JS 가 문서 로드 시 `lastD = 현재시각 + 3초` 를 두고, 그보다 이른 제출에
+`새로고침은 연속으로 할 수 없습니다` 경고 대화상자를 띄운다(2026-09-09 실측). 대화상자가
+뜨면 `page_source` 를 포함한 후속 WebDriver 호출이 실패한다. 그래서 제출 전에 로드 이후
+경과를 확인하고, 그래도 대화상자가 뜨면 **재시도하지 않고** 그 자리에서 접는다.
+
+⛔ 의미적 거부(무고시·검증 실패) 뒤에 Chrome 을 다시 띄우지 않는다. 이 모듈은 드라이버를
+   만들지도 닫지도 않고, 주어진 세션에서 한 번만 관측한다.
+"""
+
+import datetime
+import math
+import time
+from dataclasses import dataclass, field
+
+#: 페이지 JS 의 연속 제출 가드(로드 + 3초)보다 넉넉히 잡는다.
+SUBMIT_GUARD_SECONDS = 3.5
+#: 제출 뒤 문서 교체를 기다리는 상한.
+STALENESS_TIMEOUT_SECONDS = 10.0
+#: 이보다 오래된 문서에서는 읽지 않는다 — 날짜가 맞아도 값이 낡았을 수 있다.
+MAX_PAGE_AGE_SECONDS = 60.0
+
+ACCEPTED = "accepted"
+NO_SESSION = "no_session"
+REJECTED = "rejected"
+UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class IbkSeleniumStrictCapture:
+    """관측 결과. 저장 여부는 호출자가 정한다 — 이 값은 저장 승인이 아니다."""
+
+    verdict: str
+    service_date: datetime.date | None = None
+    rates: dict | None = None
+    completed_at: str | None = None
+    reason: str | None = None
+    submitted: bool = False
+    notes: tuple[str, ...] = field(default_factory=tuple)
+
+    @property
+    def usable(self) -> bool:
+        """저장 후보로 쓸 수 있는가. 무고시·거부·불가는 모두 아니다."""
+        return self.verdict == ACCEPTED and bool(self.rates)
+
+
+class IbkSeleniumStrictCapturer:
+    """드라이버 조작을 주입받아 흐름만 소유한다. selenium·bs4 를 임포트하지 않는다."""
+
+    def __init__(self, *, parse, find_input, submit, read_page_source, wait_stale,
+                 take_alert, monotonic=time.monotonic, sleep=time.sleep,
+                 submit_guard_seconds=SUBMIT_GUARD_SECONDS,
+                 staleness_timeout=STALENESS_TIMEOUT_SECONDS,
+                 max_page_age_seconds=MAX_PAGE_AGE_SECONDS):
+        deps = (parse, find_input, submit, read_page_source, wait_stale, take_alert,
+                monotonic, sleep)
+        if not all(callable(dep) for dep in deps):
+            raise ValueError("INVALID_IBK_SELENIUM_STRICT_DEPENDENCY")
+        for name, value in (("SUBMIT_GUARD", submit_guard_seconds),
+                            ("STALENESS_TIMEOUT", staleness_timeout),
+                            ("MAX_PAGE_AGE", max_page_age_seconds)):
+            # NaN 은 `value < 0` 을 통과하고, 그러면 아래 나이 비교가 **항상 거짓**이 되어
+            # 아무리 낡은 문서도 받아들여진다(실측).
+            if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
+                raise ValueError(f"INVALID_IBK_SELENIUM_STRICT_{name}")
+        self._parse, self._find_input, self._submit = parse, find_input, submit
+        self._read_page_source, self._wait_stale = read_page_source, wait_stale
+        self._take_alert = take_alert
+        self._monotonic, self._sleep = monotonic, sleep
+        self._submit_guard_seconds = submit_guard_seconds
+        self._staleness_timeout = staleness_timeout
+        self._max_page_age_seconds = max_page_age_seconds
+
+    def capture(self, driver, *, query_date, reference_time,
+                page_loaded_at) -> IbkSeleniumStrictCapture:
+        """한 세션에서 한 번 관측한다. 어떤 경로로도 저장하지 않는다.
+
+        `page_loaded_at` 은 호출자가 문서를 띄운 monotonic 시각이다. 제출이 필요 없는
+        경우의 신선도는 그 항해에서 오므로, 문서가 오래됐으면 읽지 않고 접는다.
+        """
+        notes = []
+        pending, failed = self._guarded("alert_check", self._take_alert, driver)
+        if failed:
+            return _unavailable(failed, notes)
+        if pending:
+            # 들어올 때 이미 떠 있던 대화상자. 이 세션의 DOM 을 신뢰할 수 없다.
+            return _unavailable("alert_present", notes + [_short(pending)])
+
+        stale_reason = self._document_age_reason(page_loaded_at)
+        if stale_reason:
+            return _unavailable(stale_reason, notes)
+
+        element, failed = self._guarded("find_input", self._find_input, driver)
+        if failed:
+            return _unavailable(failed, notes)
+        if element is None:
+            return _unavailable("input_absent", notes)
+
+        expected = query_date.strftime("%Y.%m.%d")
+        served, failed = self._guarded("input_unreadable", element.get_attribute, "value")
+        if failed:
+            return _unavailable(failed, notes)
+        served = (served or "").strip()
+
+        submitted = False
+        document_at = page_loaded_at
+        if served != expected:
+            outcome = self._submit_and_confirm(driver, element, expected,
+                                               page_loaded_at, notes)
+            if isinstance(outcome, IbkSeleniumStrictCapture):
+                return outcome
+            submitted, document_at = True, outcome
+        else:
+            # ⛔ 제출을 건너뛴다. 이 경로의 신선도 근거는 오직 호출자의 항해와 문서 나이
+            #    검사다 — readback 은 여기서 아무것도 증명하지 못한다.
+            notes.append("served_date_already_matched")
+
+        # ⛔ 진입 때 한 번 본 것으로는 부족하다. 요소 탐색·제출·교체 대기 동안 시간이
+        #    흐르므로 **읽기 직전에 다시** 본다(진입 후 61초를 흘려 accepted 가 나온 실측).
+        stale_reason = self._document_age_reason(document_at)
+        if stale_reason:
+            return _unavailable(stale_reason, notes, submitted=submitted)
+
+        read, failed = self._guarded("page_source", self._read_page_source, driver)
+        if failed:
+            return _unavailable(failed, notes, submitted=submitted)
+        html, read_failure = read
+        if read_failure is not None:
+            return IbkSeleniumStrictCapture(
+                UNAVAILABLE, reason=read_failure, submitted=submitted, notes=tuple(notes))
+
+        # 읽기 자체가 오래 걸렸으면 그 관측은 허용 창 밖이다.
+        stale_reason = self._document_age_reason(document_at)
+        if stale_reason:
+            return _unavailable(f"{stale_reason}_after_read", notes, submitted=submitted)
+
+        try:
+            parsed = self._parse(html, query_date=query_date, reference_time=reference_time)
+        except ValueError as exc:
+            return IbkSeleniumStrictCapture(
+                REJECTED, reason=_short(str(exc)), submitted=submitted, notes=tuple(notes))
+        except Exception as exc:  # 관측이 수집 흐름을 예외로 깨뜨리지 않는다
+            return IbkSeleniumStrictCapture(
+                UNAVAILABLE, reason=f"{type(exc).__name__}", submitted=submitted,
+                notes=tuple(notes))
+
+        if parsed is None:
+            return IbkSeleniumStrictCapture(
+                NO_SESSION, service_date=query_date, submitted=submitted, notes=tuple(notes))
+        rates, completed_at = parsed
+        return IbkSeleniumStrictCapture(
+            ACCEPTED, service_date=query_date, rates=dict(rates), completed_at=completed_at,
+            submitted=submitted, notes=tuple(notes))
+
+    def _guarded(self, label, operation, *args):
+        """드라이버 조작을 감싼다. 예외는 **종류만** 남기고 결과로 바꾼다.
+
+        ⛔ 원문을 그대로 옮기지 않는다 — 드라이버 예외에는 세션 주소 같은 환경 정보가 섞인다.
+        """
+        try:
+            return operation(*args), None
+        except Exception as exc:
+            return None, f"{label}:{type(exc).__name__}"
+
+    def _document_age_reason(self, since):
+        """문서가 읽어도 되는 나이인지. 사유 문자열 또는 None."""
+        now = self._monotonic()
+        if not isinstance(since, (int, float)) or not math.isfinite(since):
+            return "page_loaded_at_unusable"
+        if not isinstance(now, (int, float)) or not math.isfinite(now):
+            return "clock_unusable"
+        age = now - since
+        if age < 0:
+            return "clock_went_backwards"
+        if age > self._max_page_age_seconds:
+            return "page_too_old"
+        return None
+
+    def _submit_and_confirm(self, driver, element, expected, page_loaded_at, notes):
+        """제출하고 **문서가 실제로 교체됐는지** 확인한다.
+
+        성공하면 **제출 직전** monotonic 시각을 돌려준다. 새 문서는 제출 이후에 생기므로
+        이 기준은 나이를 실제보다 작게 계산하지 않는다.
+
+        ⛔ 교체가 **확인된** 시각을 쓰면 안 된다 — 문서가 생긴 시각과 확인이 반환된 시각은
+           다르다. 확인이 70초 늦게 돌아오면 이미 70초 된 문서의 나이가 0 으로 재설정된다
+           (실측). 상한을 넘긴 가짜 어댑터에서만 생기는 문제가 아니다.
+        """
+        waited = self._submit_guard_seconds - (self._monotonic() - page_loaded_at)
+        if waited > 0:
+            # 페이지 JS 의 연속 제출 가드. 기다리지 않으면 경고 대화상자로 세션이 막힌다.
+            self._sleep(waited)
+            notes.append(f"submit_guard_waited={waited:.2f}s")
+
+        # 새 문서 나이의 보수적 기준. 문서는 이 시점 **이후**에 생긴다.
+        submitted_at = self._monotonic()
+        _, failed = self._guarded("submit_failed", self._submit, element, expected)
+        if failed:
+            return _unavailable(failed, notes)
+
+        blocked, failed = self._guarded("alert_check", self._take_alert, driver)
+        if failed:
+            return _unavailable(failed, notes)
+        if blocked:
+            # ⛔ 재시도하지 않는다. 다시 치면 같은 가드에 또 걸리고 Chrome 왕복만 늘어난다.
+            return IbkSeleniumStrictCapture(
+                UNAVAILABLE, reason="submit_blocked_by_alert",
+                notes=tuple(notes + [_short(blocked)]))
+
+        replaced, failed = self._guarded("staleness_failed", self._wait_stale,
+                                         element, self._staleness_timeout)
+        if failed:
+            return _unavailable(failed, notes)
+        if not replaced:
+            # ⛔ 여기서 멈추지 않으면 같은 날짜 재조회가 그대로 통과한다 — 제출이 일어나지
+            #    않아도 화면이 이미 그 날짜를 서비스하면 readback 은 맞는다(실측).
+            return IbkSeleniumStrictCapture(
+                UNAVAILABLE, reason="submit_not_confirmed", notes=tuple(notes))
+        return submitted_at
+
+
+def _unavailable(reason, notes, *, submitted=False):
+    return IbkSeleniumStrictCapture(UNAVAILABLE, reason=reason, submitted=submitted,
+                                    notes=tuple(notes))
+
+
+def _short(text, limit=120):
+    return str(text).replace("\n", " ")[:limit]
