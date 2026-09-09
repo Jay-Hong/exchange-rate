@@ -64,6 +64,19 @@ def _official_html(*, selected_date="2026.08.27", completed_at=COMPLETED_AT, rat
             f'<table><caption>일반고시환율 표</caption>{body}</table></body></html>')
 
 
+def _rejected_html(selected_date):
+    """strict 가 **거부**하는 화면. 날짜 readback 은 통과하지만 필수 통화가 빠져 파서가
+    `ValueError` 를 내고, 캡처러가 그것을 REJECTED 로 접는다."""
+    body = ("<thead><tr><th>통화</th><th>통화명</th><th>매매기준율</th><th>기타</th></tr></thead>"
+            "<tbody>" + "".join(
+                f"<tr><th>{code}</th><th>{code} name</th><td>{rate}</td><td>0</td></tr>"
+                for code, rate in (("USD", RATES["usd-krw"]), ("JPY", RATES["jpy-krw"])))
+            + "</tbody>")            # EUR 없음
+    return (f'<html><body><input id="inDate" value="{selected_date}">'
+            f"<p class='standard'>고시완료 시각 : {COMPLETED_AT}</p>"
+            f'<table><caption>일반고시환율 표</caption>{body}</table></body></html>')
+
+
 def _no_session_html(selected_date):
     """공식 무고시 화면. ⛔ 파서는 날짜 readback 을 **먼저** 보므로 `#inDate` 가 없으면
     무고시가 아니라 계약 오류가 되어 안전망이 열린다(실측)."""
@@ -186,6 +199,15 @@ class EndToEndTest(unittest.TestCase):
                                                  rate=rate, timestamp=moment))
             seed.commit()
 
+    def _all_rows(self):
+        """행 전체를 정렬해 돌려준다. ⛔ 통화별 **최신 rate** 만 비교하면 같은 값의 중복
+        INSERT 나 timestamp 만 바뀌는 UPDATE 가 그대로 통과한다 — "DB 불변" 을 주장하려면
+        행 자체를 봐야 한다."""
+        with self.Session() as fresh:
+            return sorted(
+                (row.id, row.bank, row.currency, row.rate, row.timestamp)
+                for row in fresh.query(models.BankExchangeRate).all())
+
     def _rows(self):
         with self.Session() as fresh:
             return fresh.query(models.BankExchangeRate).count()
@@ -271,6 +293,27 @@ class EndToEndTest(unittest.TestCase):
         decision = asyncio.run(parent.execute(timeout=timeout))
         return parent, decision, frames[0]
 
+    def _db_pairs(self):
+        """DB 에 **값이 있는** 통화만. ⛔ `if info` 로 거르면 안 된다 — crud 는 행이 없어도
+        `{"rate": None, "timestamp": None}` 을 돌려주고 그 사전은 참이라, 빈 DB 에서도 세
+        통화가 다 있는 것으로 잡힌다(실측). 그러면 아래 공용 단언이 항상 '완전' 을 기대해
+        빈·부분 DB 를 검사하지 못한다."""
+        with self.Session() as fresh:
+            rows = crud.get_last_bank_rates_with_ts(
+                fresh, ibk.BANK_NAME, list(ibk.MIBANK_REQUIRED_PAIRS))
+        return {pair: info["rate"] for pair, info in rows.items()
+                if info and info.get("rate") is not None}
+
+    def _assert_agrees_with_db(self, result):
+        """부모가 받은 DB 계측이 실제 DB 와 같은 말을 하는가."""
+        present = self._db_pairs()
+        self.assertEqual(set(result.preserved_pairs or ()), set(present),
+                         f"DB 에 있는 통화와 보고가 다르다: {present}")
+        self.assertEqual(set(result.missing_pairs or ()),
+                         set(ibk.MIBANK_REQUIRED_PAIRS) - set(present))
+        self.assertEqual(result.db_snapshot_complete,
+                         set(present) == set(ibk.MIBANK_REQUIRED_PAIRS))
+
     def _delivery(self, *, send):
         delivery = IbkNoticeDelivery(send=send, retry_seconds=0.0, poll_seconds=0.01)
         delivery.start()
@@ -295,27 +338,6 @@ class TheDbOutcomeAndTheParentStateAgree(EndToEndTest):
        `missing_pairs`·`db_snapshot_complete` 를 DB 재조회와 함께 대조한다 — 그 넷 중 하나가
        DB 와 어긋나면 운영자는 있지도 않은 상태를 본다.
     """
-
-    def _db_pairs(self):
-        """DB 에 **값이 있는** 통화만. ⛔ `if info` 로 거르면 안 된다 — crud 는 행이 없어도
-        `{"rate": None, "timestamp": None}` 을 돌려주고 그 사전은 참이라, 빈 DB 에서도 세
-        통화가 다 있는 것으로 잡힌다(실측). 그러면 아래 공용 단언이 항상 '완전' 을 기대해
-        빈·부분 DB 를 검사하지 못한다."""
-        with self.Session() as fresh:
-            rows = crud.get_last_bank_rates_with_ts(
-                fresh, ibk.BANK_NAME, list(ibk.MIBANK_REQUIRED_PAIRS))
-        return {pair: info["rate"] for pair, info in rows.items()
-                if info and info.get("rate") is not None}
-
-    def _assert_agrees_with_db(self, result):
-        """부모가 받은 DB 계측이 실제 DB 와 같은 말을 하는가."""
-        present = self._db_pairs()
-        self.assertEqual(set(result.preserved_pairs or ()), set(present),
-                         f"DB 에 있는 통화와 보고가 다르다: {present}")
-        self.assertEqual(set(result.missing_pairs or ()),
-                         set(ibk.MIBANK_REQUIRED_PAIRS) - set(present))
-        self.assertEqual(result.db_snapshot_complete,
-                         set(present) == set(ibk.MIBANK_REQUIRED_PAIRS))
 
     def test_an_official_post_success_is_saved_and_counted_as_observed(self):
         sink = []
@@ -543,6 +565,64 @@ class NoticeAcceptanceAndDeliveryAreSeparate(EndToEndTest):
         self.assertEqual(parent.notice_enqueued, 0)
         self.assertEqual(parent.notice_enqueue_failed, 1)
         self.assertEqual(delivery.stats()["rejected_inactive"], 1)
+
+
+class ARealStrictRejectionReachesTheParentAndTheAlert(EndToEndTest):
+    """축 1·3 교차 — 안전망이 **실제로 거부한** 관측이 저장을 막고 부모·경보까지 가는가.
+
+    ⛔ 정상 관측만 통합으로 확인하면 "거부가 저장을 막는다" 는 이 슬라이스의 존재 이유가
+       끝까지 이어지는지 모른다. 거부 화면도 **실제 파서·strict 판정**으로 만든다 —
+       `REJECTED` 캡처를 손으로 만들지 않는다.
+    ⛔ 완전 DB 는 `DEGRADED`, 부분 DB 는 `FAILED` 다. 프로토콜이 `FAILED` +
+       `SELENIUM_STRICT_REJECTED` + 완전 DB 조합을 `INVALID_REJECTED_STATUS` 로 거부하므로
+       (ibk_result_protocol.py), 이 둘은 바꿔 쓸 수 없다.
+    """
+
+    def _reject_flow(self, sent):
+        delivery = self._delivery(send=lambda text: sent.append(text) or True)
+        driver = _FakeDriver(served="2026.08.27",
+                             html=_rejected_html("2026.08.27"))
+        self.rows_before = self._all_rows()          # 실행 **전** 행 전체
+        return self._run_flow(http={"side_effect": ValueError("계약 오류")},
+                              driver=driver, sink=delivery.event_sink) + (delivery,)
+
+    def _assert_common(self, parent, decision, sent, delivery, *, before):
+        self.assertIs(decision.result.reason, IbkReason.SELENIUM_STRICT_REJECTED)
+        self.assertIsNone(decision.result.source, "거부된 관측은 출처를 주장하지 않는다")
+        self.assertEqual(self._db_pairs(), before, "거부는 DB 를 바꾸지 않는다")
+        self.assertEqual(self._all_rows(), self.rows_before,
+                         "행이 하나도 바뀌지 않아야 한다 — 같은 값 중복 INSERT 도 안 된다")
+        self.assertFalse(decision.should_retry, "의미 있는 판정은 재시도 대상이 아니다")
+        self.mibank.assert_not_called()
+        self.assertEqual(parent.notice_enqueued, 1, "경보를 접수했다")
+        self.assertTrue(self._await(lambda: delivery.stats()["sent"] == 1),
+                        f"발송이 일어나지 않았다: {delivery.stats()}")
+        self.assertEqual(len(sent), 1, "발송기를 한 번 불렀다")
+        self.assertIn("SELENIUM_STRICT_REJECTED", sent[0])
+        self._assert_agrees_with_db(decision.result)
+
+    def test_a_rejection_with_a_complete_db_is_degraded(self):
+        self._seed(OTHER, -3600)
+        sent = []
+        parent, decision, _, delivery = self._reject_flow(sent)
+
+        self.assertIs(decision.result.status, IbkStatus.DEGRADED)
+        self.assertTrue(decision.result.db_snapshot_complete)
+        self._assert_common(parent, decision, sent, delivery, before=OTHER)
+        self.assertEqual(parent.counts["DEGRADED"], 1)
+        self.assertIsNone(parent.last_current_official_at,
+                          "거부된 관측은 최신 공식 시각을 앞당기지 않는다")
+
+    def test_a_rejection_with_a_partial_db_is_failed(self):
+        self._seed({"usd-krw": OTHER["usd-krw"]}, -3600)
+        sent = []
+        parent, decision, _, delivery = self._reject_flow(sent)
+
+        self.assertIs(decision.result.status, IbkStatus.FAILED)
+        self.assertFalse(decision.result.db_snapshot_complete)
+        self._assert_common(parent, decision, sent, delivery,
+                            before={"usd-krw": OTHER["usd-krw"]})
+        self.assertEqual(parent.counts["FAILED"], 1)
 
 
 class AReturnedResultIsNotATimeout(EndToEndTest):
