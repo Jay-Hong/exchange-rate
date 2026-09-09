@@ -52,6 +52,17 @@ def plan_candidate_dates(reference_time: datetime.datetime, *, max_days_back: in
     )
 
 
+class CandidateBudgetExhausted(Exception):
+    """`fetch` 가 **요청을 시작하지 않고** 물러났다는 신호.
+
+    ⛔ 예외로 오지만 기술적 실패가 **아니다**. `classify` 로 넘기면 검색이 `TECHNICAL_FAILURE`
+       로 끝나고 실패 날짜까지 남아, 안전망이 "그 날짜가 기술적으로 실패했다" 로 오해한다
+       (실측: 요청 0회인데 attempted=1 / failure_date 가 채워짐).
+    ⛔ 여기 두는 이유는 검색 정책과 크롤러가 **같은 신호**를 봐야 하는데, 정책이 크롤러를
+       역으로 임포트하면 안 되기 때문이다.
+    """
+
+
 class CandidateSearchStop(Enum):
     """후보 검색이 끝난 이유. **Selenium 허용 여부와는 별개 축**이다.
 
@@ -123,6 +134,14 @@ def search_candidates(
         attempted += 1
         try:
             payload = fetch(query_date)
+        except CandidateBudgetExhausted:
+            # ⛔ 이 후보는 **요청하지 않았다**. 시도로 세지 않고 실패 날짜도 남기지 않는다.
+            #    앞서 실제로 요청한 횟수와 무고시·개장 전 관측은 그대로 보존한다.
+            return CandidateSearchResult(
+                CandidateSearchStop.BUDGET_EXHAUSTED,
+                saw_no_session=saw_no_session, saw_preopen_pending=saw_preopen,
+                attempted=attempted - 1,
+            )
         except Exception as exc:  # noqa: BLE001 — 해석은 주입된 classify 가 한다
             reason = classify(exc, query_date)
             if reason is not None:

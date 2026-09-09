@@ -22,6 +22,8 @@ from app.ibk_result_protocol import IbkReason, IbkStatus
 from app.ibk_run_context import IbkRunContext
 
 KST = ibk.KST
+#: 패치한 시계(0.0 시작)와 같은 축의 작업 기한. HTTP 12초 몫이 판정을 쥐도록 넉넉히 둔다.
+WORK_DEADLINE = 250.0
 RUN_ID = "e" * 32
 RATES = {"usd-krw": 1382.0, "jpy-krw": 867.06, "eur-krw": 1610.31}
 COMPLETED_AT = "11:30:00"   # 실행(12:10) 이전으로 풀린다 — 05:59:55 는 익일 미래다
@@ -61,7 +63,11 @@ class LookbackResultTest(unittest.TestCase):
 
     def _run(self, decide, *, day=28, hour=12, budget=True):
         moment = KST.localize(datetime.datetime(2026, 8, day, hour, 10))
-        ctx = IbkRunContext(RUN_ID, moment.astimezone(datetime.timezone.utc))
+        # ⛔ 작업 기한은 **패치한 시계와 같은 축**이어야 한다. 실제 monotonic 으로 만든
+        #    기본 기한을 두고 시계만 0.0 으로 패치하면 잔여가 수천 초로 보여 생성기가
+        #    IMPLAUSIBLE_WORK_DEADLINE 로 거부한다.
+        ctx = IbkRunContext(RUN_ID, moment.astimezone(datetime.timezone.utc),
+                            work_deadline=WORK_DEADLINE)
         clock = [0.0] * 80 if budget else [0.0, 99.0] * 40
         with patch.object(ibk, "_fetch_ibk_rates_for_date",
                           side_effect=lambda query_date, **_kw: decide(query_date)), \

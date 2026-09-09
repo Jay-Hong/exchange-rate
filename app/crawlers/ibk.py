@@ -38,6 +38,7 @@ from app.ibk_result_builder import (
     read_ibk_db_snapshot,
 )
 from app.ibk_candidate_policy import (
+    CandidateBudgetExhausted,
     CandidateSearchStop,
     plan_candidate_dates,
     search_candidates,
@@ -85,6 +86,14 @@ IBK_DATE_REQUEST_DEFAULTS = {
 # connect/read inactivity 기준이므로 이미 시작한 단일 요청의 wall time을 강제 종료하는
 # hard deadline은 아니다.
 IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS = 12.0
+#: 요청 하나를 **시작할 만한** 최소 잔여(초).
+#: ⛔ 이 값을 timeout 의 **하한**으로 쓰면 안 된다. 그러면 (a) 기한이 이미 27초 지난
+#:    상태에서도 0.5초짜리 요청을 걸어 "초과는 최대 0.5초" 가 거짓이 되고, (b) 호출자가
+#:    준 `timeout=0.1` 이 0.5 로 **늘어난다**(둘 다 실측). 부족하면 늘리지 말고 **멈춘다**.
+IBK_MIN_REQUEST_TIMEOUT_SECONDS = 0.5
+
+
+
 IBK_COMPLETION_CLOCK_SKEW_SECONDS = 120
 IBK_DB_SAVE_LAG_TOLERANCE_SECONDS = 120
 # 공식 상세 화면의 1회차가 08:26대에도 시작한 실측이 있어 08:30을 경계로
@@ -1160,7 +1169,14 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
     preservation_reason = IbkReason.OFFICIAL_NO_SESSION
     intended = None
     write = IbkWriteAttempt.none()
-    deadline = time.monotonic() + IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS
+    # ⛔ 여기서 예산을 **새로 시작하지 않는다**. spawn·app import·설정 캐시 갱신에 쓴 시간도
+    #    부모의 실행 제한을 소비했으므로, 부모가 넘긴 작업 기한과 묶는다. 12초는 "HTTP 후보
+    #    검색에 쓸 몫" 이지 이 실행 전체의 예산이 아니다.
+    # ⛔ `context.work_deadline` 을 직접 읽으면 과대 기한 검증을 **우회한다**(실측: 잘못된
+    #    기한으로 10초짜리 요청 8회 + 저장까지 진행됐다). 검증된 잔여를 먼저 구한다.
+    _started = time.monotonic()
+    deadline = _started + min(IBK_DATED_REQUEST_SOFT_BUDGET_SECONDS,
+                              context.remaining_work_seconds(_started))
 
     def _classify(exc, query_date):
         """예외를 '다음 후보로 계속'(None) 과 기술적 실패(사유) 로 가른다.
@@ -1179,13 +1195,29 @@ def produce_ibk_dated_result(db, context, *, timeout=DEFAULT_TIMEOUT, now=None) 
             return IbkReason.CONTRACT_ERROR
         raise exc
 
+    def _budgeted_fetch(query_date):
+        """요청 **직전에** 잔여를 다시 본다. 부족하면 호출하지 않고 예산 소진으로 접는다.
+
+        ⛔ 시작 판정과 이 지점 사이에 선점이 끼면 기한이 이미 지났을 수 있다. 그때 하한으로
+           상한을 만들어 호출하면 초과가 무한정 커진다(실측: 27.5초 지난 뒤에도 호출).
+        ⛔ 호출자가 준 상한을 **늘리지 않는다** — `min` 만 쓴다.
+        """
+        remaining = deadline - time.monotonic()
+        if remaining < IBK_MIN_REQUEST_TIMEOUT_SECONDS:
+            raise CandidateBudgetExhausted()
+        return _fetch_ibk_rates_for_date(
+            query_date, reference_time=context.reference_time,
+            # ⛔ requests 의 timeout 은 연결·읽기 무응답 상한이지 **전체 응답의 벽시계 상한이
+            #    아니다.** 이 결속만으로 기한 내 반환이 보장되지는 않는다.
+            timeout=min(timeout, remaining),
+        )
+
     search = search_candidates(
         context.reference_time,
         max_days_back=MAX_DAYS_LOOKBACK,
-        fetch=lambda query_date: _fetch_ibk_rates_for_date(
-            query_date, reference_time=context.reference_time, timeout=timeout
-        ),
-        has_budget=lambda: time.monotonic() < deadline,
+        fetch=_budgeted_fetch,
+        # 잔여가 요청 하나를 시작할 만큼도 안 되면 시작하지 않는다.
+        has_budget=lambda: deadline - time.monotonic() >= IBK_MIN_REQUEST_TIMEOUT_SECONDS,
         classify=_classify,
     )
 

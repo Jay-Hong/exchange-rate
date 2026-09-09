@@ -17,7 +17,8 @@ from sqlalchemy.orm import sessionmaker
 from app import atomic_write_runtime as awr
 from app import crud, models
 from app.crawlers import ibk
-from app.ibk_result_protocol import IbkReason, IbkSource, IbkStatus
+from app.ibk_candidate_policy import CandidateSearchStop
+from app.ibk_result_protocol import IbkProtocolError, IbkReason, IbkSource, IbkStatus
 from app.ibk_run_context import IbkRunContext
 
 KST = ibk.KST
@@ -103,6 +104,226 @@ class DatedResultGeneratorTest(unittest.TestCase):
         kwargs = {"side_effect": fetch_error} if fetch_error else {"return_value": fetch_result}
         with patch.object(ibk, "_fetch_ibk_rates_for_date", **kwargs):
             return ibk.produce_ibk_dated_result(self.db, self.context, now=NOW)
+
+    # ── 작업 기한 결속 ───────────────────────────────────────
+    # ⛔ 생성기가 진입 시 12초 예산을 **새로 시작하면** spawn·import 지연이 공짜가 된다.
+    #    부모가 넘긴 작업 기한과 묶여야 한다.
+
+    def test_the_search_stops_at_the_parents_work_deadline(self):
+        """부모 기한이 12초보다 빨리 오면 그 기한이 이긴다."""
+        clock = [1000.0]
+        context = IbkRunContext(RUN_ID, REFERENCE, clock[0] + 2.0)   # 2초만 남았다
+        attempts = []
+
+        def fetch(query_date, **kwargs):
+            attempts.append(query_date)
+            clock[0] += 1.5          # 요청마다 1.5초 소모
+            raise ibk.IbkRateTableAbsentError("표 없음")
+
+        with patch.object(ibk.time, "monotonic", lambda: clock[0]), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            result = ibk.produce_ibk_dated_result(self.db, context, now=NOW)
+
+        self.assertLessEqual(len(attempts), 2, f"기한을 넘겨 계속 조회했다: {attempts}")
+        self.assertIs(result.status, IbkStatus.FAILED)
+        self.assertIs(result.reason, IbkReason.BUDGET_EXHAUSTED)
+
+    def test_a_generous_work_deadline_leaves_the_http_budget_in_charge(self):
+        """양성 대조 — 부모 기한이 넉넉하면 12초 몫이 그대로 판정한다."""
+        clock = [1000.0]
+        context = IbkRunContext(RUN_ID, REFERENCE, clock[0] + 200.0)
+        attempts = []
+
+        def fetch(query_date, **kwargs):
+            attempts.append(query_date)
+            clock[0] += 5.0
+            raise ibk.IbkRateTableAbsentError("표 없음")
+
+        with patch.object(ibk.time, "monotonic", lambda: clock[0]), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            ibk.produce_ibk_dated_result(self.db, context, now=NOW)
+
+        self.assertEqual(len(attempts), 3, f"12초 안에 5초짜리 3회여야 한다: {attempts}")
+
+    def test_a_request_is_not_started_when_too_little_time_remains(self):
+        """⛔ 최소치를 timeout 의 하한으로 쓰면 잔여 0.1초에 0.5초짜리 요청을 걸어 기한을
+        넘긴다. 최소치는 **시작 여부** 쪽에 두어야 상한이 언제나 잔여 이하다."""
+        clock = [1000.0]
+        context = IbkRunContext(RUN_ID, REFERENCE, clock[0] + 0.3)   # 최소치보다 적다
+        attempts = []
+
+        def fetch(query_date, **kwargs):
+            attempts.append(kwargs.get("timeout"))
+            raise ibk.IbkRateTableAbsentError("표 없음")
+
+        with patch.object(ibk.time, "monotonic", lambda: clock[0]), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            result = ibk.produce_ibk_dated_result(self.db, context, timeout=10, now=NOW)
+
+        self.assertEqual(attempts, [], "댈 수 없는 요청을 시작하면 안 된다")
+        self.assertIs(result.reason, IbkReason.BUDGET_EXHAUSTED)
+
+    def test_a_clock_that_moved_past_the_deadline_stops_instead_of_requesting(self):
+        """⛔ 최소치를 상한의 **하한**으로 쓰면 기한이 27초 지난 뒤에도 0.5초짜리 요청을
+        건다(실측). 그러면 "초과는 최대 0.5초" 가 거짓이 된다. 부족하면 멈춘다."""
+        seq = iter([1001.0, 1002.0] + [1030.0] * 40)   # 시작 판정 뒤 28초 선점
+        context = IbkRunContext(RUN_ID, REFERENCE, 1002.5)
+        calls = []
+
+        def fetch(query_date, *, reference_time, timeout):
+            calls.append(timeout)
+            return (dict(RATES), COMPLETED_AT)
+
+        with patch.object(ibk.time, "monotonic", lambda: next(seq)), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            result = ibk.produce_ibk_dated_result(self.db, context, timeout=10, now=NOW)
+
+        self.assertEqual(calls, [], "기한이 지났으면 호출하지 않는다")
+        self.assertIs(result.reason, IbkReason.BUDGET_EXHAUSTED,
+                      "기술 실패로 분류하면 안전망 진입 조건이 잘못 열린다")
+        self.assertEqual(self._rows(), 0, "저장도 없어야 한다")
+
+    def _search_outcome(self, context, seq, *, error=None, timeout=10):
+        """실제 검색 함수를 감싸 **반환된 종료 계약**까지 관측한다."""
+        captured, calls = {}, []
+        real = ibk.search_candidates
+
+        def spy(*args, **kwargs):
+            captured["result"] = real(*args, **kwargs)
+            return captured["result"]
+
+        def fetch(query_date, *, reference_time, timeout):
+            calls.append(query_date)
+            raise (error or ibk.IbkRateTableAbsentError("표 없음"))
+
+        clock = iter(seq)
+        with patch.object(ibk.time, "monotonic", lambda: next(clock, seq[-1])), \
+             patch.object(ibk, "search_candidates", spy), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            ibk.produce_ibk_dated_result(self.db, context, timeout=timeout, now=NOW)
+        return captured["result"], calls
+
+    def test_both_budget_paths_end_the_search_the_same_way(self):
+        """⛔ 요청을 하지 않았는데 TECHNICAL_FAILURE 로 끝나면 실패 날짜가 남아, 안전망이
+        "그 날짜가 기술적으로 실패했다" 로 오해한다(실측: fetch 0회인데 attempted=1 /
+        failure_date 채워짐). 두 경합 경로가 같은 종료 계약이어야 한다."""
+        cases = {
+            "시작 검사에서 부족": (1000.3, [1000.0] * 40),
+            "요청 직전 만료": (1002.5, [1001.0, 1002.0] + [1030.0] * 40),
+        }
+        for label, (deadline, seq) in cases.items():
+            with self.subTest(case=label):
+                self._reset_rates()
+                context = IbkRunContext(RUN_ID, REFERENCE, deadline)
+                search, calls = self._search_outcome(context, seq)
+                self.assertEqual(calls, [], "요청하지 않았어야 한다")
+                self.assertIs(search.stop, CandidateSearchStop.BUDGET_EXHAUSTED)
+                self.assertEqual(search.attempted, 0, "요청하지 않은 후보를 세면 안 된다")
+                self.assertIsNone(search.failure_date, "실패 날짜를 남기면 안 된다")
+
+    def test_a_real_technical_failure_still_carries_its_date(self):
+        """양성 대조 — 예산 처리가 진짜 기술 실패까지 삼키지 않는다."""
+        import requests
+
+        context = IbkRunContext(RUN_ID, REFERENCE, 1200.0)
+        search, calls = self._search_outcome(
+            context, [1000.0] * 40, error=requests.RequestException("net"))
+        self.assertEqual(len(calls), 1, "실제로 한 번은 요청했다")
+        self.assertIs(search.stop, CandidateSearchStop.TECHNICAL_FAILURE)
+        self.assertEqual(search.attempted, 1)
+        self.assertIsNotNone(search.failure_date, "안전망이 조회할 날짜가 필요하다")
+
+    def test_earlier_observations_survive_a_budget_stop(self):
+        """앞서 받은 무고시 사실은 예산 소진으로 사라지지 않는다."""
+        clock = [1000.0]
+        context = IbkRunContext(RUN_ID, REFERENCE, 1010.0)
+        captured, seen = {}, []
+        real = ibk.search_candidates
+
+        def spy(*args, **kwargs):
+            captured["result"] = real(*args, **kwargs)
+            return captured["result"]
+
+        def fetch(query_date, *, reference_time, timeout):
+            seen.append(query_date)
+            clock[0] += 9.6          # 첫 요청 뒤 예산이 바닥난다
+            return None              # 무고시
+
+        with patch.object(ibk.time, "monotonic", lambda: clock[0]), \
+             patch.object(ibk, "search_candidates", spy), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            ibk.produce_ibk_dated_result(self.db, context, timeout=10, now=NOW)
+
+        search = captured["result"]
+        self.assertEqual(len(seen), 1)
+        self.assertIs(search.stop, CandidateSearchStop.BUDGET_EXHAUSTED)
+        self.assertTrue(search.saw_no_session, "받은 무고시 사실이 사라지면 안 된다")
+        self.assertEqual(search.attempted, 1, "실제로 한 요청은 그대로 센다")
+
+    def test_the_callers_timeout_is_never_enlarged(self):
+        """⛔ 최소치를 하한으로 쓰면 호출자의 timeout=0.1 이 0.5 로 **늘어난다**(실측)."""
+        clock = [1000.0]
+        context = IbkRunContext(RUN_ID, REFERENCE, clock[0] + 10.0)
+        timeouts = []
+
+        def fetch(query_date, *, reference_time, timeout):
+            timeouts.append(timeout)
+            raise ibk.IbkRateTableAbsentError("표 없음")
+
+        with patch.object(ibk.time, "monotonic", lambda: clock[0]), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            ibk.produce_ibk_dated_result(self.db, context, timeout=0.1, now=NOW)
+
+        self.assertTrue(timeouts)
+        for value in timeouts:
+            self.assertLessEqual(value, 0.1, f"호출자 상한을 늘렸다: {timeouts}")
+
+    def test_an_implausible_work_deadline_is_not_bypassed(self):
+        """⛔ context.work_deadline 을 직접 읽으면 과대 기한 검증을 우회한다 — 실측에서
+        잘못된 기한으로 10초짜리 요청 8회와 저장까지 진행됐다."""
+        context = IbkRunContext(RUN_ID, REFERENCE, 1_000_000.0)
+        calls = []
+
+        def fetch(query_date, *, reference_time, timeout):
+            calls.append(timeout)
+            return (dict(RATES), COMPLETED_AT)
+
+        with patch.object(ibk.time, "monotonic", lambda: 1000.0), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            with self.assertRaises(IbkProtocolError):
+                ibk.produce_ibk_dated_result(self.db, context, timeout=10, now=NOW)
+
+        self.assertEqual(calls, [], "검증 실패면 요청하지 않는다")
+        self.assertEqual(self._rows(), 0, "저장도 없어야 한다")
+
+    def test_the_timeout_handed_to_the_request_is_capped_by_the_remaining(self):
+        """⛔ 이 시험이 잠그는 것은 **전달한 상한**이지 요청의 실제 수명이 아니다.
+        requests 의 timeout 은 전체 응답의 벽시계 상한이 아니다."""
+        clock = [1000.0]
+        context = IbkRunContext(RUN_ID, REFERENCE, clock[0] + 0.6)
+        timeouts = []
+
+        def fetch(query_date, *, reference_time, timeout):
+            timeouts.append(timeout)
+            clock[0] += 1.0
+            raise ibk.IbkRateTableAbsentError("표 없음")
+
+        with patch.object(ibk.time, "monotonic", lambda: clock[0]), \
+             patch.object(ibk, "_fetch_ibk_rates_for_date", side_effect=fetch), \
+             patch.object(ibk, "_is_preopen_pending_window", return_value=True):
+            ibk.produce_ibk_dated_result(self.db, context, timeout=10, now=NOW)
+
+        self.assertEqual(len(timeouts), 1)
+        self.assertLessEqual(timeouts[0], 0.6 + 1e-9)
+        self.assertGreater(timeouts[0], 0)
 
     # ── 정상 관측 ────────────────────────────────────────────
     def test_fresh_write_is_observed(self):

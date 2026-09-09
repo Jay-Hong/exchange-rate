@@ -8,6 +8,7 @@ import datetime
 import unittest
 
 from app.ibk_candidate_policy import (
+    CandidateBudgetExhausted,
     CandidateSearchStop,
     search_candidates,
 )
@@ -105,6 +106,34 @@ class SearchStopTest(unittest.TestCase):
             has_budget=lambda: next(budget), classify=lambda exc, day: None)
         self.assertIs(exhausted.stop, CandidateSearchStop.BUDGET_EXHAUSTED)
         self.assertIsNone(exhausted.failure_date)
+
+    def test_a_budget_signal_is_not_a_technical_failure(self):
+        """⛔ `fetch` 가 **요청하지 않고** 물러난 것을 classify 로 넘기면 TECHNICAL_FAILURE 로
+        끝나고 실패 날짜까지 남아, 안전망이 그 날짜를 기술 실패로 오해한다."""
+        def fetch(day):
+            raise CandidateBudgetExhausted()
+
+        result = _search(_at(28, 12), fetch,
+                         classify=lambda exc, day: "SHOULD_NOT_BE_CONSULTED")
+        self.assertIs(result.stop, CandidateSearchStop.BUDGET_EXHAUSTED)
+        self.assertEqual(result.attempted, 0, "요청하지 않은 후보를 세면 안 된다")
+        self.assertIsNone(result.failure_date)
+        self.assertIsNone(result.failure_reason, "classify 를 거치면 안 된다")
+
+    def test_a_budget_signal_preserves_what_was_already_seen(self):
+        seen = []
+
+        def fetch(day):
+            seen.append(day)
+            if len(seen) == 1:
+                return None                      # 무고시
+            raise CandidateBudgetExhausted()
+
+        result = _search(_at(28, 12), fetch, classify=lambda exc, day: "TRANSPORT")
+        self.assertIs(result.stop, CandidateSearchStop.BUDGET_EXHAUSTED)
+        self.assertTrue(result.saw_no_session, "받은 무고시 사실은 유지된다")
+        self.assertEqual(result.attempted, 1, "실제로 요청한 1회는 그대로 센다")
+        self.assertIsNone(result.failure_date)
 
     def test_a_semantic_rejection_continues_to_older_candidates(self):
         seen = []
