@@ -39,25 +39,32 @@ def fixture(name):
 
 
 class FakeElement:
-    def __init__(self, value):
-        self._value = value
-        self.submitted = []
-        self.stale = False
+    """입력칸. `typed` 는 property(사용자가 친 값), 문서가 서비스하는 날짜와 별개다."""
 
-    def get_attribute(self, name):
-        return self._value if name == "value" else None
+    def __init__(self, typed=None):
+        self.typed = typed
+        self.submitted = []
 
 
 class FakeDriver:
-    """DOM 을 문자열 하나로 들고 있는 최소 드라이버."""
+    """DOM 을 문자열 하나로 들고 있는 최소 드라이버.
 
-    def __init__(self, html, served_date, *, alerts=(), navigates=True):
+    ⛔ `served_date`(문서 내용 속성)와 `element.typed`(입력 property)를 **분리해** 들고 있다.
+       Selenium 의 `get_attribute("value")` 가 property 를 우선 반환하는 실제 동작 때문에
+       둘을 하나로 두면 이 구분을 시험할 수 없다.
+    """
+
+    def __init__(self, html, served_date, *, alerts=(), navigates=True, typed=None):
         self.html = html
-        self.element = FakeElement(served_date)
+        self.served = served_date
+        self.element = FakeElement(typed)
+        self.root = object()
         self.alerts = list(alerts)
         self.navigates = navigates
         self.submits = 0
         self.page_source_reads = 0
+        self.roots_taken = 0
+        self.confirm_calls = []
 
 
 class Harness:
@@ -75,8 +82,15 @@ class Harness:
         self._advance = advance or (lambda _seconds: None)
 
     # --- 주입되는 조작 ---
+    def served_date(self, driver):
+        return driver.served
+
     def find_input(self, driver):
         return driver.element
+
+    def document_root(self, driver):
+        driver.roots_taken += 1
+        return driver.root
 
     def submit(self, element, text):
         if self._submit_raises:
@@ -84,8 +98,9 @@ class Harness:
         self.driver.submits += 1
         element.submitted.append(text)
         if self.driver.navigates:
-            element.stale = True
-            self.driver.element = FakeElement(text)
+            self.driver.root = object()          # 문서 교체
+            self.driver.served = text
+            self.driver.element = FakeElement()
             self.driver.html = self._after_submit_html(text)
 
     def _after_submit_html(self, text):
@@ -97,10 +112,11 @@ class Harness:
             return None, self._read_failure
         return driver.html, None
 
-    def wait_stale(self, element, timeout):
+    def wait_replaced(self, root, timeout):
+        self.driver.confirm_calls.append(timeout)
         if self._stale_raises:
             raise self._stale_raises
-        return element.stale
+        return root is not self.driver.root
 
     def take_alert(self, driver):
         return driver.alerts.pop(0) if driver.alerts else None
@@ -121,9 +137,10 @@ class Harness:
         return IbkSeleniumStrictCapturer(
             parse=lambda html, *, query_date, reference_time: ibk._parse_ibk_official_response(
                 _Text(html), query_date=query_date, reference_time=reference_time),
-            find_input=self.find_input, submit=self.submit,
-            read_page_source=self.read_page_source, wait_stale=self.wait_stale,
-            take_alert=self.take_alert, monotonic=self.monotonic, sleep=self.sleep,
+            served_date=self.served_date, find_input=self.find_input, submit=self.submit,
+            document_root=self.document_root, read_page_source=self.read_page_source,
+            wait_replaced=self.wait_replaced, take_alert=self.take_alert,
+            monotonic=self.monotonic, sleep=self.sleep,
             **kwargs)
 
 
@@ -175,6 +192,73 @@ class SubmissionIsConfirmedBeforeParsing(unittest.TestCase):
         self.assertEqual(capture.completed_at, "06:00:02")
         self.assertEqual(capture.service_date, DAY_0904)
         self.assertTrue(capture.usable)
+
+
+class TheServedDateIsReadFromTheDocumentNotTheInput(unittest.TestCase):
+    """⛔ Selenium 의 `get_attribute("value")` 는 input 에서 **property 를 우선 반환**한다.
+
+    로컬 실측: `send_keys("2026.09.04")` 뒤 property=2026.09.04 / 내용 속성=2026.09.09 /
+    page_source=2026.09.09. 입력값으로 판단하면 **필요한 제출을 건너뛰고** 뒤의 파서가
+    거부한다. 판단 근거는 문서가 실제로 서비스하는 날짜여야 하고, 그것이 파서가 읽을 값이다.
+    """
+
+    def test_a_typed_but_unsubmitted_value_does_not_cancel_the_submit(self):
+        # 문서는 09.09 를 서비스하는데 입력칸에는 09.04 가 쳐져 있다.
+        driver = FakeDriver(fixture("selenium_stale_typed_not_submitted"), "2026.09.09",
+                            typed="2026.09.04")
+        harness = Harness(driver)
+        capture = run(harness, DAY_0904)
+
+        self.assertEqual(driver.submits, 1, "입력값이 같아 보여도 제출은 필요하다")
+        self.assertEqual(capture.verdict, ACCEPTED)
+        self.assertTrue(capture.submitted)
+        self.assertEqual(capture.rates, OBSERVED_0904)
+
+    def test_the_input_property_is_never_consulted(self):
+        # 입력칸을 만지면 터지게 두고도 제출이 필요 없는 경로가 성립해야 한다.
+        driver = FakeDriver(fixture("http_dated_20260904"), "2026.09.04")
+
+        class Exploding:
+            def __getattr__(self, name):
+                raise AssertionError("입력칸을 읽으면 안 된다")
+
+        driver.element = Exploding()
+        capture = run(Harness(driver), DAY_0904)
+        self.assertEqual(capture.verdict, ACCEPTED)
+        self.assertFalse(capture.submitted)
+
+
+class TheConfirmationWatchesTheDocumentRoot(unittest.TestCase):
+    def test_the_root_is_captured_before_submitting(self):
+        driver = FakeDriver(fixture("selenium_stale_typed_not_submitted"), "2026.09.01")
+        capture = run(Harness(driver), DAY_0904)
+        self.assertEqual(capture.verdict, ACCEPTED)
+        self.assertEqual(driver.roots_taken, 1, "제출 전 루트를 한 번 잡는다")
+
+    def test_a_document_that_kept_its_root_is_not_confirmed(self):
+        # 입력 요소만 갈리고 문서는 그대로인 부분 갱신을 흉내 낸다.
+        driver = FakeDriver(fixture("selenium_stale_typed_not_submitted"), "2026.09.01")
+        harness = Harness(driver)
+        original = harness.submit
+
+        def partial_update(element, text):
+            root_before = driver.root
+            original(element, text)
+            driver.root = root_before          # 문서는 바뀌지 않았다
+            driver.element = FakeElement()
+
+        harness.submit = partial_update
+        capture = run(harness, DAY_0904)
+        self.assertEqual(capture.verdict, UNAVAILABLE)
+        self.assertEqual(capture.reason, "submit_not_confirmed")
+        self.assertEqual(driver.page_source_reads, 0)
+
+    def test_the_confirmation_gets_one_shared_budget(self):
+        driver = FakeDriver(fixture("selenium_stale_typed_not_submitted"), "2026.09.01")
+        capture = run(Harness(driver), DAY_0904, staleness_timeout=8.0)
+        self.assertEqual(capture.verdict, ACCEPTED)
+        self.assertEqual(driver.confirm_calls, [8.0],
+                         "확인 대기는 한 번, 하나의 예산으로 부른다")
 
 
 class TheConsecutiveSubmitGuardIsHonoured(unittest.TestCase):
@@ -252,9 +336,14 @@ class VerdictsFromRealCaptures(unittest.TestCase):
 
 class FailuresAreTypedNotRaised(unittest.TestCase):
     def test_a_missing_input_is_unavailable(self):
-        harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.04"))
+        harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.01"))
         harness.find_input = lambda driver: None
         self.assertEqual(run(harness, DAY_0904).reason, "input_absent")
+
+    def test_a_missing_document_root_is_unavailable(self):
+        harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.01"))
+        harness.document_root = lambda driver: None
+        self.assertEqual(run(harness, DAY_0904).reason, "document_root_absent")
 
     def test_a_stalled_page_source_read_is_unavailable(self):
         harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.04"),
@@ -271,20 +360,20 @@ class FailuresAreTypedNotRaised(unittest.TestCase):
         self.assertIn("submit_failed:RuntimeError", capture.reason)
         self.assertNotIn("PRIVATE_DRIVER_DETAIL", str(capture))
 
-    def test_a_staleness_wait_failure_is_unavailable(self):
+    def test_a_confirmation_failure_is_unavailable(self):
         harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.09"),
                           stale_raises=RuntimeError("boom"))
-        self.assertIn("staleness_failed:RuntimeError", run(harness, DAY_0904).reason)
+        self.assertIn("confirm_failed:RuntimeError", run(harness, DAY_0904).reason)
 
-    def test_an_unreadable_input_attribute_is_unavailable(self):
-        driver = FakeDriver(fixture("http_dated_20260904"), "2026.09.04")
+    def test_an_unreadable_served_date_is_unavailable(self):
+        harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.04"))
 
-        class Exploding:
-            def get_attribute(self, name):
-                raise RuntimeError("nope")
+        def explode(driver):
+            raise RuntimeError("nope")
 
-        driver.element = Exploding()
-        self.assertIn("input_unreadable:RuntimeError", run(Harness(driver), DAY_0904).reason)
+        harness.served_date = explode
+        self.assertIn("served_date_unreadable:RuntimeError",
+                      run(harness, DAY_0904).reason)
 
     def test_a_parser_crash_is_unavailable_rather_than_an_exception(self):
         harness = Harness(FakeDriver(fixture("http_dated_20260904"), "2026.09.04"))
@@ -357,13 +446,16 @@ class TheModuleNeverWrites(unittest.TestCase):
 class DriverFailuresNeverEscape(unittest.TestCase):
     """⛔ 조작이 예외를 던지면 호출자까지 전파되던 결함의 회귀 잠금(실측 3건)."""
 
-    OPERATIONS = ("take_alert", "find_input", "read_page_source", "submit", "wait_stale")
+    OPERATIONS = ("take_alert", "served_date", "find_input", "read_page_source",
+                  "submit", "document_root", "wait_replaced")
 
     def test_every_injected_operation_failure_becomes_a_typed_result(self):
         for name in self.OPERATIONS:
             with self.subTest(operation=name):
                 # submit·wait_stale 은 제출 경로에서만 불리므로 다른 날짜를 서비스시킨다.
-                served = "2026.09.01" if name in ("submit", "wait_stale") else "2026.09.04"
+                needs_submit = name in ("submit", "wait_replaced", "document_root",
+                                        "find_input")
+                served = "2026.09.01" if needs_submit else "2026.09.04"
                 harness = Harness(FakeDriver(fixture("http_dated_20260904"), served))
 
                 def boom(*args, **kwargs):
@@ -384,13 +476,14 @@ class DocumentAgeIsCheckedAtRead(unittest.TestCase):
         clock = [1000.0]
         driver = FakeDriver(fixture("http_dated_20260904"), "2026.09.04")
         harness = Harness(driver, clock=lambda: clock[0])
-        original = harness.find_input
+        original = harness.served_date
 
-        def slow_find(d):
+        # 제출이 필요 없는 경로에서도 시간은 흐른다 — 항상 불리는 조작에 지연을 건다.
+        def slow_served(d):
             clock[0] += 61.0
             return original(d)
 
-        harness.find_input = slow_find
+        harness.served_date = slow_served
         capture = run(harness, DAY_0904)
         self.assertEqual(capture.verdict, UNAVAILABLE)
         self.assertEqual(capture.reason, "page_too_old")
@@ -417,13 +510,13 @@ class DocumentAgeIsCheckedAtRead(unittest.TestCase):
         harness = Harness(FakeDriver(fixture("selenium_stale_typed_not_submitted"),
                                      "2026.09.01"), clock=lambda: clock[0],
                           advance=lambda s: clock.__setitem__(0, clock[0] + s))
-        original = harness.wait_stale
+        original = harness.wait_replaced
 
-        def confirm_after(element, timeout):
+        def confirm_after(root, timeout):
             clock[0] += 7.0
-            return original(element, timeout)
+            return original(root, timeout)
 
-        harness.wait_stale = confirm_after
+        harness.wait_replaced = confirm_after
         capture = run(harness, DAY_0904, page_loaded_at=1000.0)
         self.assertEqual(capture.verdict, ACCEPTED)
         self.assertEqual(capture.rates, OBSERVED_0904)
@@ -435,13 +528,13 @@ class DocumentAgeIsCheckedAtRead(unittest.TestCase):
         harness = Harness(FakeDriver(fixture("selenium_stale_typed_not_submitted"),
                                      "2026.09.01"), clock=lambda: clock[0],
                           advance=lambda s: clock.__setitem__(0, clock[0] + s))
-        original = harness.wait_stale
+        original = harness.wait_replaced
 
-        def confirm_late(element, timeout):
+        def confirm_late(root, timeout):
             clock[0] += 7.0
-            return original(element, timeout)
+            return original(root, timeout)
 
-        harness.wait_stale = confirm_late
+        harness.wait_replaced = confirm_late
         capture = run(harness, DAY_0904, page_loaded_at=1000.0,
                       max_page_age_seconds=5.0, staleness_timeout=10.0,
                       submit_guard_seconds=0.0)
@@ -463,10 +556,14 @@ class DocumentAgeIsCheckedAtRead(unittest.TestCase):
 
 class DependencyValidation(unittest.TestCase):
     def test_bad_dependencies_are_refused(self):
-        ok = dict(parse=lambda *a, **k: None, find_input=lambda d: None,
-                  submit=lambda e, t: None, read_page_source=lambda d: (None, "x"),
-                  wait_stale=lambda e, t: True, take_alert=lambda d: None)
+        ok = dict(parse=lambda *a, **k: None, served_date=lambda d: "",
+                  find_input=lambda d: None, submit=lambda e, t: None,
+                  document_root=lambda d: object(),
+                  read_page_source=lambda d: (None, "x"),
+                  wait_replaced=lambda r, t: True, take_alert=lambda d: None)
         for override in ({"parse": None}, {"submit": "x"}, {"take_alert": 3},
+                         {"served_date": None}, {"document_root": 1},
+                         {"wait_replaced": "x"},
                          {"submit_guard_seconds": -1}, {"staleness_timeout": "x"},
                          {"max_page_age_seconds": -0.5},
                          {"max_page_age_seconds": float("nan")},

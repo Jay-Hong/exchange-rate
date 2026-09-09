@@ -155,8 +155,10 @@ def selenium_driver_context():
         driver = create_selenium_driver()
 
         # Timeout 설정 (모든 Selenium 크롤러에 자동 적용)
-        driver.set_page_load_timeout(SELENIUM_DRIVER_TIMEOUT)  # 페이지 로드 60초
-        driver.set_script_timeout(SELENIUM_DRIVER_TIMEOUT)     # 스크립트 실행 60초
+        # ⛔ 숫자를 여기 다시 적지 않는다 — 상수는 42초인데 주석만 60초로 남아 있었고,
+        #    그 주석을 근거로 예산을 계산할 뻔했다(2026-09-09). 값은 상수가 단일 정의다.
+        driver.set_page_load_timeout(SELENIUM_DRIVER_TIMEOUT)  # 페이지 로드 제한
+        driver.set_script_timeout(SELENIUM_DRIVER_TIMEOUT)     # 스크립트 실행 제한
 
         logger.debug(f"✅ Selenium 드라이버 생성 성공 (timeout {SELENIUM_DRIVER_TIMEOUT}초)")
         yield driver

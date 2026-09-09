@@ -64,13 +64,14 @@ class IbkSeleniumStrictCapture:
 class IbkSeleniumStrictCapturer:
     """드라이버 조작을 주입받아 흐름만 소유한다. selenium·bs4 를 임포트하지 않는다."""
 
-    def __init__(self, *, parse, find_input, submit, read_page_source, wait_stale,
-                 take_alert, monotonic=time.monotonic, sleep=time.sleep,
+    def __init__(self, *, parse, served_date, find_input, submit, document_root,
+                 read_page_source, wait_replaced, take_alert,
+                 monotonic=time.monotonic, sleep=time.sleep,
                  submit_guard_seconds=SUBMIT_GUARD_SECONDS,
                  staleness_timeout=STALENESS_TIMEOUT_SECONDS,
                  max_page_age_seconds=MAX_PAGE_AGE_SECONDS):
-        deps = (parse, find_input, submit, read_page_source, wait_stale, take_alert,
-                monotonic, sleep)
+        deps = (parse, served_date, find_input, submit, document_root,
+                read_page_source, wait_replaced, take_alert, monotonic, sleep)
         if not all(callable(dep) for dep in deps):
             raise ValueError("INVALID_IBK_SELENIUM_STRICT_DEPENDENCY")
         for name, value in (("SUBMIT_GUARD", submit_guard_seconds),
@@ -80,9 +81,10 @@ class IbkSeleniumStrictCapturer:
             # 아무리 낡은 문서도 받아들여진다(실측).
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
                 raise ValueError(f"INVALID_IBK_SELENIUM_STRICT_{name}")
-        self._parse, self._find_input, self._submit = parse, find_input, submit
-        self._read_page_source, self._wait_stale = read_page_source, wait_stale
-        self._take_alert = take_alert
+        self._parse, self._served_date = parse, served_date
+        self._find_input, self._submit = find_input, submit
+        self._document_root, self._read_page_source = document_root, read_page_source
+        self._wait_replaced, self._take_alert = wait_replaced, take_alert
         self._monotonic, self._sleep = monotonic, sleep
         self._submit_guard_seconds = submit_guard_seconds
         self._staleness_timeout = staleness_timeout
@@ -107,14 +109,13 @@ class IbkSeleniumStrictCapturer:
         if stale_reason:
             return _unavailable(stale_reason, notes)
 
-        element, failed = self._guarded("find_input", self._find_input, driver)
-        if failed:
-            return _unavailable(failed, notes)
-        if element is None:
-            return _unavailable("input_absent", notes)
-
+        # ⛔ 요소의 `get_attribute("value")` 를 쓰면 안 된다 — Selenium 은 input 에서
+        #    **property 를 우선 반환**하므로, 입력만 되고 제출되지 않은 값이 그대로 나온다
+        #    (로컬 실측: 입력 후 property=2026.09.04 / 내용 속성=page_source=2026.09.09).
+        #    그러면 필요한 제출을 건너뛰고 뒤의 파서가 거부한다. 판단 근거는 **문서가 실제로
+        #    서비스하는 날짜**(내용 속성)여야 하고, 그것이 곧 파서가 읽을 값이다.
         expected = query_date.strftime("%Y.%m.%d")
-        served, failed = self._guarded("input_unreadable", element.get_attribute, "value")
+        served, failed = self._guarded("served_date_unreadable", self._served_date, driver)
         if failed:
             return _unavailable(failed, notes)
         served = (served or "").strip()
@@ -122,8 +123,7 @@ class IbkSeleniumStrictCapturer:
         submitted = False
         document_at = page_loaded_at
         if served != expected:
-            outcome = self._submit_and_confirm(driver, element, expected,
-                                               page_loaded_at, notes)
+            outcome = self._submit_and_confirm(driver, expected, page_loaded_at, notes)
             if isinstance(outcome, IbkSeleniumStrictCapture):
                 return outcome
             submitted, document_at = True, outcome
@@ -193,7 +193,7 @@ class IbkSeleniumStrictCapturer:
             return "page_too_old"
         return None
 
-    def _submit_and_confirm(self, driver, element, expected, page_loaded_at, notes):
+    def _submit_and_confirm(self, driver, expected, page_loaded_at, notes):
         """제출하고 **문서가 실제로 교체됐는지** 확인한다.
 
         성공하면 **제출 직전** monotonic 시각을 돌려준다. 새 문서는 제출 이후에 생기므로
@@ -203,6 +203,20 @@ class IbkSeleniumStrictCapturer:
            다르다. 확인이 70초 늦게 돌아오면 이미 70초 된 문서의 나이가 0 으로 재설정된다
            (실측). 상한을 넘긴 가짜 어댑터에서만 생기는 문제가 아니다.
         """
+        # ⛔ 교체 확인의 기준은 **제출 전 문서의 루트**다. 입력 요소만 보면 부분 갱신에서
+        #    "요소가 떨어졌다" 를 "문서가 바뀌었다" 로 오독한다.
+        root, failed = self._guarded("document_root", self._document_root, driver)
+        if failed:
+            return _unavailable(failed, notes)
+        if root is None:
+            return _unavailable("document_root_absent", notes)
+
+        element, failed = self._guarded("find_input", self._find_input, driver)
+        if failed:
+            return _unavailable(failed, notes)
+        if element is None:
+            return _unavailable("input_absent", notes)
+
         waited = self._submit_guard_seconds - (self._monotonic() - page_loaded_at)
         if waited > 0:
             # 페이지 JS 의 연속 제출 가드. 기다리지 않으면 경고 대화상자로 세션이 막힌다.
@@ -224,8 +238,10 @@ class IbkSeleniumStrictCapturer:
                 UNAVAILABLE, reason="submit_blocked_by_alert",
                 notes=tuple(notes + [_short(blocked)]))
 
-        replaced, failed = self._guarded("staleness_failed", self._wait_stale,
-                                         element, self._staleness_timeout)
+        # 확인용 예산은 **하나**다. 루트 교체 대기와 새 문서 준비 대기가 각자 상한을 쓰면
+        # 예산이 두 배가 된다 — 어댑터가 이 하나를 나눠 쓴다.
+        replaced, failed = self._guarded("confirm_failed", self._wait_replaced,
+                                         root, self._staleness_timeout)
         if failed:
             return _unavailable(failed, notes)
         if not replaced:

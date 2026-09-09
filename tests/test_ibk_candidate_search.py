@@ -79,6 +79,32 @@ class SearchStopTest(unittest.TestCase):
         self.assertIs(result.stop, CandidateSearchStop.TECHNICAL_FAILURE)
         self.assertEqual(result.failure_reason, "TRANSPORT")
         self.assertEqual(result.attempted, 1, "기술 실패에서는 더 과거로 가지 않는다")
+        # ⛔ 실패한 날짜가 없으면 안전망이 어느 날짜를 조회할지 알 수 없어 기대일로 돌아간다.
+        self.assertEqual(result.failure_date, FRI, "조회하던 날짜를 남겨야 한다")
+
+    def test_the_failed_candidate_date_is_the_one_that_actually_failed(self):
+        """무고시로 건너뛴 뒤 실패했다면 실패 날짜는 **그 과거 후보**다."""
+        def fetch(day):
+            if day == FRI:
+                return None          # 무고시 → 더 과거로
+            raise RuntimeError("net")
+
+        result = _search(_at(28, 12), fetch, classify=lambda exc, day: "TRANSPORT")
+        self.assertIs(result.stop, CandidateSearchStop.TECHNICAL_FAILURE)
+        self.assertEqual(result.failure_date, THU, "기대일이 아니라 실패한 후보다")
+        self.assertNotEqual(result.failure_date, FRI)
+        self.assertTrue(result.saw_no_session)
+
+    def test_a_date_is_carried_only_for_a_technical_failure(self):
+        accepted = _search(_at(28, 12), lambda day: PAYLOAD,
+                           classify=lambda exc, day: None)
+        self.assertIsNone(accepted.failure_date)
+        budget = iter([True, True, False])
+        exhausted = search_candidates(
+            _at(28, 12), max_days_back=10, fetch=lambda day: None,
+            has_budget=lambda: next(budget), classify=lambda exc, day: None)
+        self.assertIs(exhausted.stop, CandidateSearchStop.BUDGET_EXHAUSTED)
+        self.assertIsNone(exhausted.failure_date)
 
     def test_a_semantic_rejection_continues_to_older_candidates(self):
         seen = []

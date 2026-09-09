@@ -74,6 +74,7 @@ class CandidateSearchResult:
     service_date: datetime.date | None = None   # ACCEPTED 일 때 실제로 관측한 날짜
     payload: object = None                      # ACCEPTED 일 때 fetch 반환값
     failure_reason: object = None               # TECHNICAL_FAILURE 일 때 원인
+    failure_date: datetime.date | None = None   # TECHNICAL_FAILURE 일 때 조회하던 날짜
     saw_no_session: bool = False                # HTTP 무고시 응답을 실제로 받았다
     saw_preopen_pending: bool = False           # 개장 전 표 준비중을 실제로 받았다
     attempted: int = 0                          # 실제로 요청한 후보 수
@@ -125,8 +126,12 @@ def search_candidates(
         except Exception as exc:  # noqa: BLE001 — 해석은 주입된 classify 가 한다
             reason = classify(exc, query_date)
             if reason is not None:
+                # ⛔ 실패한 **날짜**를 함께 남긴다. 없으면 안전망(Selenium)이 어느 날짜를
+                #    조회해야 하는지 알 수 없어 임의로 기대일로 되돌아간다 — "당일 무고시 →
+                #    과거 후보 기술 오류" 뒤에 당일을 다시 보는 것은 검색 결론을 뒤집는 것이다.
                 return CandidateSearchResult(
                     CandidateSearchStop.TECHNICAL_FAILURE, failure_reason=reason,
+                    failure_date=query_date,
                     saw_no_session=saw_no_session, saw_preopen_pending=saw_preopen, attempted=attempted,
                 )
             saw_preopen = True
