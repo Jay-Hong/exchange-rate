@@ -57,7 +57,9 @@ class TelegramHandler:
             return True
 
         except requests.exceptions.RequestException as e:
-            logger.error("❌ 텔레그램 메시지 전송 실패", exc_info=True, extra={"error": str(e)})
+            # 예외 문자열과 traceback 은 요청 URL 을 담고, 그 URL 에는 봇 토큰이 들어 있다
+            # (실측). 로그는 bind-mount 파일과 관리자 뷰어로 나가므로 종류만 남긴다.
+            logger.error("❌ 텔레그램 메시지 전송 실패", extra={"error_type": type(e).__name__})
             return False
 
     def send_error_alert(self, crawler_name: str, error_message: str, error_count: int = 1) -> bool:
