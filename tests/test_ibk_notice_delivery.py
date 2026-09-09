@@ -584,19 +584,35 @@ class ShutdownAlwaysLeavesARecord(unittest.TestCase):
         return captured.records
 
     def test_a_clean_stop_that_dropped_work_is_still_recorded(self):
-        """⛔ 폐기는 `_stop` 이 선 **뒤 남은 큐**에서만 일어난다. 발송이 빠르면 소비자가
-        먼저 다 보내 버려 이 창이 안 열린다(실측: 폐기 0). 한 건을 붙잡아 둔다."""
-        import time as _time
+        """⛔ 폐기는 `_stop` 이 선 **뒤 남은 큐**에서만 일어난다.
 
-        def slow_send(text):
-            _time.sleep(0.2)
-            return True
+        ⛔ 고정 sleep 으로는 이 창을 보장하지 못한다 — 종료 호출이 조금만 늦어도 소비자가
+           두 건을 다 보내 버려 `dropped=0` 이 되고, 제품은 정확한데 **시험이 기대한 상황만
+           사라진다**(실측: 종료 직전 0.55초 지연 → 발송 2 / 폐기 0). 그래서 첫 발송을
+           **붙잡아** 두고 순서를 동기화한다: 발송 진입 확인 → 두 번째 접수 → 종료 신호
+           확인 → 해제.
+        """
+        blocker = threading.Event()
+        send = RecordingSend(block=blocker)
+        # ⛔ 어떤 경로로 끝나도 반드시 풀어 준다. 안 풀면 소비자가 `DEADLINE` 만큼 붙잡힌다.
+        self.addCleanup(blocker.set)
 
-        delivery = IbkNoticeDelivery(send=slow_send, poll_seconds=0.01)
+        delivery = IbkNoticeDelivery(send=send, poll_seconds=0.01)
         delivery.start()
-        for index in range(2):
-            self.assertTrue(delivery.event_sink(notice(run_id=f"drop{index}")))
+        self.assertTrue(delivery.event_sink(notice(run_id="held")))
+        self.assertTrue(send.entered.wait(DEADLINE), "첫 발송이 시작되지 않았다")
+        self.assertTrue(delivery.event_sink(notice(run_id="dropped")),
+                        "두 번째는 큐에서 대기한다")
+
+        # 종료 신호가 선 것을 확인한 뒤에 첫 발송을 푼다 — 그래야 소비자가 루프를 빠져나가
+        # 남은 한 건을 폐기한다.
+        releaser = threading.Thread(
+            target=lambda: (delivery._stop.wait(DEADLINE), blocker.set()), daemon=True)
+        releaser.start()
+        self.addCleanup(releaser.join, DEADLINE)
+
         records = self._shutdown_with(delivery)
+        self.assertEqual(len(send.calls), 1, "두 번째는 발송되지 않아야 한다")
 
         shutdown = [r for r in records if r.getMessage() == "IBK_NOTICE_DELIVERY_SHUTDOWN"]
         self.assertEqual(len(shutdown), 1, [r.getMessage() for r in records])
@@ -607,7 +623,8 @@ class ShutdownAlwaysLeavesARecord(unittest.TestCase):
                          "폐기가 있으면 경고로 남긴다")
 
     def test_a_quiet_shutdown_is_recorded_too(self):
-        """양성 대조 — 폐기가 없어도 종료 결과는 남는다(정보 수준)."""
+        """양성 대조 — 폐기가 없어도 종료 결과는 남는다(정보 수준). 아무것도 접수하지
+        않았으므로 큐가 비어 있는 것이 확정이다 — 여기엔 타이밍이 없다."""
         delivery = IbkNoticeDelivery(send=lambda text: True)
         delivery.start()
         records = self._shutdown_with(delivery)
