@@ -10,6 +10,8 @@ import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
 
+from apscheduler.executors.base import MaxInstancesReachedError
+from apscheduler.executors.pool import ThreadPoolExecutor
 from apscheduler.triggers.combining import OrTrigger
 from pytz import timezone
 
@@ -180,43 +182,68 @@ class TestBankCollectionWindows(_SwitchJobsCase):
                 f"{mode}: 다른 크롤러와 같은 시작초를 쓰면 안 된다",
             )
 
-    def test_woori_break1_is_one_job_and_preserves_050453_final_fire(self):
+    def test_woori_break1_runs_to_055944(self):
+        """woori 야간 수집은 05:59:44까지다.
+
+        관측: 사용자가 은행 페이지에서 2026-09-05(토) 05:55:56 고시를 확인했다.
+        구 창은 05:04:53에 끝나 그 이후 월요일 08:00까지 **예약된 수집 기회가 없었다**.
+        운영 DB: 09-05 03:55:44 다음 행이 09-07 08:00:14다.
+        ⚠️ 셋은 별개 사실이다 — DB 기록만으로 놓친 고시의 횟수·동일성은 확정할 수 없다.
+        ⚠️ 05:55:56은 "05:00 이후에도 고시한다"는 관측이지 "06:00에 끝난다"는 증거가 아니다.
+        """
         jobs = self._jobs("BREAK1")
-        # ⛔ tail을 별도 job으로 나누면 max_instances=1이 배타가 아니게 된다 (Chrome 2개 위험).
         self.assertNotIn("task_woori_tail", jobs,
-                         "woori는 OrTrigger 단일 job이어야 한다 (max_instances=1 전 구간 적용)")
-        self.assertIsInstance(jobs["task_woori"].trigger, OrTrigger)
+                         "woori는 단일 job이어야 한다 (max_instances=1 전 구간 적용)")
         self.assertEqual(jobs["task_woori"].max_instances, 1)
         self.assertEqual(jobs["task_woori"].misfire_grace_time, 30)
         self.assertEqual(jobs["task_woori"].func.__name__, "request_wrapper_woori")
+        # ⛔ 창을 06:00 에서 끊으면 트리거를 06:59 까지 늘려도 안 잡힌다(변이 M5 로 실증).
+        #    07:00 까지 보고 "마지막이 05:59:44" 를 직접 잠근다.
         fires = _fires(jobs["task_woori"],
                        KST.localize(datetime(2026, 8, 25, 19, 0, 1)),
-                       KST.localize(datetime(2026, 8, 26, 6, 0, 1)))
+                       KST.localize(datetime(2026, 8, 26, 7, 0, 0)))
         self.assertEqual(f"{fires[0]:%H:%M:%S}", "19:00:14")
-        self.assertEqual(f"{fires[-1]:%H:%M:%S}", "05:04:53")
-        self.assertEqual(
-            len(fires),
-            1209,
-            "19:00~04:59 1200회 + 05:00~05:03 8회 + 05:04:53 1회",
-        )
-        # 04:59:44 → 05:00:14 경계가 끊기지 않는다
+        self.assertEqual(f"{fires[-1]:%H:%M:%S}", "05:59:44",
+                         "BREAK1 트리거가 06:00 이후로 새면 안 된다")
+        self.assertEqual(len(fires), 1320, "19:00~05:59 11시간 × 60분 × 2회")
         stamps = {f"{f:%H:%M:%S}" for f in fires}
-        for s in (
-            "04:59:14", "04:59:44", "05:00:14", "05:00:44",
-            "05:03:14", "05:03:44", "05:04:53",
-        ):
+        # 관측된 고시(05:55:56) 직후에 실제로 수집 기회가 있다
+        self.assertIn("05:56:14", stamps, "05:55:56 고시를 잡을 회차가 있어야 한다")
+        for s in ("04:59:44", "05:00:14", "05:05:14", "05:59:14", "05:59:44"):
             self.assertIn(s, stamps)
-        self.assertNotIn(
-            "05:04:14",
-            stamps,
-            "느린 :14 실행이 마지막 :53을 skip하게 만들면 안 된다",
+        self.assertNotIn("06:00:14", stamps, "06:00 이후는 BREAK2 마무리 job이 맡는다")
+
+    def test_woori_break2_terminal_uses_the_same_job_id(self):
+        """마무리 조회는 **같은 `task_woori` ID**여야 한다.
+
+        ⛔ APScheduler executor 의 `_instances[job.id]` 카운터는 remove/add 로 사라지지 않는다.
+           같은 ID 면 05:59:44 실행이 06:00 전환을 걸쳐 살아 있을 때 마무리 발화가 차단된다.
+           다른 ID 로 나누면 별도 카운터라 동시 실행된다 — 시간 간격으로는 보장되지 않는다.
+        """
+        jobs = self._jobs("BREAK2")
+        self.assertIn("task_woori", jobs, "BREAK2에 마무리 조회가 있어야 한다")
+        self.assertNotIn("task_woori_terminal", jobs, "별도 ID로 나누면 배타가 깨진다")
+        self.assertEqual(jobs["task_woori"].max_instances, 1)
+        self.assertIsInstance(jobs["task_woori"].trigger, OrTrigger)
+        # ⛔ 창이 일·월 아침을 포함해야 day_of_week 제거가 잡힌다 (변이 M3 로 실증).
+        fires = _fires(jobs["task_woori"],
+                       KST.localize(datetime(2026, 8, 25, 0, 0, 0)),   # 화
+                       KST.localize(datetime(2026, 9, 1, 12, 0, 0)))   # 다음 주 화
+        one_day = [f"{f:%H:%M:%S}" for f in fires
+                   if f.date() == datetime(2026, 8, 26).date()]
+        self.assertEqual(one_day, [
+            "06:00:14", "06:00:44", "06:01:14", "06:01:44",
+            "06:02:14", "06:02:44", "06:03:14", "06:03:44", "06:04:53",
+        ])
+        self.assertNotIn("06:04:14", one_day, "마지막 :53과 9초 간격으로 실행하면 안 된다")
+        self.assertNotIn("06:04:44", one_day)
+        self.assertEqual(
+            sorted({f"{f:%a}" for f in fires}),
+            ["Fri", "Sat", "Thu", "Tue", "Wed"],
+            "화~토만 — 월·일에는 그 앞에 woori 야간 세션이 없다",
         )
-        self.assertNotIn(
-            "05:04:44",
-            stamps,
-            "마지막 :53과 9초 간격으로 실행하면 안 된다",
-        )
-        self.assertNotIn("05:05:14", stamps)
+        self.assertEqual([f for f in fires if f.weekday() in (0, 6)], [],
+                         "월·일 발화 0건")
 
     def test_ibk_break1_last_fire_is_055934(self):
         jobs = self._jobs("BREAK1")
@@ -243,10 +270,14 @@ class TestBankCollectionWindows(_SwitchJobsCase):
         self.assertEqual([f for f in fires if f.weekday() in (0, 6)], [],
                          "월·일에는 발화하면 안 된다 (그 앞에 IBK 세션이 없다)")
 
-    def test_shinhan_and_woori_absent_in_break2(self):
+    def test_shinhan_absent_in_break2(self):
+        """shinhan 은 03:00 수집 종료라 BREAK2 에 없다.
+
+        ⚠️ woori 는 2026-09-10 부터 **있다** — 같은 `task_woori` ID 의 마무리 조회다.
+           위 test_woori_break2_terminal_uses_the_same_job_id 가 그 계약을 잠근다.
+        """
         jobs = self._jobs("BREAK2")
-        for jid in ("task_shinhan", "task_woori"):
-            self.assertNotIn(jid, jobs)
+        self.assertNotIn("task_shinhan", jobs)
 
 
 class TestModeTransitionRemovesWindowJobs(_SwitchJobsCase):
@@ -256,9 +287,10 @@ class TestModeTransitionRemovesWindowJobs(_SwitchJobsCase):
         self.assertNotIn("task_ibk_terminal", self._jobs("BREAK1"))
         self.assertNotIn("task_ibk_terminal", self._jobs("OUT"))
 
-    def test_woori_removed_when_leaving_break1(self):
+    def test_woori_present_in_break1_and_break2_but_not_out(self):
+        """BREAK2 에도 남는다 — 다만 트리거가 마무리 조회로 바뀐다(같은 ID)."""
         self.assertIn("task_woori", self._jobs("BREAK1"))
-        self.assertNotIn("task_woori", self._jobs("BREAK2"))
+        self.assertIn("task_woori", self._jobs("BREAK2"))
         self.assertNotIn("task_woori", self._jobs("OUT"))
 
     def test_mode_agnostic_job_survives_task_cleanup(self):
@@ -392,9 +424,75 @@ class TestSelectiveCrawlerDisable(_SwitchJobsCase):
         self.assertNotIn("task_ibk_terminal", jobs)
         self.assertEqual(
             set(jobs),
+            # task_woori 는 2026-09-10부터 BREAK2 에 있다 — 마무리 조회(같은 ID).
             {"task_investing", "task_dxy", "task_kb", "task_hana",
-             "task_bs", "task_citi", "task_nh"},
+             "task_bs", "task_citi", "task_nh", "task_woori"},
         )
+
+
+class TestWooriSurvivesModeTransitionWithoutDoubleRun(_SwitchJobsCase):
+    """⛔ 06:00 전환을 걸친 실행이 마무리 조회와 겹치면 Chrome 이 2개 뜬다.
+
+    막는 것은 시간 간격이 아니라 **같은 job ID** 다. APScheduler executor 는
+    `_instances[job.id]` 로 max_instances 를 강제하고 그 카운터는 remove/add 로
+    사라지지 않는다.
+
+    ⛔ 순서가 load-bearing 이다 — 전환을 **먼저 끝내고** 두 job 을 제출하면 카운터
+       동작만 보게 되고 "진행 중인 실행이 실제 전환을 견디는가" 는 검증되지 않는다.
+       그래서 여기서는 첫 실행을 **띄워 둔 채** `switch_jobs("BREAK2")` 를 부른다.
+    """
+
+    def setUp(self):
+        self.submitted = []
+
+    def _executor(self):
+        executor = ThreadPoolExecutor(1)
+        executor.start(sched.scheduler, "test")   # _lock 초기화 (submit_job 이 요구)
+        self.addCleanup(executor.shutdown, wait=False)
+        executor._do_submit_job = lambda job, run_times: self.submitted.append(job.id)
+        return executor
+
+    def test_an_inflight_run_survives_the_real_transition_and_blocks_the_terminal(self):
+        executor = self._executor()
+        break1 = self._jobs("BREAK1")["task_woori"]
+
+        # 1) 05:59:44 실행이 시작되고 아직 끝나지 않았다
+        executor.submit_job(break1, [KST.localize(datetime(2026, 8, 26, 5, 59, 44))])
+        self.assertEqual(self.submitted, ["task_woori"])
+
+        # 2) 그 상태에서 실제 06:00 전환이 일어난다
+        terminal = self._jobs("BREAK2")["task_woori"]
+        self.assertEqual(terminal.id, break1.id, "ID 가 바뀌면 배타가 깨진다")
+        # ⛔ 같은 ID 라도 **다른 executor 로 라우팅되면** 카운터가 갈려 동시 실행된다.
+        #    아래 제출은 시험용 executor 하나에 직접 하므로 라우팅을 재현하지 않는다 —
+        #    그래서 라우팅 동일성을 여기서 별도로 잠근다(Codex 지적: 이 우회가 없으면
+        #    BREAK2 job 의 executor alias 를 바꾼 변이가 통과한다).
+        self.assertEqual(terminal.executor, break1.executor,
+                         "두 job 이 같은 executor 로 가야 카운터가 공유된다")
+
+        # 3) 마무리 발화는 차단된다
+        with self.assertRaises(MaxInstancesReachedError):
+            executor.submit_job(terminal, [KST.localize(datetime(2026, 8, 26, 6, 0, 14))])
+        self.assertEqual(self.submitted, ["task_woori"], "두 번째 제출이 실행되면 안 된다")
+
+        # 4) 첫 실행이 끝나면 다음 발화는 허용된다 (영구 차단이 아니다)
+        executor._run_job_success("task_woori", [])
+        executor.submit_job(terminal, [KST.localize(datetime(2026, 8, 26, 6, 0, 44))])
+        self.assertEqual(self.submitted, ["task_woori", "task_woori"])
+        executor._run_job_success("task_woori", [])
+
+    def test_a_different_id_would_not_be_blocked(self):
+        """양성 대조 — 차단의 원인이 max_instances 자체가 아니라 **같은 ID** 임을 보인다."""
+        executor = self._executor()
+        break1 = self._jobs("BREAK1")["task_woori"]
+        executor.submit_job(break1, [KST.localize(datetime(2026, 8, 26, 5, 59, 44))])
+        impostor = self._jobs("BREAK2")["task_woori"]
+        impostor.id = "task_woori_terminal"
+        executor.submit_job(impostor, [KST.localize(datetime(2026, 8, 26, 6, 0, 14))])
+        self.assertEqual(self.submitted, ["task_woori", "task_woori_terminal"],
+                         "다른 ID 면 막히지 않는다 — 그래서 같은 ID 를 써야 한다")
+        executor._run_job_success("task_woori", [])
+        executor._run_job_success("task_woori_terminal", [])
 
 
 class TestControlJobWiring(_SwitchJobsCase):

@@ -126,7 +126,7 @@ queue_status_cache = {
 # 모드 분류:
 #   - IN: 월~금 08:00~18:59 (영업시간, 전체 크롤러 활성)
 #   - BREAK1: 월~금 19:00 ~ 익일 05:59 (야간, sc 제외 + 은행별 cutoff)
-#   - BREAK2: 06:00~07:59 (고시 마무리, woori/shinhan/sc 제외 + ibk terminal만)
+#   - BREAK2: 06:00~07:59 (고시 마무리, shinhan/sc 제외 + ibk·woori 마무리 조회만)
 #   - OUT: 토 07:00 ~ 월 05:59 (주말, 7개 크롤러: 은행 5 + investing/dxy)
 #
 #   ⚠️ 2026-08-28 (ADR-042): BREAK1 시작 21:00→19:00, 종료 03:00→06:00.
@@ -137,7 +137,7 @@ queue_status_cache = {
 #   - kb: 평일 08:30 ~ 익일(토 포함) 05:00
 #   - hana: 평일 08:30 ~ 익일(토 포함) 06:00 (주말 중 가끔 변동)
 #   - shinhan: 평일 08:19 ~ 익일 02:45 (주말 중 가끔 변동) → 수집 02:59:18까지
-#   - woori: 평일 08:30 ~ 익일 05:00 (24시간 외환시장 전환으로 연장) → 수집 05:04:53까지
+#   - woori: 평일 08:30 ~ 익일 06:00경 (05:55:56 관측, 종료 미확정) → 수집 06:04:53까지 (ADR-044)
 #   - ibk: 평일 약 08:26~08:30 ~ 익일 06:00 (연장, 05:59:55 관측) → BREAK1 05:59:34 + BREAK2 terminal 2회
 #   - nh: 평일 08:40 ~ 당일 24:00 (자정 이후/주말 가끔 고시)
 #   - sc: 평일 09:00 ~ 당일 포착 변경 약 17:50까지 → 수집 18:59:58까지
@@ -156,8 +156,8 @@ queue_status_cache = {
 #     - OUT: 1분마다 (kb :28, hana :38) — 배포 2A
 #   - woori, bs, citi: 일반, 빈도 낮음
 #     - IN: woori 30초마다(:14/:44), bs·citi 60초마다(bs :33 / citi :13)
-#     - BREAK1: woori 30초마다(:14/:44, 마지막 분은 05:04:53만), bs(33초), citi(13초)
-#     - BREAK2: bs(33초), citi(13초)만 유지 (woori는 05:05 수집 종료)
+#     - BREAK1: woori 30초마다(:14/:44, 마지막 05:59:44), bs(33초), citi(13초)
+#     - BREAK2: bs(33초), citi(13초) + woori 마무리 조회(06:00~06:04:53, 화~토)
 #     - OUT: bs도 1분마다 (:51) — 배포 2A
 #   - 하이브리드: hana, woori는 Request → Selenium 폴백. bs/citi는 순수 Request
 #
@@ -173,7 +173,7 @@ queue_status_cache = {
 #            평일 10:00~23:59) 안전망으로 넘긴다.
 #   - IN: 매분 cron (shinhan: 18초, ibk: 34초, nh: 54초, sc: 58초)
 #   - BREAK1: shinhan(18초, ~02:59:18), ibk(34초, ~05:59:34), nh(54초) 유지 (sc는 19:00 진입과 함께 제외)
-#   - BREAK2: nh(54초) + task_ibk_terminal(06:00:34·06:01:34, 화~토). shinhan/woori/sc 제외
+#   - BREAK2: nh(54초) + task_ibk_terminal(06:00:34·06:01:34) + woori 마무리(화~토). shinhan/sc 제외
 #   - OUT: nh(:10), shinhan(:30) 모두 1분마다 (배포 2A, 20초 간격)
 #
 # BREAK1/BREAK2/OUT 모드 크롤러 축소 근거:
@@ -739,8 +739,9 @@ def switch_jobs(mode: str):
 
     [2025-11-16 재설계]
     - IN 모드: cron 절대 시간 동기화 - 월~금 08:00~18:59 (2026-08-28 ADR-042: 20:59 → 18:59)
-    - BREAK1 모드: 19시~익일 06시 - IN과 동일 스케줄에서 sc 제외 + shinhan/woori 은행별 cutoff
-    - BREAK2 모드: 06:00~07:59 - shinhan/woori/sc 제외, ibk는 terminal capture(화~토)만
+    - BREAK1 모드: 19시~익일 06시 - IN과 동일 스케줄에서 sc 제외 + shinhan 은행별 cutoff
+                   (woori 는 05:59:44 까지, ADR-044)
+    - BREAK2 모드: 06:00~07:59 - shinhan/sc 제외. ibk·woori 는 마무리 조회(화~토)만
     - OUT 모드: 1분 주기 + 고정 시작초 분산 - 토 07:00 ~ 월 05:59
     - Queue: C Group만 사용 (Selenium 전용)
 
@@ -959,22 +960,23 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [hana] 비활성화 상태 - job 등록 스킵")
 
         # B Group: woori, bs, citi
-        # woori: 고시가 새벽 05:00경까지 연장됨 (사용자 은행 페이지 실측).
-        # <05:05 를 정확히 표현하려면 본구간(19-23,0-4시)과 보정구간(5시 0-4분)이 필요한데,
-        # ⛔ **두 개의 job으로 나누면 안 된다** — max_instances=1은 job 단위라 서로 배타가
-        #    아니고, 04:59:44 실행이 지연되면(최악: requests 10s → Selenium 45s → mibank 10s)
-        #    05:00:14 tail과 겹쳐 Chrome 2개가 동시에 뜰 수 있다.
-        #    OrTrigger로 묶어 **단일 job**으로 두면 max_instances=1이 전 구간에 적용된다.
+        # woori: 고시가 **06:00경까지** 연장된다 — 2026-09-05(토) 05:55:56 고시를 사용자가
+        # 은행 페이지에서 직접 확인했다. 그 시각은 구 창(05:04:53 종료)의 51분 뒤였고,
+        # 토요일이라 이후 월요일 08:00 IN 전환까지 예약된 수집 기회가 없었다
+        # (BREAK1 은 05:04:53 이후 발화 없음, BREAK2·OUT 은 미등록).
+        # 운영 DB 는 09-05 03:55:44 다음 행이 09-07 08:00:14 다 — 이 기록만으로 놓친
+        # 고시의 횟수·동일성을 확정할 수는 없다.
+        # ⚠️ 05:55:56 은 "05:00 이후에도 고시한다" 는 관측이지 "정확히 06:00 에 끝난다" 는
+        #    증거가 아니다. 06:00 은 우리가 정한 **수집 종료 정책**이다.
+        # ⛔ 마무리 조회는 BREAK2 에 있지만 **같은 `task_woori` ID** 를 쓴다. APScheduler 의
+        #    executor 는 `_instances[job.id]` 카운터로 max_instances 를 강제하고 그 카운터는
+        #    remove/add 로 사라지지 않는다 — 같은 ID 면 05:59:44 실행이 06:00 전환을 걸쳐
+        #    남아 있어도 마무리 발화가 차단된다. 다른 ID(`task_woori_terminal` 등)로 나누면
+        #    별도 카운터라 Chrome 2개가 동시에 뜬다. 시간 간격으로는 보장되지 않는다.
         if crawler_manager.is_enabled('woori'):
             scheduler.add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
-                OrTrigger([
-                    CronTrigger(hour='19-23,0-4', minute='*', second='14,44', timezone=KST),
-                    CronTrigger(hour='5', minute='0-3', second='14,44', timezone=KST),
-                    # 기존 마지막 수집 기회를 보존한다. 마지막 분의 :14/:44는 빼서
-                    # 직전 슬롯과 69초를 확보하고 05:04:53 skip 위험을 낮춘다.
-                    CronTrigger(hour='5', minute='4', second='53', timezone=KST),
-                ]),
+                CronTrigger(hour='19-23,0-5', minute='*', second='14,44', timezone=KST),
                 id='task_woori',
                 max_instances=1,
                 misfire_grace_time=30
@@ -1049,7 +1051,9 @@ def switch_jobs(mode: str):
         # ═════════════════════════════════════════════════════════════
         # BREAK2 모드: 고시 마무리 시간대 (06:00~07:59, 모든 요일 공통)
         # ═════════════════════════════════════════════════════════════
-        # 제외 크롤러: woori (05:05 수집 종료), shinhan (03:00 수집 종료), sc (19:00 종료)
+        # 제외 크롤러: shinhan (03:00 수집 종료), sc (19:00 종료)
+        #             woori 는 정규 job 없음 — 같은 task_woori ID 의 마무리 조회만
+        #             06:00~06:03 :14/:44 + 06:04:53 (화~토)
         #             ibk는 정규 job 없음 — task_ibk_terminal만 06:00:34·06:01:34 (화~토)
         # 유지 크롤러: investing, dxy, kb, hana, bs, citi, nh (7개) + task_ibk_terminal(화~토)
         # 08:00~09:00부터 은행 개장 준비하며 새 환율 고시 시작
@@ -1155,6 +1159,33 @@ def switch_jobs(mode: str):
             )
         else:
             logger.info("⏸️ [ibk] 비활성화 상태 - terminal capture job 등록 스킵")
+
+        # woori terminal capture — 06:00 경계 이후 **추가 수집 기회 9회** (화~토)
+        # 2026-09-05(토) 05:55:56 고시 관측 뒤, 기존 "종료 후 약 5분 여유" 를 한 시간 옮겼다.
+        # ⚠️ 포착 보장이 아니다. 그리고 06:04:53 이후 월요일 08:00 IN 전환까지는
+        #    **미관측 구간**이며 그 구간에 추가 고시가 없음을 보장하지 않는다.
+        # ⛔ **ID 가 BREAK1 과 같아야 한다.** executor 의 `_instances[job.id]` 는 remove/add 로
+        #    사라지지 않으므로, 같은 ID 면 05:59:44 실행이 06:00 전환을 걸쳐 살아 있을 때
+        #    이 발화가 차단된다(max_instances=1). 다른 ID 로 나누면 별도 카운터라 동시 실행된다.
+        #    ⚠️ 이것은 크롤러 **호출** 중복 방지다. 타임아웃 뒤 남는 Chrome 은 별개 문제다.
+        # day_of_week='tue-sat': woori 야간 세션은 평일 19:00 → 익일 06:00 이라 화~토에만 끝난다.
+        if crawler_manager.is_enabled('woori'):
+            scheduler.add_job(
+                make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),
+                OrTrigger([
+                    CronTrigger(hour=6, minute='0-3', second='14,44',
+                                day_of_week='tue-sat', timezone=KST),
+                    # 마지막 분은 :14/:44 를 빼고 :53 한 번만 — 직전 슬롯과 69초를 벌어
+                    # 06:04:53 이 skip 될 위험을 낮춘다(구 05:04:53 설계와 같은 이유).
+                    CronTrigger(hour=6, minute=4, second=53,
+                                day_of_week='tue-sat', timezone=KST),
+                ]),
+                id='task_woori',
+                max_instances=1,
+                misfire_grace_time=30
+            )
+        else:
+            logger.info("⏸️ [woori] 비활성화 상태 - terminal capture job 등록 스킵")
 
     elif mode == "OUT":
         # ═════════════════════════════════════════════════════════════
