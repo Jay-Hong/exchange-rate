@@ -3,10 +3,10 @@
 - 책임: publisher health · SLO
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `6a7b8486f841bdfb84c43156010d9012c9357ea7`
+- server 기준 commit: `d262de98d29f43e354059ed8884f576558f98290`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `cdda8417a3be32f152de049c6799e054f190fefb58f91cb50ece54c75e74c435`
+- manifest SHA: `f5bce9c808b29525e0bfeb52c2d2881921d8c555d69ec071df525612f56253cb`
 - baseline SHA: `40977d20c51a8cf027520e771f8b8e80aeed1d973b32ca4cc4427fa991b268b9`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -37,7 +37,7 @@
 판별 불가의 코드 근거: baseline **B1**(publisher 두 모듈 내부 timer 부재, 범위 한정) · **B2**(USDT
 coalesce = same rate + same 5s bucket → 침묵은 가격 안정이 아니라 tick 부재). 외부 caller 는 매초
 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이므로 무조건 재발행도 아니다
-(`app/scheduler.py:1659-1665` · `app/main.py:980-1003`).
+(`app/scheduler.py:1690-1696` · `app/main.py:980-1003`).
 
 **구멍이 어디서 생기는가.** LOAD-S3 구현으로 initial snapshot의 deadline·transient/fatal build
 실패는 1013/1011 close로 바뀌어 더는 조용하지 않다(baseline D3). 다만 builder가 `None`을 반환하는
