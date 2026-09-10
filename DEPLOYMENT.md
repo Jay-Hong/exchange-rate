@@ -416,53 +416,225 @@ scp -i ~/your-key.pem ubuntu@<EC2-PUBLIC-IP>:~/exchange-rate/volumes/logs/app/ap
 
 ## 8. 코드 업데이트
 
-### 8.1 GitHub 사용 시
+> 📌 **이 절이 배포 절차의 기준 문서다.** `CLAUDE.md`·`DOCKER.md` 의 배포 언급은 여기를
+> 가리키며, 충돌하면 이 절이 우선한다.
+
+### 8.0 배포 전에 반드시 아는 것 (2026-09-10 실측)
+
+**① 예약 작업 5개가 앱과 같은 이미지를 쓴다.** 호스트 crontab 의
+`docker compose run --rm … fastapi …` 5건(KST 매일 00:01, 매시 :05 :07 :09 :11)은
+`exchange-rate-fastapi:latest` 를 쓴다. 빌드가 끝나 그 태그가 새 이미지에 붙는 순간부터,
+**앱 컨테이너를 교체하기 전이라도 다음 예약 실행은 새 코드를 쓴다.** 그래서 태그 전환과
+컨테이너 교체는 같은 배포 작업에서 조율한다. 두 명령을 연달아 실행하거나 `&&`로 이어도
+원자적 전환은 아니다. 새·구 코드가 함께 도는 중간 상태와 실패 시 복구를 별도로 판단한다.
+검증 전 예약 작업이 후보 이미지를 쓰면 안 되는 배포는 **별도 후보 태그로 빌드하고,
+검증 뒤 `latest`를 전환**한다. 이 분리는 일반 Dockerfile 빌드에도 적용할 수 있으며,
+8.1a의 기존 실행 환경 재사용과는 별개의 선택이다.
+
+**② `--force-recreate` 와 `--build` 는 다르다.** 2026-09-10 `--dry-run` 실측: 쓸 이미지가
+이미 있으면 `--force-recreate` 단독은 `Recreate → Started` 만 계획하고 빌드 단계가 없다.
+`--build` 를 붙이면 `writing image → naming to exchange-rate-fastapi → Built` 가 붙는다.
+⚠️ 이것을 "`--build` 없이는 절대 빌드하지 않는다" 로 일반화하지 말 것 — 이미지가 없거나
+빌드 정책이 지정되면 달라진다. 그리고 `--build` 가 캐시를 재사용할지도 보장이 아니다.
+관련 레이어가 무효화되면 Python·Chrome 까지 새로 설치될 수 있다.
+
+**③ `docker compose down` 은 redis·nginx 까지 내린다.** 앱만 바꾸는 배포에 쓰지 않는다.
+
+**④ `.env` 설정은 코드 기본값과 다르다.** 예: `IBK_RESULT_PATH_ENABLED` 는 코드 기본값이
+`false` 인데 운영은 2026-09-10 부터 `.env` 로 `true` 다. 재빌드가 이 설정을 끄지는 않지만,
+`.env` 를 덮어쓰거나 `docker compose restart` 를 쓰면(=env 재읽기 안 함) 어긋난다.
+**설정 변경 반영에는 `--force-recreate` 가 필요하다.**
+
+**⑤ `app/`·`scripts/` 는 bind-mount 가 아니다.** 호스트 `git pull` 만으로는 실행 컨테이너에
+반영되지 않는다. 심볼 검색은 보조 확인일 뿐이다. 승인 SHA와 이미지 안 파일의 경로·해시를
+대조하고, 실제 실행 이미지가 그 검증된 이미지와 같은지 확인한다(8.1 성공 조건 참조).
+
+**⑥ 배포 창.** 서버 기준(`TZ=Asia/Seoul date`)으로 위 cron 분과 KRX CF close 종가
+15:35~15:50 을 피한다. 시작 분만 피하는 것이 아니라 빌드·교체·복구에 필요한 시간과
+이미 실행 중인 one-shot 컨테이너도 확인한다. 창을 확보하지 못하면 후보 태그 방식을 쓰거나
+배포를 미룬다. 그리고 **검증하려는 크롤러가 실제로 도는 시간대**를 고른다 —
+예로 IBK 는 06:00~07:59(BREAK2)에 정규 회차가 없어 그 창에서는 판정할 수 없다.
+
+### 8.1 일반 Dockerfile로 앱을 빌드·교체하는 배포 (GitHub 사용)
+
+⛔ **명령을 줄 단위로 나열하지 않는다.** 한 줄이 실패해도 다음 줄이 실행되면, 롤백 앵커
+없이 빌드가 돌거나 `latest` 만 옮겨간 split 상태가 된다. 아래처럼 **실패 시 실제로 멈추는
+한 덩어리**로 실행한다. ⚠️ 그래도 태그 전환과 컨테이너 교체가 원자적이 되지는 않는다 —
+중간에 죽으면 수동 복구가 필요하므로, 실행 전에 롤백 경로를 먼저 확인한다.
+아래는 **배포 승인을 받은 뒤 실행하는 예시**이지 실행 승인이나 자동 합격 판정이 아니다.
+시작 전에 서버 상태·`.env`·해석된 Compose 모델이 승인한 범위와 일치하고 다른 배포가
+동시에 실행되지 않는지 확인한다.
+비밀값이 들어 있는 전체 설정은 출력하지 않는다. 이 예시는 `.env`나 호스트에 즉시 반영되는
+nginx·Compose·static·ops 파일을 바꾸지 않는 범위다. 그 변경이 있으면 별도 절차를 정한다.
+승인 SHA를 채우고 **독립된 Bash 프로세스 전체**로 실행한다(`if`/`!` 안에서 호출하지 않는다).
 
 ```bash
-cd ~/exchange-rate
+bash <<'DEPLOY_BASH'
+set -euo pipefail
+trap 'rc=$?; printf "배포 중단: runtime/latest/checkout을 확인한 뒤 복구 판단 필요\n" >&2; exit "$rc"' ERR
+cd /home/ubuntu/exchange-rate
 
-# 최신 코드 가져오기
-git pull
+DEPLOY_SHA='승인된_40자리_SHA로_교체'
+[[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+DEPLOY_STATUS=$(git status --porcelain)
+[[ -z "$DEPLOY_STATUS" ]] || exit 1
+DEPLOY_BRANCH=$(git branch --show-current)
+[[ "$DEPLOY_BRANCH" = master ]] || exit 1
+[[ -z "${COMPOSE_FILE:-}" && -z "${COMPOSE_PROFILES:-}" ]] || exit 1
+docker info >/dev/null
 
-# 컨테이너 중지
-sudo docker compose down
+df -P / | awk 'NR==2 {if ($5+0 >= 70) print "디스크 70% 이상 — 여유 확인 필요"; if ($5+0 >= 80) exit 1} END {if (NR < 2) exit 1}'
+DEPLOY_BASE_SHA=$(git rev-parse HEAD)
+DEPLOY_OLD_IMAGE=$(docker inspect exchange-rate-app --format '{{.Image}}')
+[[ "$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}')" = "$DEPLOY_OLD_IMAGE" ]] || exit 1
 
-# 이미지 재빌드 (코드 변경 시)
-sudo docker compose build
+# `! inspect`는 set -e의 중단 대상이 아니다. 존재 여부를 명시적으로 분기한다.
+DEPLOY_ROLLBACK_TAG="exchange-rate-fastapi:rollback-$(date +%Y%m%d-%H%M%S)-$$"
+DEPLOY_EXISTING_TAG=$(docker image ls --format '{{.Repository}}:{{.Tag}}' "$DEPLOY_ROLLBACK_TAG")
+if [[ -n "$DEPLOY_EXISTING_TAG" ]]; then
+    printf '롤백 태그가 이미 존재하므로 중단합니다.\n' >&2
+    exit 1
+fi
+docker tag "$DEPLOY_OLD_IMAGE" "$DEPLOY_ROLLBACK_TAG"
+[[ "$(docker image inspect "$DEPLOY_ROLLBACK_TAG" --format '{{.Id}}')" = "$DEPLOY_OLD_IMAGE" ]] || exit 1
+# 실패 후 새 터미널에서도 복구할 수 있도록 이 비밀 없는 세 값을 배포 기록에 보존한다.
+printf 'BASE=%s\nOLD_IMAGE=%s\nROLLBACK_TAG=%s\n' "$DEPLOY_BASE_SHA" "$DEPLOY_OLD_IMAGE" "$DEPLOY_ROLLBACK_TAG"
 
-# 서비스 재시작
-sudo docker compose up -d
+git fetch origin master
+git merge-base --is-ancestor "$DEPLOY_SHA" origin/master
+DEPLOY_HOST_DIFF=$(git diff --name-only "$DEPLOY_BASE_SHA" "$DEPLOY_SHA" -- docker-compose.yml nginx static ops)
+[[ -z "$DEPLOY_HOST_DIFF" ]] || exit 1
+git merge --ff-only "$DEPLOY_SHA"
+[[ "$(git rev-parse HEAD)" = "$DEPLOY_SHA" ]] || exit 1
 
-# 로그 확인
-sudo docker compose logs -f fastapi
+docker compose build fastapi    # 완료 시점에 latest가 이동한다. 이후 실패해도 자동 복구되지 않는다.
+DEPLOY_NEW_IMAGE=$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}')
+# 반드시 방금 빌드한 이미지 검사. Compose env·volume·네트워크 없이 구문만 확인한다.
+docker run --rm --network none --entrypoint python "$DEPLOY_NEW_IMAGE" -m compileall -q /app/app /app/scripts
+[[ "$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}')" = "$DEPLOY_NEW_IMAGE" ]] || exit 1
+
+docker compose up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 60 fastapi
+[[ "$(docker inspect exchange-rate-app --format '{{.Image}}')" = "$DEPLOY_NEW_IMAGE" ]] || exit 1
+docker exec exchange-rate-nginx nginx -t
+docker exec exchange-rate-nginx nginx -s reload
+printf '교체 명령 완료: NEW_IMAGE=%s. 아래 성공 조건을 별도로 확인하세요.\n' "$DEPLOY_NEW_IMAGE"
+DEPLOY_BASH
 ```
+
+**⑦ ⛔ `python -c "import app.main"` 을 사전 점검으로 쓰지 않는다.**
+`app/main.py:222` 의 `create_all_app_tables(engine)` 이 **모듈 최상위**라, import 만으로
+운영 DB 에 `Base.metadata.create_all()` 이 실행된다. idempotent 하지만 없는 테이블은
+생성한다 — 배포 전 점검이 스키마를 건드리면 안 된다. 구문 확인은 **새 이미지의**
+`compileall`을 쓴다. 이것은 의존성 로드·앱 기동·DB 정상 동작을 증명하는 시험이 아니다.
+
+**성공 조건 — 넷을 모두 본다.**
+
+1. 실행 이미지 ID: `docker inspect exchange-rate-app --format '{{.Image}}'` 가 의도한
+   이미지와 같은가. (health 만 보면 교체 미적용을 성공으로 오판한다)
+2. **승인 SHA 와 실제 코드의 결속**: `grep -c <심볼>` 은 문자열 존재일 뿐 승인한 코드가
+   통째로 들어갔다는 증거가 아니다. `app/`·`scripts/`·`static/`·`templates/`의 파일 목록과 파일별
+   SHA-256을 승인 SHA의 `git archive`와 대조한다. 추가·누락도 실패이며 `__pycache__`와
+   `.pyc`·`.pyo` 같은 생성물만 같은 규칙으로 제외한다. 8.1a 실행기도 이 검사를 한다.
+3. 앱 내부: `docker compose exec -T fastapi curl --fail --silent --show-error --max-time 10 http://localhost:8000/health`
+   (fastapi는 host로 포트를 열지 않는다). HTTP 성공뿐 아니라 응답의 healthy 상태도 본다.
+4. **nginx 경유·공개 경로**: 내부 health 만 보면 upstream 이 옛 컨테이너 IP 를 붙들고
+   있는 장애를 놓친다. 위 교체 절차는 `nginx -t` 성공 후 reload한다. 공개 경로는
+   `curl --fail --silent --show-error --max-time 10 https://fxi.kr/health`와 실제 데이터
+   경로 하나를 함께 확인한다(TLS 검사를 생략하지 않는다). 502가 남으면 upstream과 앱을
+   조사하고 성공 처리하지 않는다. nginx의 단일 파일 bind mount가 호스트 파일 교체로 옛
+   inode를 붙들고 있으면 reload만으로 새 설정을 읽지 못한다. 그 경우 재생성을 포함한 별도
+   nginx 배포 절차를 따른다. 모든 파일 수정이 반드시 inode를 바꾸는 것은 아니다.
+
+**실패·되돌리기**: 중단 자체는 원복이 아니다. 특히 빌드 뒤 구문 검사에 실패해도 `latest`는
+새 이미지일 수 있다. runtime·latest·checkout과 진행 중인 cron을 먼저 확인하고 복구 판단을
+한다. 위에 기록한 rollback 태그의 전체 이미지 ID가 `OLD_IMAGE`와 같은지 확인한 뒤,
+그 이미지를 `latest`로 붙이고 **추가 빌드·pull 없이 fastapi만 재생성**한다. nginx 검사·reload와
+위 성공 조건도 다시 확인한다. checkout과 설정이 이전 이미지와 호환되는지 별도로 확인하며,
+이미 DB에 기록한 값은 되돌리지 않는다. tag와 재생성을 한 셸에서 실행해도 원자적이지 않다.
+
+### 8.1a 실행 환경을 고정한 채 코드만 바꾸는 배포 (선택)
+
+Python·Chrome·패키지까지 바뀌는 변수를 배제하고 싶을 때는, 구 이미지를 `FROM` 으로
+`app/`·`scripts/`·`static/`·`templates/`만 교체한 후보 이미지를 만들고 검증이 끝난 뒤에야 `latest`
+를 옮기는 방식을 쓴다(2026-09-08·2026-09-10 배포가 이 방식). 검증 전에는 `latest` 가
+구 이미지를 가리키므로 **예약 작업이 새 코드를 쓰지 않는다**.
+
+⚠️ 이 방식의 실행기는 `BASE`/`TARGET` 이 하드코딩된 **전환 1회용**이며 서버 홈에 배포별
+파일로 남아 있다. **예전 파일을 그대로 다시 실행하지 않는다.** 또 이 방식으로 교체한
+컨테이너는 compose 라벨이 그 실행 디렉터리의 동결 모델을 가리키므로, 다음 배포 도구가
+그 상태를 받아들이도록 준비돼 있어야 한다.
+
+⚠️ 실행 환경(Chrome·Python·보안 패치) 갱신은 이 방식으로 할 수 없다. 그때는 일반
+Dockerfile 빌드에서 갱신할 버전·캐시·pull 정책을 명시하고 격리된 브라우저 시험으로 확인한다.
+`--build`만 붙인다고 모든 패키지가 갱신되는 것은 아니다. 운영 HTTP를 일부러 실패시켜
+Selenium 표본을 만들지는 않는다.
+
+### 8.1b 현재 운영 기준선 (2026-09-10 — 배포 직전 서버와 반드시 대조)
+
+⛔ 이 표는 **참고**다. 권위는 서버에 있고, 다음 배포는 **서버 실측값에서 출발**한다.
+
+| 항목 | 값 |
+| --- | --- |
+| 배포된 코드 | `9d4e1c41d6613e87bffb638d1109ef544381aa2a` |
+| 실행 이미지 = `latest` | `sha256:453fb87f6646d73c0d83001a5395e88501294053d9b5d28693d2124cf65bdfec` |
+| 코드 롤백 앵커 | `exchange-rate-fastapi:rollback-1788985394429946747` (= 직전 이미지 `4ebd7ae9…c336`) |
+| IBK 설정 | `IBK_RESULT_PATH_ENABLED=true`, `TELEGRAM_ENABLED=true` (**둘 다 코드 기본값은 `false`**) |
+| 현재 Compose 라벨 | `/home/ubuntu/fxi-ibk-activation-9d4e1c4-20260910-01/on.json` |
+| ON 모델 SHA-256 | `0a73c48dd7a91eda41e5a92e3aac30fea192b16402f7b8af2b875d99e2eda28b` |
+| 같은 코드의 OFF 모델 SHA-256 | `b29b07490c4bf9e8a6fe852f45752a3061fc3cf5741f3c2309f852eda4a389ee` |
+
+**설정만 되돌리기(코드·이미지 유지)** — 활성화 도구의 rollback 이 `.env` 와 실행 모델을
+함께 OFF 로 돌린다:
+
+```bash
+python3 /home/ubuntu/activate-ibk-9d4e1c4.py rollback \
+        /home/ubuntu/fxi-ibk-activation-9d4e1c4-20260910-01
+```
+
+이 명령은 **위 활성화 실행의 복구 전용**이다. 이후 코드·설정이 바뀌었다면 그대로 실행하지
+말고 당시 도구의 사전 조건과 현재 상태를 대조한다. 되돌리면 legacy의 MIBANK 저장 정책도
+함께 복원되고, **이미 저장된 DB 데이터는 되돌아가지 않는다.**
+
+⛔ **다음 배포가 알아야 할 것 둘.**
+(1) 현재 컨테이너는 canonical `docker-compose.yml` 이 아니라 위 `on.json` 동결 모델로
+만들어져 있다. 배포 도구가 그 상태를 받아들이도록 준비돼 있어야 한다 — 경로 이름이 아니라
+**파일 해시·직전 실행 기록·실행 이미지·전체 모델 동등성**을 대조하는 방식이어야 한다.
+(2) 서버의 `dotenv.before/after`·`on.json`·`off.json` 은 **해석된 비밀값을 포함**하므로
+0700 실행 폴더 밖으로 복사하지 않는다. 이 문서에도 해시만 적는다.
 
 ### 8.2 로컬에서 파일 전송 시
 
-```bash
-# 로컬 터미널에서
-cd /path/to/exchange-rate
-scp -i ~/your-key.pem -r app/ ubuntu@<EC2-PUBLIC-IP>:~/exchange-rate/
-
-# EC2에서
-cd ~/exchange-rate
-sudo docker compose down
-sudo docker compose build
-sudo docker compose up -d
-```
+운영 checkout에 `scp -r app/`로 덮어쓰는 방법은 승인 SHA와 파일의 결속을 흐리고 삭제된
+파일을 남길 수 있다. 필요한 경우 승인 SHA의 `git archive`를 별도 작업 폴더에 옮기고,
+파일 목록·해시 검증, 이미지 생성, 전환·복구를 포함한 배포 후보로 검토한다. GitHub 배포가
+가능하면 8.1을 사용한다. 파일 전송만으로 배포 완료로 판정하지 않는다.
 
 ### 8.3 .env 파일만 수정
 
+⛔ **`docker compose restart` 는 `.env` 변경을 반영하지 않는다.** 기존 컨테이너를
+stop/start 할 뿐이라 env_file 을 다시 읽지 않는다. 반영에는 **재생성**이 필요하다.
+⛔ `down`은 쓰지 않는다(다른 서비스까지 내려간다). Compose의 변수 보간에 셸의 같은 이름
+변수가 쓰이면 파일의 의도와 달라질 수 있다. `.env`만 보지 말고 실제 적용 모델을 대조한다.
+편집 전 원본은 **기존 파일을 덮어쓰지 않는 고유한 백업**으로 보존한다(폴더 0700·파일 0600).
+백업과 해석된 Compose 모델에는 비밀값이 있으므로 출력하거나 커밋하지 않는다.
+승인한 설정만 편집·대조한 뒤, 아래 재생성 부분을 별도 Bash로 실행한다.
+
 ```bash
-# .env 수정
-nano .env
-
-# 재시작 (빌드 불필요)
-sudo docker compose restart
-
-# 또는
-sudo docker compose down && sudo docker compose up -d
+bash <<'ENV_BASH'
+set -euo pipefail
+cd /home/ubuntu/exchange-rate
+ENV_CHANGE_IMAGE=$(docker inspect exchange-rate-app --format '{{.Image}}')
+[[ "$(docker image inspect exchange-rate-fastapi:latest --format '{{.Id}}')" = "$ENV_CHANGE_IMAGE" ]] || exit 1
+docker compose up -d --no-deps --no-build --pull never --force-recreate --wait --wait-timeout 60 fastapi
+[[ "$(docker inspect exchange-rate-app --format '{{.Image}}')" = "$ENV_CHANGE_IMAGE" ]] || exit 1
+docker exec exchange-rate-nginx nginx -t
+docker exec exchange-rate-nginx nginx -s reload
+ENV_BASH
 ```
+
+8.1의 내부·공개 health와 실제 데이터 확인도 수행한다. `docker exec`로 설정을 조사할 때는
+비밀이 아닌 특정 플래그만 확인한다. startup에서만 만들어지는 값(lifespan 전역 등)은 별개
+Python 프로세스에서 import해도 미초기화다. 그런 값은 **운영 프로세스의 상태 API**로 확인한다.
 
 ---
 

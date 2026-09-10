@@ -1113,18 +1113,18 @@ docker-compose exec postgres pg_dump \
 docker-compose restart nginx
 ```
 
-### 컨테이너 재시작
+### 같은 설정으로 앱 컨테이너 재시작
 
 ```bash
-# 전체 재시작
-docker-compose restart
-
-# 특정 서비스만
+# 기존 컨테이너를 다시 시작할 뿐, 새 코드·.env 변경을 반영하지 않는다.
 docker-compose restart fastapi
-
-# 설정 변경 후 재빌드
-docker-compose up -d --build fastapi
 ```
+
+> ⛔ **코드 배포·설정 변경의 정본 절차는 [DEPLOYMENT.md §8](DEPLOYMENT.md#8-코드-업데이트) 이다.**
+> 새 코드에는 이미지 생성·검증과 교체가, `.env` 변경에는 해석된 설정 대조와 재생성이
+> 필요하다. 빌드가 끝나 `latest`가 이동하면 **앱 교체 전에 호스트 cron 5건이 새 이미지를
+> 쓸 수 있다**. 태그 전환과 컨테이너 교체를 조율하되, 두 명령을 연달아 실행하는 것만으로
+> 원자적 전환이 되지는 않는다. 현재 운영 기준과 복구 정보는 §8.1b를 확인한다.
 
 ---
 

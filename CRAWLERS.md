@@ -434,29 +434,50 @@
 
 #### IBK 기업은행 (`app/crawlers/ibk.py`) ⭐⭐⭐
 
-**후속 정책 승인 / 아직 미활성 (2026-09-07):** 사용자가 IBK MIBANK writer를
-no-write 진단으로 격하하는 데 동의했다. 최종 변경에서는 평일 낮을 포함해 IBK
-MIBANK 값은 DB에 저장하지 않고, 기존 비신뢰 시간대 제한을 유지한 선택적·예산 내
-진단만 허용한다. 공식 경로를 검증하지 못하면 완전한 기존 DB는 DEGRADED,
-빈/부분 DB는 FAILED로 구분하는 계측·경보와 함께 반영한다. 신한 등 다른 은행은
-변경하지 않는다. 아래는 **현재 동작**이며 POST-first와 MIBANK 저장 금지는 아직 아니다.
+**정책 승인 (2026-09-07) / 운영 활성화 (2026-09-10):** 사용자가 IBK MIBANK writer를
+no-write 진단으로 격하하는 데 동의했다. 평일 낮을 포함해 IBK MIBANK 값은 DB에
+저장하지 않고, 기존 비신뢰 시간대 제한을 유지한 선택적·예산 내 진단만 허용한다.
+공식 경로를 검증하지 못하면 완전한 기존 DB는 DEGRADED, 빈/부분 DB는 FAILED로
+구분하는 계측·경보와 함께 반영한다. 신한 등 다른 은행은 변경하지 않는다.
 
-**준비 구현의 범위 (로컬, 미배포) — 세 갈래로 구분한다:**
+⛔ **코드 기본값과 운영 설정을 구분한다.** `app/config.py` 의 `IBK_RESULT_PATH_ENABLED`
+기본값은 **여전히 `false`** 다 — 리포만 보고 "꺼져 있다"고 읽으면 운영을 오판한다.
+운영 서버는 2026-09-10 에 `.env` 로 **`true`** 를 설정했고, 같은 날 `TELEGRAM_ENABLED=true`
+도 함께 켰다. 배포된 코드는 `9d4e1c4` 다.
+
+**활성화된 경로가 실제로 하는 것**: 운영 스케줄러에서 부모가 result 채널을 주입한
+IBK 회차는 `run_ibk_dated_result` 를 탄다(runner가 이 crawler를 바인딩한다). 그 함수와
+생성기의 **범위 밖**이 곧 동작 차이다 — 당일 GET 우선순위, **MIBANK**, 부모 경보는
+생성기가 수행하지 않는다. 즉 이 경로에서 MIBANK 저장은 "금지 분기" 가 아니라
+**호출 자체가 없다**. lookback·Selenium 안전망·개장 전 보존 창은 생성기가 수행한다.
+
+**아직 운영에서 실증되지 않은 것**: 실제 장애에서의 Selenium 안전망 발화와 경보 발송.
+2026-09-10 활성화 후 관찰에서 `IBK_SELENIUM_NET_*` 마커 0건, 경보 접수 0건이었다.
+이는 "시험되지 않았다" 가 아니라(실물 응답 재현·통합 시험·별도 발송 점검은 있다)
+**그 관찰 창에서 해당 경로의 운영 실행 증거를 얻지 못했다**는 뜻이다. 접수 0건만으로
+장애 부재를 추론하지 않고 결과별 건수·접수 실패 계수도 함께 본다. 표본을 만들려고 운영 HTTP를
+일부러 실패시키지 않는다.
+
+**구현 범위 (배포 완료 2026-09-10) — 세 갈래로 구분한다:**
 (1) *해당 범위 검증 완료*: 결과 프로토콜, 유한 subprocess capture, 실행 ID·기준시각 전달,
 선택적 부모 배선, 판정 어댑터, 회귀 가드 순수 함수 추출, 결과 생성기(세션 소유·개장 전
 보존 창·후보 날짜 계획·과거 후보 lookback 까지 연결). 과거 후보를 찾아도 당일 관측으로
 승격하지 않고 PRESERVED 로 접으며, 기대 서비스일은 부모 값을 유지한다.
-(2) *기본 운영 경로 미전환 — 이제 **env 게이트**로 지킨다*: `IBK_RESULT_PATH_ENABLED`
-(기본 `false`). false 면 `IBK_RESULT_CRAWLER = None`, worker 에 부모 미주입, 경보 전달
-객체·스레드 미생성이라 IBK 를 포함한 모든 은행이 기존 경로로 흐른다. **배포가 곧 동작
-변화가 되지 않는다.** true 로 켜면 자식이 `run_ibk_dated_result` 를 바인딩하고 worker 가
-`IbkParentRunner` 를 쓰며 경보 전달이 뜬다. 활성화는 배포와 **분리된 별도 GO** 다.
-⛔ false 로 되돌리면 legacy 의 MIBANK 저장·기존 재시도 정책도 함께 복원된다. **이미 저장된
-데이터는 되돌아가지 않는다.**
+(2) *경로 전환을 **env 게이트**로 지킨다*: `IBK_RESULT_PATH_ENABLED`(**코드 기본값 `false`**,
+운영은 2026-09-10 부터 `.env` 로 `true`). false 면 `IBK_RESULT_CRAWLER = None`, worker 에
+부모 미주입, 경보 전달 객체·스레드 미생성이라 IBK 를 포함한 모든 은행이 기존 경로로
+흐른다 — **배포가 곧 동작 변화가 되지 않는다.** true 면 자식이 `run_ibk_dated_result` 를
+바인딩하고 worker 가 `IbkParentRunner` 를 쓰며 경보 전달이 뜬다.
+⛔ **되돌리기**: [DEPLOYMENT.md §8](DEPLOYMENT.md#8-코드-업데이트)의 설정 변경·복구 절차로
+`.env`의 `false`와 실제 적용 모델을 확인하고 같은 이미지로 재생성한다. 그러면 legacy의 MIBANK
+저장·기존 재시도 정책도 함께 복원된다. **이미 저장된 데이터는 되돌아가지 않는다.**
 상태 조회: `GET /admin/api/ibk-result-path`(부모 계측 + 경보 전달 지표, 읽기 전용).
-(3) *후속 작업*: 운영 활성화와 그 관찰, POST-first 정책 전환.
-이 검증은 로컬 경계에서 이뤄졌고 실제 HTTP·Selenium·운영 PostgreSQL·Telegram 발송 검증이
-아니다.
+⛔ 이 조회는 **운영 프로세스의 HTTP API에** 해야 한다. `docker exec … python`으로 새
+프로세스에서 snapshot 함수를 import·호출하면 `_ibk_parent` 같은 startup 산물을 못 봐
+`wired:false`를 돌려준다(실측). 반면 그 별개 프로세스에서도 실행 중인 앱의 HTTP API로
+요청하면 올바른 대상을 조회할 수 있다. import 시점 설정 확인과 startup 상태 조회를 구분한다.
+(3) *후속*: 드문 장애 경로(Selenium 안전망 발화·경보 발송)의 **운영 실증**. 평상시 관찰로
+두고, 실제 폴백이 나면 결과·DB·경보 접수·발송을 함께 확인한다.
 
 **Selenium 검증 관측(shadow) — 판정을 저장에 반영하지 않는다(그러나 공짜는 아니다):**
 `IBK_SELENIUM_VALIDATION_MODE`(`legacy` 기본 / `shadow`)로 켠다. `shadow`는 이미 열린 driver의
@@ -504,7 +525,9 @@ legacy 저장 후보와의 대조(`match`/`mismatch`/`incomparable`)와 차이 �
 `enforce`는 아직 값으로 받지 않는다(오타는 조용히 기본값으로 떨어지지 않고 기동 시 실패).
 강제 적용 기준은 이 관측 데이터를 보고 별도 커밋에서 정한다.
 
-**행동보존 준비 단계 (로컬 구현, 미배포):** `crawl_ibk_legacy_result()`가 종료 분기,
+**행동보존 준비 단계 (배포 완료 2026-09-10, legacy 복귀 경로에서 유효):**
+아래는 게이트를 `false` 로 되돌렸을 때 흐르는 legacy 경로의 서술이다.
+`crawl_ibk_legacy_result()`가 종료 분기,
 Selenium 시도 수, 직접 확보한 저장 함수 반환 개수만 `IbkLegacyResult`로 돌려준다.
 공개 진입 함수는 이를 버리고 기존 `None`/예외 계약을 유지한다. 이 타입은
 최종 OBSERVED/PRESERVED/DEGRADED/FAILED도, 부모 IPC 프로토콜도 아니다.

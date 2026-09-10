@@ -767,26 +767,33 @@ AWS Cloud (서울 리전)
 > (`coinone.py`) 부재 → `ModuleNotFoundError: No module named 'app.crawlers.usdt_ws.coinone'`.
 > `docker compose build fastapi` 선행 후 정상 동작. **build와 force-recreate는 다른 역할**.
 
-| 변경 종류 | 절차 | 이유 |
+| 변경 종류 | 필요한 작업 | 기준 절차 |
 | --- | --- | --- |
-| **코드 변경 포함** (`.py` 등 application code) | `git pull` → `docker compose build fastapi` → `docker compose up -d --force-recreate fastapi` (또는 한 번에 `docker compose up -d --build fastapi`) | image에 새 코드를 포함시켜야 컨테이너 안에 반영. `--force-recreate`만으로는 image rebuild 안 됨 |
-| **env만 변경** (`.env` 토글 — `USDT_WS_*_ENABLED` 등) | `docker compose up -d --force-recreate fastapi` (rebuild 불필요) | env_file은 컨테이너 재생성 시 다시 읽힘. 코드 변경 0이므로 image 그대로 사용 |
-| **신규 모듈 추가 후 검증** | `docker exec exchange-rate-app python -c "from app.crawlers.usdt_ws.coinone import CoinoneWsClient; print('OK')"` import check | image rebuild 누락 시 즉시 발견 가능. 운영 lifecycle 시작 전 sanity 확인 |
+| **코드 변경 포함** (`.py` 등 application code) | 승인한 코드가 든 이미지 생성·검증 후 앱 교체. `--force-recreate`만으로는 코드가 반영되지 않음 | [DEPLOYMENT.md §8.1](DEPLOYMENT.md#81-일반-dockerfile로-앱을-빌드교체하는-배포-github-사용) |
+| **env만 변경** (`.env` 토글 — `USDT_WS_*_ENABLED` 등) | 해석된 설정 대조 후 같은 이미지로 재생성. 전후 이미지 ID가 같은지 확인 | DEPLOYMENT.md §8.3 |
+| **신규 모듈 추가 후 검증** | 승인 SHA와 이미지의 파일 목록·해시 대조, 구문·기동·서비스 확인을 구분. 운영 DB에 연결된 `app.main` import를 사전 점검으로 쓰지 않음 | DEPLOYMENT.md §8.1 성공 조건 |
 
 **`docker compose restart`는 env_file 변경을 반영하지 않음** (기존 컨테이너 stop/start만). env 변경 시 `--force-recreate` 필요. `KRX_FUTURES_ENABLED` 토글 등 운영 영향 큰 env에는 반드시 `--force-recreate`.
 
 ### 코드 변경 후 Docker 재배포 절차
 
-#### 일상적인 코드 변경 (권장)
-```bash
-# 변경된 부분만 재빌드하고 컨테이너 재시작
-docker compose up -d --build
+> 📌 **운영 배포의 정본 절차는 [DEPLOYMENT.md §8](DEPLOYMENT.md#8-코드-업데이트) 이다.**
+> 중복 실행 명령을 여기 두지 않는다. §8.0의 예약 작업·설정·배포 창 주의사항과 §8.1의
+> 실패 시 중단·복구·성공 조건을 함께 따른다. **빌드 완료 시 `latest`가 바뀌면 앱 교체 전에
+> 호스트 cron 5건이 새 이미지를 쓸 수 있다.** 명령을 연달아 실행해도 원자적 전환은 아니다.
+> 앱만 바꾸는 배포는 `fastapi`로 한정한다. 서비스명을 생략한 `up --build`는 다른 서비스도
+> 처리 범위에 넣고, `down`은 redis·nginx까지 내린다.
 
-# 로그 확인
-docker compose logs -f
-```
+**현재 운영 기준 (2026-09-10, 배포 직전 서버와 반드시 대조할 것)**: 코드 `9d4e1c4`,
+`IBK_RESULT_PATH_ENABLED=true`·`TELEGRAM_ENABLED=true`(둘 다 **코드 기본값은 `false`**,
+운영 `.env` 로 켬). 이미지 ID·동결 Compose 모델·복구 기준은 **DEPLOYMENT.md §8.1b**에
+있다. 이 기록은 참고용이고 권위는 서버에 있다.
 
-#### 캐시 문제 발생 시 클린 빌드
+#### 캐시 문제 발생 시 클린 빌드 (개발 환경 전용)
+
+아래는 개발 환경을 중단할 수 있을 때만 쓴다. 운영에서는 DEPLOYMENT.md §8의 배포 범위와
+롤백 절차를 따른다.
+
 ```bash
 # 1. 컨테이너 중지 및 제거
 docker compose down
