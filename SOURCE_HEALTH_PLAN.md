@@ -2,9 +2,11 @@
 
 > **상태: Proposed / Step 0(인벤토리 + shadow 계약 초안) / 구현 없음**
 > 검증: 5-agent Workflow 코드 인벤토리 + codex 다라운드 리뷰(인벤토리→계약 정정 반복) + Claude 코드 재검증 (2026-07-22).
+> **2026-09-13 개정**: §7 신설 — 9은행 + Investing의 결과 보고·집계 계약, 지속장애 알림, 작업 미실행 감지. §2·§2.1·§4·§6-2의 낡은 현재형 서술 정정. **여전히 구현 없음(계획만).**
 > 범위: ADR-039 무료(비구독) 매시간 스냅샷([FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md))이 노출하는 소스의 **개별 stall** 관측.
 > [free_snapshot.py:59-64](app/free_snapshot.py) 주석이 명시하듯 S6(24h whole-snapshot cutoff)는 스냅샷 전체 정지만 잡고 **개별 소스 stall은 못 잡는 층** — 이 문서가 그 후속 계약.
-> ⚠️ **구현 착수 전 §6 게이트 결정 필수.** 아래 설계는 여러 열린 결정을 포함하며, 코드는 shadow 관측(§5) 결과 검토 후 별도로 결정한다.
+> ⚠️ **구현 착수 전 §6 게이트 결정 필수.** 아래 설계는 여러 열린 결정을 포함한다.
+> ⚠️ **결과 보고·집계(거짓 성공 수리 포함)·판정기와 log-only shadow 구현**은 검토 후 진행한다 — "보냈을 경보"를 관찰하려면 판정기와 log-only 실행이 먼저 있어야 한다. **실제 경보 발송과 새 health API/UI 노출**은 shadow 관측(§5) 결과 검토 후 별도로 승인한다(§6 순서도 결과 계약 ② → shadow ⑤ → API/UI ⑥).
 
 ---
 
@@ -35,7 +37,7 @@
 
 | 신호 | kind | 커버 | 영속 | tz | 핵심 한계 |
 |---|---|---|---|---|---|
-| `crawler_stats.last_success_at` | collection_success (명목) | 9은행+investing+dxy_spot | in-mem 휘발 | naive **local** | **전 collector가 총실패를 삼킴 → 장애 중에도 success**(§2.1). bank단위·재시작 소실 |
+| `crawler_stats.last_success_at` | collection_success (명목) | 9은행+investing+dxy_spot | in-mem 휘발 | naive **local** | **다수 collector가 총실패를 삼킴 → 장애 중에도 success**. 예외를 올리는 collector도 부분 통화·저장 결과는 구분 못 함(§2.1, 2026-09-13 재측정). bank단위·재시작 소실 |
 | DB row `timestamp`(bank/investing/source_rates/market_index) | value_changed | **전 소스** | 영속 | naive **UTC** | 정적 시장↔collector 사망 구분 X. write-gate skip 시 미전진 |
 | USDT `seen_at` | last_observed | 거래소5 | Redis 휘발 | KST | 거래소 event ts(5s floor). 정적↔사망 구분 X |
 | USDT `rate_changed_at` | value_changed | 거래소5 | Redis 휘발 | KST | 값 변경 시각 |
@@ -47,12 +49,30 @@
 
 ### 2.1 crawler_stats가 신뢰 불가한 이유 (codex High 1, 코드 검증됨)
 
-`crawler_stats.record_success`는 크롤러 wrapper가 **예외 없이 반환**하면 호출된다([scheduler.py:269](app/scheduler.py#L269) Request / [scheduler.py:319](app/scheduler.py#L319) subprocess exit 0). 그러나 **scheduled collector의 일반적인 총 source 실패 경로는 로그만 남기고 정상 반환**한다:
-- Request: KB([kb.py:93-96](app/crawlers/kb.py)), Investing([investing.py:186-206](app/crawlers/investing.py)) — 전 URL 실패/403도 None 정상 반환.
-- **Selenium**([runner.py:74](app/crawlers/runner.py)가 `crawler_func()` 후 `sys.exit(0)` — 함수가 raise해야만 exit 1): shinhan([shinhan.py:118-122](app/crawlers/shinhan.py)) / nh([nh.py:104-107](app/crawlers/nh.py)) / sc([sc.py:120-123](app/crawlers/sc.py)) / ibk([ibk.py:135-213](app/crawlers/ibk.py)) — IBK는 00:00~00:05 공식 날짜 POST 실패 뒤 Selenium을 억제하고 정상 return하며, 이후 Selenium/MIBANK 총실패도 마지막 경로에서 raise 없이 return한다. 둘 다 subprocess exit 0 → false success가 될 수 있다.
-- DXY([dxy_spot.py:451](app/crawlers/dxy_spot.py#L451)) — fallback chain이 모두 실패해도 warning 후 정상 반환. 단 정책 상태 불일치는 전용 예외로 전파한다.
+**부모가 성공을 판정하는 신호가 경로마다 다르다.** 줄 좌표는 편집마다 밀리므로 심볼로 적는다.
+- **Request 경로**: `scheduler.make_request_crawler_wrapper` 의 `wrapper` 가 `job_func()` 이 **예외 없이 반환**하면 `record_success`, 예외면 `record_failure`. **재등록 없음.**
+- **subprocess 경로**(shinhan·nh·sc): `runner.main` 이 `crawler_func()` 이 raise하지 않으면 `sys.exit(0)`, raise하면 `sys.exit(1)`. 부모 `execute_with_timeout` 은 `proc.returncode == 0` 을 성공으로 본다. 워커는 `should_retry = not success` 로 **부모가 실패로 판정하면 최대 1회 재등록**한다. 타임아웃·비정상 종료는 실패로 처리돼 재등록 조건에 들어간다.
+- **IBK 타입 결과 경로**: `IBK_RESULT_PATH_ENABLED`(운영 true) 게이트 뒤 `runner` 가 `ibk.run_ibk_dated_result` 를 바인딩해 `IbkResult`(OBSERVED/PRESERVED/DEGRADED/FAILED + `IbkReason`)를 result frame으로 전달하고, 부모 `IbkParentDecision` 이 **상태와 `should_retry` 를 별도 필드**로 든다. legacy 진입 `crawl_and_save_ibk_bank_exchange_rates` 는 provisional `IbkLegacyResult` 를 **의도적으로 버리고** None을 반환한다(docstring: "부모 wire 계약 아님").
 
-→ **subprocess returncode 0 = "top-level 함수가 raise 안 함"이지 "크롤 성공"이 아니다.** crawler_stats.last_success_at은 전 소스에서 장애 중에도 갱신될 수 있어 그대로는 collection-success 신호로 부적합. (초기 오해: "Selenium은 returncode 기반이라 신뢰"는 틀림 — 함수가 삼키면 returncode도 0.)
+**2026-09-13 재측정 — 10개 collector의 총실패 처리**
+
+| 분류 | collector | 한계 |
+|---|---|---|
+| ✅ 총실패를 예외로 전달 (3) | kb · hana · woori | 부분 통화·저장 0 은 여전히 구분 못 함 |
+| 🔴 총실패를 삼킴 (6) | investing · bs · citi · shinhan · nh · sc | 부모가 성공 집계 |
+| 🔷 타입 결과 경로 (1) | ibk | 보존하며 공통 화면·집계에 연결할 대상 |
+
+같은 부류로 묶이지 않는 세부 사실(전부 코드로 확인, 격리 재현 여부는 §7.8):
+- **MIBANK `hard_fail` 처리가 갈린다** — kb·hana는 `RuntimeError` 로 올리고, bs·citi·shinhan·nh·sc는 로그 후 반환한다.
+- **bs·citi의 신뢰창 밖 종료는 '회차 생략'이 아니다** — 공식 조회를 이미 시도해 **실패한 뒤** `is_mibank_rate_reliable()` 거짓으로 MIBANK만 생략하고 정상 반환한다. woori는 같은 자리에서 `RuntimeError("모든 공식 경로 실패, 신뢰 불가 시간대라 MIBANK 건너뜀")` 를 올린다(선례).
+- **investing은 쿨다운(HTTP 0회)과 양쪽 403(HTTP 2회 실패)이 둘 다 성공으로 접힌다.** 쿨다운은 연속 차단 수에 따라 최대 15분까지 늘어난다.
+- **shinhan·nh·sc는 MIBANK가 주 경로**이고 Selenium은 `soft_fail` 재검증과 MIBANK 예외 폴백을 겸한다. shinhan은 `soft_fail` + 재검증 실패 + `hard_fail` 아님이면 MIBANK 값을 그대로 저장한다. 성공 `return` 과 포기 `return` 이 같은 모양이다.
+- **부분 통화**: 저장 루틴이 통화별 선택자·파싱 실패를 `continue` 로 건너뛰고 얻은 통화만 저장 함수에 넘겨 정상 반환한다. woori·sc의 Selenium 경로는 이 처리를 **하위 현재 날짜 파서**(`woori.crawl_woori_current_date_rates`, `sc.crawl_current_date_rates`)에 위임한다 — 루틴 본문만 보면 패턴이 안 보이므로 위임을 따라가야 한다. 현재 날짜 경로의 부분 통화 전달·정상 반환은 격리 재현으로 확인했고, 과거 날짜 경로·실제 DB 반영·부모 집계는 그 재현 범위 밖이다(§7.8).
+- **저장 0 은 세 사실을 뭉갠다** — `insert_bank_rates_into_db` / `insert_investing_rates_into_db` 는 값 불변·쓰기모드 미확정·차단 모두 0을 반환하고 호출자는 구분할 수 없다. 차단은 `crud._write_mode_skip_counts` 근사 계수와 debug 로그로만 남고 **해당 회차 결과·부모 집계와 연결되지 않는다.** ⛔ 값 불변 회차의 성공 집계는 옳으므로 **0 을 실패로 바꾸면 안 된다.**
+- **세션 예외는 이미 부모까지 간다** — Request 경로 collector는 `SessionLocal()` 을 `try` 밖에서 만들고 `finally` 에서 닫는다.
+- DXY(`dxy_spot`)는 이번 재측정 범위 밖 — 기존 2026-07-22 서술을 그대로 둔다(이후 파일이 바뀌었으나 재확인하지 않음): fallback chain이 모두 실패해도 warning 후 정상 반환하고, 정책 상태 불일치는 전용 예외로 전파한다.
+
+→ **subprocess returncode 0 = "top-level 함수가 raise 안 함"이지 "크롤 성공"이 아니다.** 그리고 **raise 한다고 정확히 보고하는 것도 아니다**(kb·hana·woori도 부분 통화·저장 0을 성공으로 접는다). crawler_stats.last_success_at은 장애 중에도 갱신될 수 있어 그대로는 collection-success 신호로 부적합. (초기 오해: "Selenium은 returncode 기반이라 신뢰"는 틀림 — 함수가 삼키면 returncode도 0.)
 
 ---
 
@@ -74,7 +94,7 @@
 
 | source군 | collection_expected (수집 실행 스케줄) | market_expected (값 변화 가능) |
 |---|---|---|
-| 은행 9종 | 4-모드가 소스별 등록/제거 + **은행별 cutoff**(shinhan ~02:59:18 / woori ~05:04:53 / ibk BREAK1 ~05:59:34 + terminal 2회 / sc ~18:59:58) — ⚠️ **`get_market_mode()`만으로 `collection_expected`를 계산하면 false stall이 난다**(BREAK1 안이어도 해당 은행 job이 없는 구간이 있음). cutoff를 함께 봐야 한다 | 고시 window (kb 08:30~익일05:00 / hana ~06:00 / shinhan ~02:45 / woori ~05:00 / ibk ~06:00 / nh ~24:00 / sc 09:00~약17:50 / bs 08:10~24:00 / citi 09:00~익일06:00 — **2026-08-28 갱신**(우리/IBK 연장 고시 반영)), 주말·**공휴일** off |
+| 은행 9종 | 4-모드가 소스별 등록/제거 + **은행별 cutoff**(shinhan ~02:59:18 / woori BREAK1 ~05:59:44 + 화~토 마무리 06:00~06:03 `:14/:44`·06:04:53 9회 / ibk BREAK1 ~05:59:34 + terminal 2회 / sc ~18:59:58) — ⚠️ **`get_market_mode()`만으로 `collection_expected`를 계산하면 false stall이 난다**(BREAK1 안이어도 해당 은행 job이 없는 구간이 있음). cutoff를 함께 봐야 한다 | 고시 window (kb 08:30~익일05:00 / hana ~06:00 / shinhan ~02:45 / woori **05:55:56 관측(2026-09-05), 종료 시각 미확정** / ibk ~06:00 / nh ~24:00 / sc 09:00~약17:50 / bs 08:10~24:00 / citi 09:00~익일06:00 — **2026-08-28 갱신**(우리/IBK 연장 고시 반영), **2026-09-12 우리 재갱신**(ADR-044: 06:00은 관측이 아니라 우리가 정한 수집 종료 정책)), 주말·**공휴일** off |
 | investing | 상시(전 모드 등록, OUT 1min) | 월06:00~토06:00(글로벌 FX), FX 휴일 off |
 | 거래소5 | 24/7(lifespan collector) | 24/7(단 소스별 sparse 상이, gopax 평상 ~180s) |
 | dxy | dxy_spot 상시 / dxy_futures=investing 종속 | investing과 동조 |
@@ -105,13 +125,137 @@
 1. **per-asset 유효-수집 성공 기준 정의 (선행)** — "예외 없이 반환"이 아니라 "해당 (source,asset)의 **유효 데이터**를 실제로 받았나"(통화별 부분 실패 은닉 해소). **이 정의 없이는 아래 success/partial/failure를 분류할 수 없다**(codex — validity가 결과 계약보다 먼저).
 2. **실행 결과를 3계층으로 분리하는 계약 설계**(codex — 사건 발생 위치가 달라 collector 결과 하나로 못 묶음):
    - **eligibility**(스케줄러 등록 전): `enabled` / `scheduled_off`(mode) / `admin_disabled`(`crawler_config`) — collector 안 돎.
+     ⛔ **정상 제외는 `scheduled_off`·`admin_disabled` 뿐이다.** 수집해야 하는데 등록·시작되지 않은 작업(**등록 누락**)은 정상 제외가 아니라 **탐지 대상**이다. 기대 실행 여부는 실제 등록 목록이 아니라 수집 정책·시간표·관리자 설정으로 **먼저 계산하고**, 그다음 등록·시작 여부와 대조한다(§7.6).
    - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:485](app/scheduler.py#L485) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
-   - **run**(collector 실행): `success` / `partial` / `failure`(`failure_reason`=timeout 등) / `skipped`. **timeout은 skip 아니라 run failure**(계획 skip과 재혼입 금지). IBK는 00:00~00:05에도 collection을 시도한다. 날짜 지정 Request로 USD·JPY·EUR를 유효 관측하면 `changed_count=0`이어도 success이고, 이 Request 실패 뒤 자정 창 때문에 Selenium만 억제되면 `observed_assets=∅`, `failure_reason=request_failed`, `fallback_suppressed=midnight_transition`인 failure여야 한다([ibk.py:120-159](app/crawlers/ibk.py)). 완전한 DB snapshot의 공식 무고시는 `no_observation_preserved`, 과거 서비스일 회귀 차단은 `stale_regression_preserved`(부분 안전 통화 관측이 있으면 `partial`)로 분리해 exit 0을 무조건 success로 오인하지 않는다.
-   collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 전 collector가 총실패를 삼킴(§2.1)이라 이 계약 선행 없이 shadow 무의미. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
+   - **run**(collector 실행): `success` / `partial` / `failure`(`failure_reason`=timeout 등) / `skipped`. **timeout은 skip 아니라 run failure**(계획 skip과 재혼입 금지). (역사적 사례 — **IBK legacy 경로** `crawl_ibk_legacy_result` 기준, 2026-07-22 작성) legacy 경로는 00:00~00:05에도 collection을 시도한다. 날짜 지정 Request로 USD·JPY·EUR를 유효 관측하면 `changed_count=0`이어도 success이고, 이 Request 실패 뒤 자정 창 때문에 Selenium만 억제되면 `observed_assets=∅`, `failure_reason=request_failed`, `fallback_suppressed=midnight_transition`인 failure여야 한다. ⚠️ 운영(게이트 ON)의 IBK 타입 결과 경로 `produce_ibk_dated_result` 는 Selenium 안전망을 **HTTP 기술 실패(`CandidateSearchStop.TECHNICAL_FAILURE`)에서만** 열고 무고시·개장 전·예산 소진에서는 열지 않는다 — 이 문장을 그 경로의 동작으로 읽지 말 것(§2.1). 완전한 DB snapshot의 공식 무고시는 `no_observation_preserved`, 과거 서비스일 회귀 차단은 `stale_regression_preserved`(부분 안전 통화 관측이 있으면 `partial`)로 분리해 exit 0을 무조건 success로 오인하지 않는다.
+   collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 다수 collector가 총실패를 삼키고, 예외를 올리는 collector도 부분 통화·저장 결과를 구분하지 못하므로(§2.1) 이 계약 선행 없이 shadow 무의미. 구체 계약은 §7.2. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
 3. **collection_expected(eligibility + interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected = eligibility(`scheduled_off`/`admin_disabled`)이며 timing은 Bool 아닌 **`expected_interval`/`next_due_at + grace`**(현재 등록 소스는 IN/OUT 모두 10~60s). **dispatch(queue_full/misfire)·run(timeout/transition) 결과는 collection_expected가 아니라 §6-2 3계층** — queue 포화는 억제가 아니라 health 영향(§4·§6-2 정합). market_mode(eligibility 파생) + kr_holidays(market_expected) realtime 연결.
 4. **timezone-aware heartbeat 저장 설계** — collection_success_at을 per-(source,asset) 영속(Redis/DB), tz-aware. USDT는 in-process liveness(is_stale/ticker-dead/task.done) export 포함.
 5. **≥7일 shadow 관측 + deterministic 휴일 테스트** (log-only) — 1~2일은 평일만 보고 끝나 BREAK/OUT·주말 전환 오탐을 검증 못 함(codex). 주간 모드 사이클(평일 IN/BREAK + 주말 OUT) 전체 + **주입식 공휴일 테스트**(실휴일 대기 불요)로 cadence 마스크 검증.
 6. **오탐률 확인 후 API/UI 계약 검토** (additive health 필드 → iOS 최소 배지, 확실한 장애만).
+
+---
+
+## 7. 9은행 + Investing 결과 보고·집계 계약 (2026-09-13 개정)
+
+> §1~§6 계획 중 **9은행 + Investing** 부분을 앞당겨 구체화한다. 거래소 5종·DXY·영속 heartbeat·사용자 배지는 §1~§6 범위로 남는다. **구현 없음 — 계획만.**
+> 원칙: **은행별 수집 방법은 유지하고, 무엇을 확인했고 무엇을 모르는지 보고하는 방식과 지속 장애 감지를 통일한다.**
+
+### 7.1 범위
+
+- **이번**: 결과 보고·집계 계약 · 지속장애 알림 · 작업 미실행 최소 감지.
+- **후속**: 영속 heartbeat · 사용자 건강 배지 · 정체 감지 확장 · 거래소·DXY.
+- §5·§6-5의 ≥7일 shadow는 **알림 활성화의 선행 조건**이다. 거짓 성공 수리의 선행 조건으로 쓰지 않는다.
+- 결과 기반 감지만으로는 **작업이 아예 안 도는 상태를 영원히 못 잡는다** → 최소 미실행 감지(§7.6)는 이번 범위다.
+
+### 7.2 공통 결과 계약 — 5축
+
+한 회차가 끝나면 아래 다섯을 **각각** 답한다. 하나로 접지 않는다. 값에는 **상태와 사유를 함께** 적는다.
+
+| 축 | 값 | 사유 예 |
+|---|---|---|
+| **회차 수집**(통화별) | `유효관측` / `누락` / `미시도` / `확인 불가` | `누락` = **필요한 유효 관측을 확보하지 못함**. 사유 `no_value` / `validation_rejected` |
+| **폴백별 상태**(단계별) | `시도·성공` / `시도·실패` / `정책상 미시도` / `앞 단계 성공으로 불필요` / `미도달` | `정책상 미시도`: `mibank_untrusted_window` 등. `미도달`: `budget_exhausted` / `cancelled` |
+| **쓰기 동작**(통화별) | `수행` / `변경 불필요` / `정책 차단` / `실패` / `미시도` / `확인 불가` | `정책 차단`: `write_mode_uninitialized` / `write_mode_halt` |
+| **최종 DB 확인**(통화별) | 의도값과 `일치` / `불일치` / `확인 불가` | — |
+| **실행 결과** | `정상종료` / `시간초과` / `취소` / `비정상종료` | 자손 프로세스 정리 확인 여부는 **별개 필드** |
+
+- ⛔ **쓰기 동작 ⊥ 최종 DB 확인.** "쓰기는 차단됐지만 필요한 값은 이미 DB에 있다"가 동시에 참일 수 있다. IBK `ibk_result_builder` 가 이미 이 차이로 판정을 가른다.
+- ⛔ **회차 결과 ⊥ 폴백 생략 사유.** bs·citi가 근거다 — 시도해서 실패한 회차를 "MIBANK 생략"으로 접으면 지속 장애가 정책상 생략으로 숨는다.
+- ⛔ **타임아웃은 실행 결과로 기록한다.** 수집·쓰기·DB 확인은 각각 **확보한 증거를 보존**하고 확정하지 못한 항목만 `확인 불가` 로 둔다. 이미 확인한 사실을 타임아웃이 지우지 않는다.
+- ⛔ 쓰기·DB 확인을 **회차 단일 값으로 덮지 않는다** — 일부 통화만 반영된 부분 실패가 다시 숨는다.
+- ⛔ **저장 0 을 실패로 바꾸지 않는다.** 값 불변 회차의 성공은 옳다.
+- ⛔ **이관 전의 약한 성공 신호를 이름만 바꿔 '검증된 성공'으로 승격하지 않는다.**
+- `유효관측` 인정 기준은 §6-1 선행 결정이다.
+- IBK는 **구조만** 재사용한다. `OBSERVED` 는 "이번에 썼다"가 아니라 기대 서비스일 공식 3통화 관측 + 의도한 최종값과 완전한 DB 일치이고, enum을 그대로 일반화하지 않는다.
+
+### 7.3 통합하지 않는 경계
+
+파싱·날짜/통화/범위 검증 · 수집 시간표와 휴일·개장 전 보존 · HTTP·Selenium·MIBANK 선택과 허용 조건 · **은행별 폴백 순서** · **`soft_fail` 값 채택 정책** · 재시도 간격 · 경보 임계. IBK의 "유효 결과가 있으면 재시도 금지" 불변식(`IbkParentDecision`)도 **IBK 전용**으로 남긴다.
+
+### 7.4 집계·API — 구현 전 결정 항목
+
+`success_rate = 성공/(성공+실패)` 공식을 유지해도 **세는 대상이 바뀌면 지표 의미가 바뀐다.** 관리자 화면이 이 값으로 경고 색을 정하므로 **"API 호환 확보"는 아래 결정 뒤에만 말한다.**
+
+- `partial` / `unknown` / `preserved` 의 집계 방식과 분모 (D7).
+- 구 의미 누적 통계와 새 통계를 구분하는 방법.
+- **쿨다운 생략은 `last_success_at` 을 갱신하지 않고, 연속 실패·장애 상태를 초기화하지 않는다.**
+- 회차·재시도·내부 폴백의 집계 단위와 책임자. **타임아웃 뒤 늦게 도착한 결과를 중복 집계하지 않는다.**
+- 재시도 결정은 집계와 분리한다. 지금은 subprocess 경로가 같은 불리언(`should_retry = not success`)을 쓴다.
+
+### 7.5 지속장애 알림
+
+**생명주기**: 일시적 오류는 기록만 → 지속 기준 충족 시 최초 알림 1회 → 지속 중 간격 재알림 → **확인된 복구** 시 1회 알림.
+
+**두 지속 시간을 따로 잰다**:
+1. 수집해야 하는 시간에 **필요한 유효 관측을 확보하지 못한 시간**.
+2. **반영해야 할 값과 최종 DB가 불일치한 시간** — 은행에서 새 값을 계속 받는데 DB에는 옛 값이 남는 장애.
+
+**평가 보류와 쿨다운을 구분한다**:
+- **평가 보류**: 수집 시간대 종료 · 관리자 비활성. 보류는 **복구 확인이 아니다.**
+- **쿨다운은 평가 보류가 아니다.** 추가 요청은 억제하되, 수집이 필요한 시간이라면 유효 관측 공백과 기존 장애의 지속 여부를 **계속 평가**한다. 쿨다운 회차를 새 수집 실패로 세지 않고, 복구로도 처리하지 않는다. 근거: investing 쿨다운은 차단이 반복될수록 최대 15분까지 길어진다 — 평가를 멈추면 **차단이 심해질수록 감시가 쉰다.**
+
+**판정 규칙**:
+- 연속 실패 **횟수만으로** 장애를 판정하지 않는다(미실행·주기 차이를 놓친다). 시간·실행 주기와 함께 보조 지표로는 쓸 수 있다.
+- 은행별·통화별로 본다. USD 성공이 JPY·EUR의 지속 실패를 가리지 않는다.
+- 쓰기가 차단됐어도 **DB가 이미 의도값과 같으면** 차단 사실만으로 장애를 선언하지 않는다.
+- 공식 무고시·개장 전 보존을 "새 관측 없음" 장애로 만들지 않는다.
+- `확인 불가` 가 오래 지속되면 "장애 확정"이 아니라 **"상태 확인 불가 지속"** 으로 알린다.
+- DB 일치를 Redis·API·알림 **전달 성공으로 확대하지 않는다.** 하류 확인 범위는 따로 적는다.
+- IBK 기존 통지(`ibk_parent_runner` 의 통지 상태 관리)와 공통 알림이 **같은 사건을 중복 발송하지 않도록** 소유권을 정한다 (D8).
+
+**전달**: 접수 ⊥ 발송 성공 · 발송 재시도 ⊥ 크롤러 재실행. `ibk_notice_delivery` 의 구조를 참고한다.
+**활성화**: "보냈을 경보" shadow 관찰 + §7.9 격리 시험 통과 후.
+리소스 과부하 경보(`admin/monitor.py`)는 **별개 정책이며 이번 범위 밖**이다. 수집 장애를 리소스 수치로 대신 판정하지 않는다.
+
+### 7.6 작업 미실행 감지
+
+- 기대 실행 여부는 **수집 정책·시간표·관리자 설정으로 먼저 계산**하고, 그다음 등록·시작 여부와 대조한다.
+- 정상 제외는 `scheduled_off` / `admin_disabled` **뿐**이다. ⛔ **등록 누락은 정상 제외가 아니라 탐지 대상**이다.
+- 판정은 Bool이 아니라 **`expected_interval` / `next_due_at` + grace** 로 한다 — 유예 없이 비교하면 정상 대기 중에도 경보가 난다.
+- `dispatch` 계층(`queue_full`·`misfire`·`backpressure`)은 반복 시 `degraded`.
+- 감시는 크롤러 결과가 돌아올 때가 아니라 **별도 주기 점검**으로 돈다.
+- **재시작**: 직후는 `unknown` 으로 시작하고, 첫 기대 실행과 유예시간을 기준으로 판정한다. 이전 장애가 복구됐다고 추정하지 않는다. ⚠️ 재시작을 가로지르는 장애 지속 시간·알림 중복 억제는 이번 단계가 보장하지 못한다(영속 heartbeat는 후속).
+- ⚠️ 앱 전체가 멈추면 앱 내부 점검도 멈춘다. 외부 감시는 이번 범위 밖이다.
+
+### 7.7 이관 순서
+
+1. **investing** 첫 적용. **KB는 항목별 대조군** — 정상 수집 보존·전면 실패의 부모 실패 집계는 기준이 되지만, 부분 통화·저장 0은 KB도 공백이다.
+2. **bs · citi** — `hard_fail` 삼킴과 신뢰창 밖 종료를 woori 선례로 정렬.
+3. **hana · woori** — 내부 Selenium subprocess 폴백까지 한 흐름으로.
+4. **shinhan · nh · sc** — ⚠️ **재시도 부하 검증 필수.** 실패를 전달하도록 고치는 순간 부모 재등록이 붙어 요청·Chrome 기동이 늘 수 있다.
+5. **ibk** — 기존 `IbkResult` 를 보존하며 공통 화면·집계에 연결.
+
+⛔ 결과 판정 변경과 subprocess 자손 정리를 **같은 배포에 묶지 않는다.**
+
+### 7.8 증거 상태
+
+출처 표기: `C` Claude 코드 확인 · `X` Codex 격리 재현(HTTP·브라우저·DB·프로세스 생성 대체, **실제 DB·쓰기차단 아님**) · `T` 기존 시험 · `—` 미확인.
+
+**재현된 경계 (`X`, Codex 보고 기준)**
+- investing · kb 흐름 — 정상 · 1차 실패 뒤 2차 성공 · 부분 통화 · 저장 함수 0 반환 · 전면 실패 · 세션 예외.
+- investing 양쪽 403(HTTP 2회)과 쿨다운(HTTP 0회)이 둘 다 성공 집계.
+- bs · citi · woori 의 공식 실패 뒤 신뢰창 밖 종료 — bs·citi 성공 집계, woori 실패 집계.
+- shinhan · nh · sc 전면 실패 → 정상 반환 → runner exit 0 → 부모 성공 → **해당 격리 사례에서는 재등록 조건 미충족.**
+- IBK 판정기 — 저장 반환 0이어도 DB 대조로 `OBSERVED` / `DEGRADED(WRITE_POLICY_BLOCKED)` / `FAILED(WRITE_POLICY_BLOCKED)` 로 갈림.
+- woori · sc Selenium **현재 날짜** 경로 — 정상 3통화 / USD만 유효, 경로당 2건(총 4건). USD만 남으면 그 부분 결과를 저장 함수에 넘기고 정상 반환(가짜 브라우저·파서·저장 함수).
+
+**기존 시험 (`T`)**
+- IBK 쓰기차단 — `tests/test_ibk_result_builder.py` 의 `RealDbBuilderTest`(임시 SQLite + 실제 crud writer, `BLOCKED_UNINITIALIZED`). 이번에 읽었고 실행하지 않았다.
+
+**남은 경계 (`—`)**
+- **이번 조사에서 새로 수행한** 실제 쓰기차단 재현 0건(기존 시험 부재나 운영 검증 부재와 섞지 않는다).
+- hana 흐름 격리 재현 없음.
+- `soft_fail` · 신뢰창 밖 종료의 실제 운영 발화 미관측.
+- shinhan · nh · sc 중간 `return` 의 성공↔포기 구분.
+- woori · sc Selenium 경로의 **과거 날짜** 부분 통화 동작, 그리고 부분 통화의 실제 DB 반영·부모 집계.
+- **운영 재등록 횟수 미측정** — 위 격리 사례 결과를 운영 측정으로 옮기지 않는다.
+
+### 7.9 검증 계획
+
+격리 시험 대상: 정상 · 값 불변 · 부분 실패 · 쿨다운 · **등록 누락** · DB 불일치 · 결과 유실 · 알림 발송 실패와 복구.
+
+⛔ **"7일간 조용했다"만으로 알림을 승인하지 않는다.** 격리 시험에서 **울려야 할 때 울리고 조용해야 할 때 조용한지**를 함께 요구한다.
 
 ---
 
@@ -123,3 +267,5 @@
 - (D4) 영속 heartbeat 저장소(Redis vs DB) 및 multi-worker 대비 필요성 — shadow 관측 후.
 - (D5) Citi(수집O·표시X) 및 미표시 소스의 health를 관측만 할지 무시할지.
 - (D6) source-health가 무료 트랙 출시 blocker인지 fast-follow인지 (제품/타임라인 결정).
+- (D7) §7.4 — `partial` / `unknown` / `preserved` 의 집계 방식과 `success_rate` 분모, 구 의미 누적 통계와의 구분. 이 결정 전에는 관리자 API 의미 호환을 주장하지 않는다.
+- (D8) §7.5 — 지속장애 알림의 구체 임계·재알림 간격, 그리고 IBK 기존 통지와 공통 알림의 **사건 소유권**(같은 사건 중복 발송 방지).
