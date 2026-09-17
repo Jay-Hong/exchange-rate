@@ -273,12 +273,13 @@
 #### Investing.com (`app/crawlers/investing.py`)
 
 **핵심 로직:**
-- JPY-KRW 스케일링 (100엔당 원화 → 1엔당 원화로 변환)
+- JPY-KRW 스케일링 (1엔당 원화 → 100엔당 원화, ×100)
 - **curl_cffi + TLS 지문 위장**: `safari17_0` impersonate로 Cloudflare 우회 ([ADR-018](DECISIONS.md#adr-018-investing-cloudflare-차단-대응---curl_cffi-tls-지문-위장))
 - **Circuit Breaker**: 연속 403 시 점진적 쿨다운 (5회→1분, 10회→5분, 20회→15분)
 - **UA 로테이션**: impersonate에 맞는 UA 풀에서 랜덤 선택
 - **Jitter**: 0~2초 랜덤 딜레이 (요청 패턴 분산)
 - **로그 억제**: 차단 상태 전이 로깅 (시작=ERROR 1회, 지속=WARNING 5분마다, 해제=WARNING 1회)
+- **FX 결과 보고 (슬라이스 1, 보고 전용)**: `investing_report.py`가 회차 시작·FX writer 직후(DXY 저장/폴백 전)·세션 종료까지의 증거를 기존 로거로 기록한다. 통화별 유효성은 정규화 후 `MIBANK_RATE_RANGES`를 공유하며, 보고상 무효 값도 기존 writer에 그대로 전달한다. 저장·폴백·통계 매핑은 변경하지 않는다. 이벤트/상태 의미는 [SOURCE_HEALTH_PLAN §7.10](SOURCE_HEALTH_PLAN.md#710-investing-슬라이스-1-보고-전용-구현)을 따른다.
 
 **주의사항:**
 - JPY만 ×100 스케일링, 다른 통화 추가 시 확인 필요

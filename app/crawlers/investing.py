@@ -21,6 +21,7 @@ except Exception:
 from app import crud
 from app.database import SessionLocal
 from app.crawlers.constants import HEADERS, DEFAULT_TIMEOUT
+from app.crawlers.investing_report import safely_report, start_report
 from app.crawlers.utils import parse_rate_text
 
 # 크롤러 이름
@@ -165,51 +166,80 @@ def _should_skip_due_to_cooldown(now: float) -> bool:
 
 def crawl_and_save_investing_exchange_rates():
     """Investing.com 환율 크롤링"""
-    db = SessionLocal()
-
+    # SessionLocal 생성 실패와 close 실패까지 보고하되 기존 전파 경계는 보존한다.
+    report = start_report(logger, INVESTING_SELECTORS)
+    round_error = None
     try:
-        now = time.monotonic()
-        with _state_lock:
-            if _should_skip_due_to_cooldown(now):
+        db = SessionLocal()
+        try:
+            safely_report(report, "session_state", "open")
+            now = time.monotonic()
+            with _state_lock:
+                if _should_skip_due_to_cooldown(now):
+                    safely_report(report, "cooldown")
+                    return
+
+            time.sleep(random.uniform(0, JITTER_MAX_SECONDS))
+
+            first_403 = False
+            second_403 = False
+
+            safely_report(report, "start_attempt", 1)
+            try:
+                logger.info("FIRST_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
+                crawl_and_save_routine(FIRST_INVESTING_URL, INVESTING_SELECTORS, db,
+                                      headers=_build_headers(CFFI_IMPERSONATE), report=report, attempt_id=1)
+                with _state_lock:
+                    _mark_success()
+                safely_report(report, "finish_attempt", 1)
+                return
+            except InvestingForbidden as exc:
+                safely_report(report, "finish_attempt", 1, error=exc, reason="http_403")
+                first_403 = True
+            except Exception as exc:
+                safely_report(report, "finish_attempt", 1, error=exc)
+                logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": FIRST_INVESTING_URL})
+            except BaseException as exc:
+                safely_report(report, "finish_attempt", 1, error=exc)
+                raise
+
+            safely_report(report, "start_attempt", 2)
+            try:
+                logger.info("SECOND_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
+                crawl_and_save_routine(SECOND_INVESTING_URL, INVESTING_SELECTORS, db,
+                                      headers=_build_headers(CFFI_IMPERSONATE), report=report, attempt_id=2)
+                with _state_lock:
+                    _mark_success()
+                safely_report(report, "finish_attempt", 2)
+                return
+            except InvestingForbidden as exc:
+                safely_report(report, "finish_attempt", 2, error=exc, reason="http_403")
+                second_403 = True
+            except Exception as exc:
+                safely_report(report, "finish_attempt", 2, error=exc)
+                logger.exception("SECOND_INVESTING_URL 크롤링 실패", extra={"url": SECOND_INVESTING_URL})
+            except BaseException as exc:
+                safely_report(report, "finish_attempt", 2, error=exc)
+                raise
+
+            if first_403 and second_403:
+                with _state_lock:
+                    _mark_blocked(time.monotonic())
                 return
 
-        time.sleep(random.uniform(0, JITTER_MAX_SECONDS))
-
-        first_403 = False
-        second_403 = False
-
-        try:
-            logger.info("FIRST_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
-            crawl_and_save_routine(FIRST_INVESTING_URL, INVESTING_SELECTORS, db, headers=_build_headers(CFFI_IMPERSONATE))
-            with _state_lock:
-                _mark_success()
-            return
-        except InvestingForbidden:
-            first_403 = True
-        except Exception:
-            logger.exception("FIRST_INVESTING_URL 크롤링 실패", extra={"url": FIRST_INVESTING_URL})
-
-        try:
-            logger.info("SECOND_INVESTING_URL 시도", extra={"bank": CRAWLER_NAME})
-            crawl_and_save_routine(SECOND_INVESTING_URL, INVESTING_SELECTORS, db, headers=_build_headers(CFFI_IMPERSONATE))
-            with _state_lock:
-                _mark_success()
-            return
-        except InvestingForbidden:
-            second_403 = True
-        except Exception as e2:
-            logger.exception("SECOND_INVESTING_URL 크롤링 실패", extra={"url": SECOND_INVESTING_URL})
-
-        if first_403 and second_403:
-            with _state_lock:
-                _mark_blocked(time.monotonic())
-            return
-
+        finally:
+            safely_report(report, "session_state", "closing")
+            db.close()
+            safely_report(report, "session_state", "closed")
+    except BaseException as exc:
+        round_error = exc
+        raise
     finally:
-        db.close()
+        safely_report(report, "finish", round_error)
 
 
-def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict) -> int:
+def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict,
+                           *, report=None, attempt_id=None) -> int:
     """
     크롤링 + DB 저장 루틴
 
@@ -230,6 +260,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
             rate_element = soup.select_one(selector)
 
             if not rate_element:
+                safely_report(report, "observation", attempt_id, pair, reason="selector_missing")
                 logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector})
                 continue
 
@@ -241,8 +272,11 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
                     current_rate *= SCALED_CURRENCY_PAIRS[pair]
                 current_rates[pair] = current_rate
             except ValueError:
+                safely_report(report, "observation", attempt_id, pair, reason="parse_failed", text=rate_text)
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text})
                 continue
+            # 보고상 무효(NaN/범위 밖)도 위의 기존 writer 입력에는 그대로 남긴다.
+            safely_report(report, "observation", attempt_id, pair, text=rate_text, rate=current_rate)
 
         # 미국달러지수 선물 동반 추출 (exchange-rates-table에서만 존재)
         dxy_element = soup.select_one(DXY_SELECTOR)
@@ -264,8 +298,18 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, headers: dict
 
     # DB 저장: 환율
     if current_rates:
-        count = crud.insert_investing_rates_into_db(db=db, current_rates=current_rates)
+        safely_report(report, "writer_started", attempt_id, current_rates)
+        try:
+            count = crud.insert_investing_rates_into_db(db=db, current_rates=current_rates)
+        except BaseException as exc:
+            safely_report(report, "writer_finished", attempt_id, error=exc)
+            safely_report(report, "emit", "investing_fx_evidence", attempt_id)
+            raise
+        safely_report(report, "writer_finished", attempt_id, count=count)
+        # DXY 저장/폴백 진입 전 FX 증거를 남긴다. 뒤의 예외·재크롤이 이를 지우면 안 된다.
+        safely_report(report, "emit", "investing_fx_evidence", attempt_id)
     else:
+        safely_report(report, "emit", "investing_fx_evidence", attempt_id)
         raise Exception("🈚️ Investing 환율 데이터 없음")
 
     # DB 저장: 미국달러지수 선물 (환율 저장 성공 후)

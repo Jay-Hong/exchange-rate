@@ -1,8 +1,8 @@
 # Source-Health Plan (무료 스냅샷 소스별 건강 관측)
 
-> **상태: Proposed / Step 0(인벤토리 + shadow 계약 초안) / 구현 없음**
+> **상태: Investing 슬라이스 1 보고 전용 구현 완료(§7.10) / 집계·알림 미구현 / 미배포**
 > 검증: 5-agent Workflow 코드 인벤토리 + codex 다라운드 리뷰(인벤토리→계약 정정 반복) + Claude 코드 재검증 (2026-07-22).
-> **2026-09-13 개정**: §7 신설 — 9은행 + Investing의 결과 보고·집계 계약, 지속장애 알림, 작업 미실행 감지. §2·§2.1·§4·§6-2의 낡은 현재형 서술 정정. **여전히 구현 없음(계획만).**
+> **2026-09-13 개정**: §7 신설 — 9은행 + Investing의 결과 보고·집계 계약, 지속장애 알림, 작업 미실행 감지. §2·§2.1·§4·§6-2의 낡은 현재형 서술 정정. **현재 Investing 보고 전용 구현은 완료(§7.10)했으며, 집계·알림은 미구현이고 운영에는 미배포다.**
 > 범위: ADR-039 무료(비구독) 매시간 스냅샷([FREE_TIER_ACCESS_MODEL_PLAN.md](FREE_TIER_ACCESS_MODEL_PLAN.md))이 노출하는 소스의 **개별 stall** 관측.
 > [free_snapshot.py:59-64](app/free_snapshot.py) 주석이 명시하듯 S6(24h whole-snapshot cutoff)는 스냅샷 전체 정지만 잡고 **개별 소스 stall은 못 잡는 층** — 이 문서가 그 후속 계약.
 > ⚠️ **구현 착수 전 §6 게이트 결정 필수.** 아래 설계는 여러 열린 결정을 포함한다.
@@ -138,7 +138,7 @@
 
 ## 7. 9은행 + Investing 결과 보고·집계 계약 (2026-09-13 개정)
 
-> §1~§6 계획 중 **9은행 + Investing** 부분을 앞당겨 구체화한다. 거래소 5종·DXY·영속 heartbeat·사용자 배지는 §1~§6 범위로 남는다. **구현 없음 — 계획만.**
+> §1~§6 계획 중 **9은행 + Investing** 부분을 앞당겨 구체화한다. 거래소 5종·DXY·영속 heartbeat·사용자 배지는 §1~§6 범위로 남는다. **Investing 슬라이스 1 보고 전용 구현은 §7.10. 나머지는 계획이며 집계·알림 변경은 미구현.**
 > 원칙: **은행별 수집 방법은 유지하고, 무엇을 확인했고 무엇을 모르는지 보고하는 방식과 지속 장애 감지를 통일한다.**
 
 ### 7.1 범위
@@ -256,6 +256,54 @@
 격리 시험 대상: 정상 · 값 불변 · 부분 실패 · 쿨다운 · **등록 누락** · DB 불일치 · 결과 유실 · 알림 발송 실패와 복구.
 
 ⛔ **"7일간 조용했다"만으로 알림을 승인하지 않는다.** 격리 시험에서 **울려야 할 때 울리고 조용해야 할 때 조용한지**를 함께 요구한다.
+
+### 7.10 Investing 슬라이스 1 보고 전용 구현
+
+- 코드: `app/crawlers/investing.py`(계측 경계), `app/crawlers/investing_report.py`(보고 객체). 회귀 시험: `tests/test_investing_report.py` — HTTP·세션·DB 대역 사용.
+- 기존 Investing 로거 → `logs/app.log`의 `message`에 JSON 이벤트: `investing_round_started`(세션 생성 전), `investing_fx_evidence`(FX writer 반환/예외 직후, DXY 저장/폴백 진입 전; 파싱 전패 시 미호출 증거), `investing_round_finished`(세션 생성~close의 최외곽 finally). 로깅 설정은 그대로다.
+- `schema_version=2`, `round_id`, `attempt_id`(URL 시도 1/2, 회차 이벤트는 null). JSON 공백을 제거하고 `format`으로 아래 세 형식을 구분한다. 이벤트 수·발행 위치는 유지한다.
+  - `lifecycle`: 시작 이벤트는 식별자와 형식만. 의미는 **세션 생성 전·수집 미시도**이며 성공 증거가 아니다.
+  - `compact`: **첫 시도에서 모든 통화 valid, 모든 통화 writer 제출·정수 반환 확인, 재시도·계측 오류 없음**일 때 FX 증거와 정상 종료를 각각 한 줄로 기록한다. 종료는 루틴 정상 반환·세션 closed까지 요구한다. `outcome=all_valid`, `fx_attempt_id=1`, `rates`(통화별 정규화 값), `writer_returned_count`, `writing=per_currency_write_unverified`를 보존한다. rates의 각 항목은 `valid/validated`이며 writer 제출 통화도 같은 키 집합이다. 0 반환도 압축 가능하지만 저장 성공·변경 불필요·정책 차단을 뜻하지 않는다. FX 이벤트 시점의 `execution=running`은 이후 DXY 성공을 보장하지 않는다.
+  - `detail`: 부분/전면 누락, 쿨다운, 재시도(2차 성공 포함), 예외, 계측 실패는 상세 스냅샷. `attempts`에 시도별 원본 `collection`을 한 번만 담고, 회차 요약 `collection_attempts[pair]`는 선택된 원본의 attempt_id를 참조한다. 계측 오류가 없을 때만 `not_reached`/`unnecessary` 시도의 빈 collection·writer·execution을 생략하고 id/status/reason을 남긴다(생략된 collection은 `not_attempted/not_started`, writer는 미호출, execution은 `not_attempted/not_started`). 계측 오류가 있으면 상태 표식 자체가 유실됐을 수 있어 이 생략도 하지 않는다. `succeeded`는 **루틴 정상 반환**만 뜻하며 유효 관측·저장 성공으로 승격하지 않는다.
+- `collection`은 통화별 `valid`(유효관측) / `missing`(누락) / `not_attempted`(미시도) / `unknown`(확인 불가) + 사유. 판정 순서: `selector_missing` → `empty_or_placeholder`(공백, `-`, `N/A`) → `parse_failed` → JPY ×100 후 `nan_value` → 같은 정규화 값에 `out_of_range`(±inf 포함, 경계 포함 허용). `constants.MIBANK_RATE_RANGES`를 이름 변경·복제 없이 재사용한다.
+- 회차 수집 요약은 **유효 관측 → 누락 판정 → 확인 불가 → 미시도** 순으로 확보된 증거를 보존하고, 같은 상태 중 마지막 시도를 가리킨다. 재시도 timeout이나 DXY 실패가 앞 시도 증거를 지우지 않는다. 값은 쓰기 지시가 아니며 통화별 `attempt_id`로 원본을 추적한다.
+- `writer`는 시도별 호출 여부·입력 통화·정수 반환값·예외 타입만 기록한다. 상세 형식의 통화별 `writing`은 호출 증거가 있으면 `unknown`, 미전달이 확인되면 `not_attempted`; 압축 형식의 공통 `writing`도 모든 제출 통화가 `unknown/per_currency_write_unverified`라는 뜻이다. 시작 이외 이벤트의 `final_db=not_checked`는 모든 통화가 **`unknown/not_checked`**임을 나타내는 공통 플래그이며 DB 대조는 하지 않는다. 정수 0·`db.add()`·commit 전 로그로 변경 불필요/정책 차단/저장 완료를 추정하지 않는다.
+- `execution`: `normal` / `timeout` / `cancelled` / `abnormal`. 마지막 시도의 timeout은 기존 코드가 삼켜도 timeout으로 보고하며, 호출자 전파 여부는 별도 `exception_propagated`에 기록한다. 세션 생성·close 예외는 기록 후 기존처럼 전파한다. `session`은 마지막 도달 단계(creating/open/closing/closed)다.
+- 계측 계산·직렬화·로그의 일반 예외는 격리한다. 남길 수 있는 보고에는 `telemetry_errors`를 붙인다. 시도 시작·종료 또는 관측 계측 유실 시 해당 범위의 미확정 수집 항목은 `unknown/telemetry_error`로 남기며, 이미 확보한 `valid`/`missing` 증거는 보존한다. 이후 확인된 403은 미확정 항목을 `missing/http_403`으로 갱신한다. writer 호출 계측 유실도 미시도로 단정하지 않는다. 계측 오류 회차는 압축하지 않는다. 로거/초기화 자체 실패 시 보고 유실 가능; 보고 실패를 이유로 재시도하지 않는다.
+- 현재 `observation()`은 등록된 3통화와 파싱된 rate를 전제로 한다. 미등록 통화의 범위 직접 인덱싱은 `KeyError`, reason 없이 text만 있고 rate가 None이면 `TypeError`가 나며, `safely_report`가 `telemetry_errors=[..., "observation"]`를 남기고 해당 관측은 unknown으로 남을 수 있다. 현재 호출 경로에서는 미도달이다. 통화/호출자 확장 시 방어가 필요하며 이번 로그 용량 수정에서는 변경하지 않았다.
+- **저장 입력·정책, DXY 예외 뒤 두 번째 URL 재크롤, scheduler의 `record_success`/`record_failure` 매핑은 그대로다.** 파싱 전패는 writer 미호출, 유효성 전패(NaN/범위 밖)는 writer 호출 가능. D7 및 NaN·범위 밖 저장 제외는 후속이다. 운영 배포·검증을 뜻하지 않는다.
+
+#### 로그 용량 및 보존 창 (슬라이스 1 재검토)
+
+**선택: 정상 압축 + 중복 제거. 시작·FX 증거·종료 이벤트는 생략하지 않는다.** FX 증거는 DXY 분기 전에 환율값과 writer 반환까지 독립적으로 남아 프로세스가 그 뒤 중단돼도 확인할 수 있다. 이상 회차의 상세 증거는 샘플링하지 않는다. 로테이션 용량은 변경하지 않으며, 아래의 잔여 보존 창 감소를 명시한다. **6시간 보존 보장은 아니다.**
+
+측정 재현: `pytest -p no:asyncio tests/test_investing_report.py -k log_volume -q -s`.
+HTTP·DB 대역으로 실제 crawler 경로를 실행하고, UTF-8 JSON message와 `CustomJsonFormatter()`를 적용한 **실제 파일 형식(외곽 JSON·문자열 이스케이프·개행 포함)**을 각각 센다. 환율 fixture는 USD 1350.0 / JPY 900.0 / EUR 1500.0, 타임스탬프는 소수점 6자리로 고정한다. 로거명·함수명·행 번호는 실제 레코드를 사용한다.
+
+- 정상 3이벤트 message: **[160, 421, 452] = 1,033 B/회 = 7.03 MiB/일**.
+- 동일 이벤트의 app.log 기록: **[358, 657, 690] = 1,705 B/회 = 11.61 MiB/일**.
+- 수정 전 동일 fixture의 전체 스냅샷 3건은 message **5,987 B/회**, app.log **7,357 B/회 = 50.10 MiB/일**이었다. 검토 보고서의 5,989 B/회·약 41 MiB/일은 message 계층에 가까우며, 보존 창 계산에는 외곽까지 포함해야 한다. 동일 파일 형식 기준 **76.8% 감소**.
+- 정상 fixture의 회귀 예산은 **2,000 B/회 이하**이며 3이벤트 존재도 함께 시험한다. 이 값은 런타임 절단/유실 제한이 아니고, 실제 숫자의 자릿수 등에 따라 크기는 달라진다.
+
+하루 환산은 검토와 같은 활성일 가정: 19h/10초 = 6,840회 + 5h/60초 = 300회, 합계 **7,140회/일**. 주말 비활성·추가 대기·실제 장애 비율은 이 가정에 포함하지 않는다. `app/config.py`의 로테이션은 10×1024² B × (활성+백업3) = **40 MiB**다. 검토자가 제공한 기존 약 6시간 보존으로부터 기존 유입을 **160 MiB/일**로 역산하면:
+
+`추가 MiB/일 = 회차 바이트 × 7140 / 1024²`
+`예상 보존 시간 = 24 × 40 / (160 + 추가 MiB/일)`
+
+| 회차 시나리오 (하루 전체가 해당 사례라는 가정) | 이벤트 수 | app.log B/회 | 추가 MiB/일 | 예상 보존 시간 |
+|---|---:|---:|---:|---:|
+| 수정 전 정상 전체 스냅샷 | 3 | 7,357 | 50.10 | 4.57h |
+| 수정 후 정상 / writer 0 반환 | 3 | 1,705 | 11.61 | **5.59h** |
+| USD만 수집 (JPY/EUR selector 누락) | 3 | 3,297 | 22.45 | 5.26h |
+| 쿨다운 | 2 | 2,195 | 14.95 | 5.49h |
+| 1차 timeout → 2차 정상 | 3 | 4,188 | 28.52 | 5.09h |
+| 두 시도 timeout | 2 | 2,245 | 15.29 | 5.48h |
+| 1차 FX 확보·DXY 예외 → 2차 timeout | 3 | 3,004 | 20.45 | 5.32h |
+| 양쪽 URL 파싱 전패 | 4 | 5,489 | 37.38 | 4.86h |
+| 양쪽 FX writer 예외 | 4 | 6,014 | 40.95 | 4.78h |
+| 1차 DXY 예외 → 2차 정상 | 4 | 5,055 | 34.42 | 4.94h |
+
+정상 위주라면 기존 6h 대비 약 **24분(6.8%) 감소**를 예상한다. 혼합 회차는 바이트를 비율로 가중한다. 예를 들어 정상 99% + 양쪽 writer 예외 1%는 **11.90 MiB/일 → 5.58h**, 90%+10%는 **14.54 MiB/일 → 5.50h**다. 표는 이 보고 계층의 추가량만 측정한 것으로 **운영 보존 실측이나 모든 장애의 상한이 아니다**. 장애 시 기존 traceback·경고 로그 유입도 변하므로 실제 보존은 더 짧아질 수 있다. 배포 후 실제 회차 분포·전체 로그 유입·로테이션 시각을 확인해야 한다.
 
 ---
 
