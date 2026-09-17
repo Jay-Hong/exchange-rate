@@ -3,8 +3,8 @@
 `investing_observe_extract.py`는 Docker 로그를 읽어 Git 밖에 보존한다.
 `investing_observe_aggregate.py`는 보존본을 검증하고 KST 날짜별 JSON 집계를 stdout으로 출력한다.
 두 스크립트는 Python 3.11+ 표준 라이브러리만 사용하며 앱·DB 모듈을 import하지 않는다.
-보고 계약은 [SOURCE_HEALTH_PLAN §7.10](../SOURCE_HEALTH_PLAN.md#710-investing-슬라이스-1-보고-전용-구현),
-발행 구현은 [investing_report.py](../app/crawlers/investing_report.py)다.
+보고 계약은 [SOURCE_HEALTH_PLAN §7.10](SOURCE_HEALTH_PLAN.md#710-investing-슬라이스-1-보고-전용-구현),
+발행 구현은 [investing_report.py](app/crawlers/investing_report.py)다.
 
 ## 실행
 

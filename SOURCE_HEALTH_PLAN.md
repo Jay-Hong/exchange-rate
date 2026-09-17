@@ -259,7 +259,7 @@
 
 ### 7.10 Investing 슬라이스 1 보고 전용 구현
 
-- 보고 로그 보존·일별 집계: [scripts/INVESTING_OBSERVE.md](scripts/INVESTING_OBSERVE.md) — Git 밖 원문·실행 이력·커서 보존, v2 참조 기반 집계, 충돌·부분 관측 표시. 운영 실행·cron 설치는 별도 승인이다.
+- 보고 로그 보존·일별 집계: [INVESTING_OBSERVE.md](INVESTING_OBSERVE.md) — Git 밖 원문·실행 이력·커서 보존, v2 참조 기반 집계, 충돌·부분 관측 표시. 운영 실행·cron 설치는 별도 승인이다.
 - 코드: `app/crawlers/investing.py`(계측 경계), `app/crawlers/investing_report.py`(보고 객체). 회귀 시험: `tests/test_investing_report.py` — HTTP·세션·DB 대역 사용.
 - 기존 Investing 로거 → `logs/app.log`의 `message`에 JSON 이벤트: `investing_round_started`(세션 생성 전), `investing_fx_evidence`(FX writer 반환/예외 직후, DXY 저장/폴백 진입 전; 파싱 전패 시 미호출 증거), `investing_round_finished`(세션 생성~close의 최외곽 finally). 로깅 설정은 그대로다.
 - `schema_version=2`, `round_id`, `attempt_id`(URL 시도 1/2, 회차 이벤트는 null). JSON 공백을 제거하고 `format`으로 아래 세 형식을 구분한다. 이벤트 수·발행 위치는 유지한다.

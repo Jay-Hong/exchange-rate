@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Archive Docker log bytes before advancing an Investing observation cursor.
 
-Stdlib only. See scripts/INVESTING_OBSERVE.md for the on-disk protocol.
+Stdlib only. See INVESTING_OBSERVE.md for the on-disk protocol.
 """
 
 import argparse
