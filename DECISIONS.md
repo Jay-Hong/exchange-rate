@@ -7216,11 +7216,11 @@ change-only 저장의 결과이지 "한 회차가 통째로 밀렸다" 는 증�
 마무리 트리거는 06:01:01 의 remove/add 로 비로소 설치됐다. 따라서 이 두 슬롯은
 woori job 자신의 misfire 나 `max_instances` 차단과 **구분해야 한다**.
 
-**확인된 직접 경로**: `control_job` 은 grace 를 명시하지 않아 스케줄러 기본값을 받는다 —
-운영 컨테이너 실측 `_job_defaults = {'misfire_grace_time': 1, 'coalesce': True, 'max_instances': 1}`.
-다른 크롤러 job 들은 `misfire_grace_time` 5 또는 10 을 명시한다. 1.17초 지연이 1초를 넘겨
-건너뛰었고 다음 발화가 전환을 수행했다. `coalesce=True` 는 건너뛴 실행에 합칠 대상이 없어
-도움이 되지 않는다.
+**확인된 직접 경로**: `task_woori` 는 `misfire_grace_time=30` 을 명시한다(`scheduler.py:982`).
+반면 모드 전환을 담당하는 `control_job` 은 이를 **생략**하여, 운영 컨테이너에서 실측한 기본값
+`_job_defaults = {'misfire_grace_time': 1, 'coalesce': True, 'max_instances': 1}` 을 적용받았다.
+이번 1.17초 지연은 그 허용치를 초과했고 다음 발화가 전환을 수행했다. `coalesce=True` 는 건너뛴
+실행에 합칠 대상이 없어 도움이 되지 않는다.
 
 ⚠️ **근본 원인 미확인**: **왜 1.17초 지연됐는지는 모른다.** CPU·executor 대기·이벤트 루프
 지연 중 하나로 단정하지 않는다.
