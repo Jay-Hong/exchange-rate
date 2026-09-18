@@ -380,7 +380,7 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 
 ---
 
-### 7.12 bs·citi 보고 R1a — 공식 경로 관측 (2026-09-18 구현, **미배포**)
+### 7.12 bs·citi 보고 R1a·R1b — 공식 경로·MIBANK 관측 (2026-09-18 구현, **미배포**)
 
 ⛔ 보고 전용. 반환값·폴백 순서·예외 전파(총실패를 로그만 남기고 삼키는 기존 동작 포함, §2.1)·writer 입력·
 재시도·crawler_stats 판단은 바꾸지 않는다. 캡처·집계·경보는 범위 밖이다.
@@ -397,10 +397,13 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
     항목·값 묶음 텍스트; 조각 160자·640바이트, 잘림 표시·원래 길이) 판정은 **`unknown/v2_evidence_unconfirmed`**
     — 라벨 표기가 실응답 fixture 로 확인되기 전이다. 파싱 성공으로 `valid` 를 만들지 않는다.
   - 확인된 위반 → `missing/validation_rejected`: 비유한 값(`non_finite` — writer 로는 기존대로 간다), 귀속 충돌
-    (`attribution_conflict` — citi 1차의 한 항목이 여러 통화 코드를 포함하거나 같은 통화가 두 번 이상 관측·덮어써진
-    경우. 값이 같다는 것은 근거가 아니다). 값 미확보 확인 → `missing/no_value`(`selector_miss`·`parse_error`·
-    `not_matched`·`path_failed`). 계측 유실·관측 상한 초과 → `unknown/evidence_incomplete` — 확인된 위반은 지우지
-    않지만 miss 로 "미확보" 를 단정하지도 않는다.
+    (`attribution_conflict` — citi 1차의 한 항목이 여러 통화로 귀속되거나, 한 통화가 서로 다른 원천(citi 1차
+    항목·MIBANK 행) 둘 이상에서 나타나거나(값을 못 읽은 원천도 원천이다 — 어느 쪽이 그 통화인지 가를 수 없다),
+    같은 통화가 두 번 이상 관측·덮어써진 경우. MIBANK는 `currency=` 링크를 우선 사용하고 코드를 얻지 못하면 국기
+    파일명으로 폴백하여 행당 최대 한 통화만 판별하므로, 한 행의 복수 통화 귀속은 감지하지 않는다. 값이 같다는 것은
+    근거가 아니다). 값 미확보 확인 → `missing/no_value`
+    (`selector_miss`·`parse_error`·`empty_value`·`not_matched`·`path_failed`). 계측 유실·관측 상한 초과 →
+    `unknown/evidence_incomplete` — 확인된 위반은 지우지 않지만 miss 로 "미확보" 를 단정하지도 않는다.
   - 후보 판정 우선순위: 위반 > 계측 불완전 > 관측(근거 미확인) > miss > 경로 결과.
 - **회차 요약은 `valid → unknown → missing → not_attempted`** 로 시도 간 증거를 고르고(같은 상태면 가장 최근 시도),
   선택한 `path`·`attempt_id` 를 남긴다. ⚠️ Investing(§7.10, 유효 → 누락 → 확인 불가)과 다르다: 다른 시도의 유효
@@ -412,8 +415,28 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
   넓히지 않는다) — 각 경로 `try` 의 형제 절 `except BaseException` 이 **그 경로에** 종료 원인을 기록하고 그대로
   재전파한다. 회차 종료 시점까지 `attempted` 로 남은 시도(종료 기록 유실)는 회차 예외를 추정해 붙이지 않고
   `unknown/attempt_end_unrecorded` 로 둔다. 취소 뒤 `db.close()` 도 실패하면 경로에는 취소가, 회차에는 close 예외가 남는다.
-- **미계측은 미계측으로 적는다**: MIBANK 내부(R1b 전) → 실행된 MIBANK 시도의 수집은 `unknown/not_instrumented`,
-  writer 가드(R1c 전) → `guard_decision=not_instrumented`. 정책 생략·값 미확보로 둔갑시키지 않는다.
+- **MIBANK 관측(R1b)**: 공유 함수 `utils.crawl_mibank_rates(observer=None)` — 9개 은행이 쓰므로 은행 이름으로
+  활성화를 판단하지 않고, 관측자를 넘긴 bs·citi 만 기록한다. 판별은 한 곳(`_mibank_*_with_basis`)에서 한 번 하고
+  기존 함수는 값만 돌려준다. 행마다 값이 `current_rates` 에 들어간 직후 `observed`(행 번호 `item_key`·코드·코드 근거
+  `explicit_code_param`/`flag_filename`·값 분기 근거), 빈 값은 `empty_value`, 파싱 실패는 그 행에 `parse_error` 를
+  결속한 뒤 기존대로 재전파한다. 값 분기 근거: `header_index`(헤더 인덱스 칸 — 비었거나 `-` 면 폴백하지 않는다) /
+  `fallback`(`row_cells_insufficient` 또는 `column_index_unresolved`, 처음 매칭된 selector·매칭 수 — 값은 마지막 요소).
+  표 구조(`structure`: 열 인덱스, `column_basis` = `label_found`/`label_not_found`/`header_row_absent`, 헤더 텍스트·
+  칸 수·span)와 행 사실(행 텍스트·`td` 수·span)은 **구조 사실일 뿐** — 헤더 인덱스는 colspan 을 고려하지 않으므로
+  기준환율 열 대응의 증거가 아니고, 코드 근거는 통화 축만 채운다 → MIBANK 관측도 `unknown/v2_evidence_unconfirmed`.
+  필수 밖 코드는 값을 읽지 않고(기존 동작) 식별만(`outside_required_codes`: 코드 64개·16자 상한, 근거별 개수).
+  require_all 실패 시 앞 관측·덮어쓰기 이력은 남는다.
+- **호출 지점 기록(R1b)**: 운영 범위 검사 `ops_range_check`(`record_range_check` — 반환/예외와 **입력** 통화만.
+  `validate_rate_ranges` 는 첫 초과에서 멈추므로 예외 시 실제 비교 집합은 모르고, 예외 메시지를 파싱하지 않는다.
+  정상 반환도 NaN 통과를 증명하지 않는다 → `non_finite_input_pairs`), 편차 `deviation`(soft/hard 와 통화별 비교 값,
+  직전 값·시각이 없으면 `compared=false`/`prior_missing` — 통과가 아니다), 채택 `adoption`(`withheld`/
+  `deviation_hard_fail` 또는 `submitted`/`deviation_not_hard_fail`). 편차·범위는 판정 계약(V1~V4) 밖의 운영 사실이라
+  수집 판정을 바꾸지 않는다. hard_fail 보류는 요약 `writing` 에 `not_attempted/withheld_before_writer`.
+- **미계측은 미계측으로 적는다**: writer 가드(R1c 전) → `guard_decision=not_instrumented`. 정책 생략·값 미확보로
+  둔갑시키지 않는다.
+- **상한**: 통화별 관측·miss 각 8건(`MAX_OBSERVATIONS_PER_PAIR`·`MAX_MISSES_PER_PAIR`), 넘으면 버리고 `truncated`·
+  시도별 `*_truncated`·`dropped` 개수를 남긴다. 계측 실패는 `telemetry_errors`(메서드 이름, 처음 본 순서·중복 없음)와
+  `telemetry_error_counts`(횟수) — 행마다 실패해도 목록이 응답 크기로 자라지 않는다.
 - writer: 호출 지점에서 `writer_calls[]`(호출 id·경로·입력 통화·`termination` returned/raised·반환값·예외 타입).
   통화별 `writing` 은 제출됐으면 `unknown/per_currency_write_unverified`, 아니면 `not_attempted`. `final_db=not_checked`.
 - 계측은 Investing 과 같은 `safely_report` 경계 안에서만 돈다. 핵심 추출 사실을 라벨 후보보다 먼저 저장해, 라벨
@@ -422,9 +445,10 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
   BREAK2·OUT 모두 매분, citi 는 OUT 제외 매분 → 하루 bs ≈ 5~9.5 MB, citi(평일) ≈ 6~8.5 MB. §7.11 실측 Docker 로그
   증가율(약 5.58 MiB/h)에 **10% 안팎**을 더한다 — Docker 로그 보존 창은 그만큼 **줄고**, 원문을 보존하는 Investing
   관측 아카이브 사용량은 **늘어난다**. 배포 전 대표 이벤트를 실응답으로 다시 재고 압축 형식 여부를 정한다.
-- 다음 단계: R1b(MIBANK 선택 관측자 — 통화 판별 근거·분기 ①②③·열 대응·중복 행, 호출 지점의 운영 범위 검사·편차·채택),
-  R1c(writer 가드 결속 — 증거 추가일 뿐 통화별 쓰기는 계속 `unknown`). 세 단계 뒤 한 번 배포한다. fixture 캡처는 별도
-  슬라이스(비식별 규칙·상한이 열린 결정).
+  R1b 합성 측정(공식 실패 + MIBANK 경로 회차 한 건): 필수 3 + 필수 밖 41개 표 5.1 KB. 같은 USD 빈 행을 20·200·1,000개
+  넣어도 7.7 KB 로 같다(상한 전 R1b 초안은 1,000개에서 약 359 KB — Codex 측정). MIBANK 는 공식 경로 실패 뒤에만 돈다.
+- 다음 단계: R1c(writer 가드 결속 — 증거 추가일 뿐 통화별 쓰기는 계속 `unknown`). R1a~R1c 뒤 한 번 배포한다.
+  fixture 캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정).
 
 ## 열린 결정 (미해결)
 

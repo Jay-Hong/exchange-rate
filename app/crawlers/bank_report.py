@@ -6,8 +6,10 @@ SOURCE_HEALTH_PLAN §7.2 값 체계(`valid`=유효관측 / `missing`=누락 / `u
 
 판정 계약 `bank_v2_evidence/1`: 통화·필드·단위 근거를 **그 회차 응답에서** 확인해야 `valid` 다.
 R1a 는 공식 경로의 근거 **후보 텍스트만** 남기고 판정은 `unknown` 으로 둔다(라벨 표기가 fixture 로
-확인되기 전이다). MIBANK 내부와 writer 가드는 아직 계측하지 않는다(`not_instrumented`) — 덜 구현된
-상태가 정책 생략이나 값 미확보로 둔갑하지 않게 한다.
+확인되기 전이다). R1b 는 MIBANK 행 관측을 더한다 — 통화 코드 근거(`explicit_code_param` 등)는 **통화 축만**
+채우고, 헤더 인덱스·행 칸 수·span 은 구조 사실일 뿐 기준환율 열 대응의 증거가 아니다(V2b 미검증 →
+`unknown`). writer 가드는 아직 계측하지 않는다(`not_instrumented`) — 덜 구현된 상태가 정책 생략이나
+값 미확보로 둔갑하지 않게 한다.
 
 ⛔ 관측은 운영 판단을 대체하지 않는다. 루틴이 실제 추출에 쓴 요소·매칭 결과만 받고, 선택자를 다시
 계산하지 않는다. 추가 DOM 탐색·문자열 변환은 `safely_report` 경계 안에서만 한다.
@@ -27,13 +29,18 @@ VALIDITY_CONTRACT = "bank_v2_evidence/1"
 OFFICIAL_PRIMARY = "official_primary"
 OFFICIAL_SECONDARY = "official_secondary"
 MIBANK = "mibank"
-# R1a 에서 내부를 계측하는 경로. MIBANK 는 R1b 에서 더한다.
-_INSTRUMENTED_PATHS = (OFFICIAL_PRIMARY, OFFICIAL_SECONDARY)
+# 내부를 계측하는 경로(R1a 공식 경로 + R1b MIBANK).
+_INSTRUMENTED_PATHS = (OFFICIAL_PRIMARY, OFFICIAL_SECONDARY, MIBANK)
 
 # 근거 후보 조각의 상한(C3 초안값). 잘리면 표시하고, 잘린 정보로 충돌·완결을 확정하지 않는다.
 SNIPPET_MAX_CHARS = 160
 SNIPPET_MAX_BYTES = 640
 MAX_OBSERVATIONS_PER_PAIR = 8
+# MIBANK 는 같은 코드의 행마다 miss 를 남긴다 — 응답 모양이 이벤트 크기를 정하지 않게 관측과 같은 상한을 둔다.
+MAX_MISSES_PER_PAIR = 8
+# 필수 밖 통화 코드는 식별 사실만 남긴다 — 표 전체가 한 이벤트를 키우지 않게 개수와 길이 둘 다 제한한다.
+MAX_OUTSIDE_REQUIRED_CODES = 64
+MAX_CODE_CHARS = 16
 
 # 회차 요약은 시도 간 증거를 이 순서로 고른다. ⚠️ Investing 회차 집계(valid → missing → unknown)와 다르다:
 # 다른 시도의 유효 관측 확보 여부가 미확정(`unknown`)이면 회차 전체를 `missing`("필요한 유효 관측을 확보하지
@@ -43,6 +50,11 @@ _SUMMARY_ORDER = ("valid", "unknown", "missing", "not_attempted")
 
 def _result(status, reason, **evidence):
     return {"status": status, "reason": reason, **evidence}
+
+
+def _count_dropped(attempt, kind, pair):
+    dropped = attempt.setdefault("dropped", {}).setdefault(kind, {})
+    dropped[pair] = dropped.get(pair, 0) + 1
 
 
 def _snippet(text):
@@ -62,8 +74,30 @@ def _rate_evidence(rate):
     return rate if math.isfinite(rate) else str(rate)
 
 
-def _label_candidates(element, item):
+def _json_number(value):
+    """비교·집계 입력값을 이벤트에 싣는 형태. 비유한 float·JSON 이 모르는 수(Decimal 등)는 문자열로 둔다 —
+    `allow_nan=False` 직렬화가 회차 종료 이벤트 전체를 잃게 하지 않는다."""
+    if value is None or isinstance(value, bool) or isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    return str(value)
+
+
+def _row_facts(row):
+    """MIBANK 행의 구조 사실. 기준환율 열 대응의 증거로 쓰지 않는다(colspan 미고려 인덱스와 같은 이유)."""
+    cells = row.find_all("td", recursive=False)
+    return {
+        "row_text": _snippet(row.get_text(" ", strip=True)),
+        "row_cell_count": len(cells),
+        "row_has_span": any(cell.get("colspan") or cell.get("rowspan") for cell in cells),
+    }
+
+
+def _label_candidates(element, item, row=None):
     """근거 **후보**만 남긴다 — 판정하지 않는다(라벨 표기는 fixture 로 확인한 뒤에 쓴다)."""
+    if element is None and item is None and row is not None:
+        return _row_facts(row)
     labels = {}
     if item is not None:
         labels["item_text"] = _snippet(item.get_text(" ", strip=True))
@@ -118,6 +152,22 @@ def record_writer_call(observer, rates, call):
     return count
 
 
+def record_range_check(observer, rates, call):
+    """`call()`(운영 범위 검사)을 그대로 부르고 반환·예외만 기록한다.
+
+    ⚠️ 정상 반환은 "운영 범위 검사를 통과" 라는 사실일 뿐이다 — NaN 은 비교가 모두 거짓이라 통과한다.
+    첫 `ValueError` 에서 멈추므로 예외를 전 통화에 붙이지 않는다.
+    """
+    try:
+        call()
+    except BaseException as error:
+        if observer is not None:
+            observer.range_checked(rates, error=error)
+        raise
+    if observer is not None:
+        observer.range_checked(rates)
+
+
 class PathObserver:
     """한 경로의 관측자. 모든 호출이 `safely_report` 를 거친다 — 실패해도 수집은 그대로다."""
 
@@ -145,6 +195,21 @@ class PathObserver:
     def loop_completed(self):
         safely_report(self.report, "loop_completed", self.path)
 
+    def table_structure(self, **facts):
+        safely_report(self.report, "table_structure", self.path, **facts)
+
+    def code_outside_required(self, code, basis):
+        safely_report(self.report, "code_outside_required", self.path, code, basis)
+
+    def range_checked(self, rates, error=None):
+        safely_report(self.report, "range_checked", self.path, rates, error=error)
+
+    def deviation_evaluated(self, rates, result):
+        safely_report(self.report, "deviation_evaluated", self.path, rates, result)
+
+    def adoption(self, decision, reason):
+        safely_report(self.report, "adoption", self.path, decision, reason)
+
     def writer_started(self, rates):
         safely_report(self.report, "writer_started", self.path, rates)
 
@@ -158,7 +223,9 @@ class BankReport:
         self.bank = bank
         self.round_id = uuid4().hex
         self.pairs = tuple(pairs)
+        # 실패한 계측 메서드 이름(처음 본 순서, 중복 없음)과 횟수. 행마다 실패해도 목록은 메서드 수로 묶인다.
         self.telemetry_errors = []
+        self.telemetry_error_counts = {}
         self.truncated = False
         self.execution = _result("running", "round_started")
         self.writer_calls = []
@@ -183,7 +250,9 @@ class BankReport:
     # ── 관측 ──────────────────────────────────────────────────────────────
 
     def telemetry_failed(self, method, *args, **kwargs):
-        self.telemetry_errors.append(method)
+        if method not in self.telemetry_error_counts:
+            self.telemetry_errors.append(method)
+        self.telemetry_error_counts[method] = self.telemetry_error_counts.get(method, 0) + 1
         path = args[0] if args else kwargs.get("path")
         attempt = self.attempts.get(path)
         if attempt is not None:
@@ -213,13 +282,15 @@ class BankReport:
     def policy_skipped(self, path, reason):
         self.attempts[path].update(status="policy_skipped", reason=reason)
 
-    def observed(self, path, pair, *, rate_text, rate, selector, element=None,
-                 item_key=None, item=None, matched_code=None):
+    def observed(self, path, pair, *, rate_text, rate, selector=None, element=None,
+                 item_key=None, item=None, matched_code=None, row=None, code_basis=None,
+                 value_basis=None):
         attempt = self.attempts[path]
         if sum(1 for o in attempt["observations"] if o["pair"] == pair) >= MAX_OBSERVATIONS_PER_PAIR:
             # 상한을 넘은 관측은 버리되 사실을 남긴다 — 충돌·완결을 확정하지 못하게 된다.
             self.truncated = True
             attempt["observations_truncated"] = True
+            _count_dropped(attempt, "observations", pair)
             return
         entry = {
             "sequence": self._next_sequence(),
@@ -233,22 +304,46 @@ class BankReport:
             entry["item_key"] = item_key
         if matched_code is not None:
             entry["matched_code"] = matched_code
+        if code_basis is not None:
+            entry["code_basis"] = code_basis
+        if value_basis is not None:
+            entry["value_basis"] = value_basis
         # 핵심 추출 사실을 먼저 보존한다 — 라벨 후보 수집이 실패해도 관측 자체는 남는다.
         attempt["observations"].append(entry)
         try:
-            entry["label_candidates"] = _label_candidates(element, item)
+            entry["label_candidates"] = _label_candidates(element, item, row)
         except Exception as error:
             entry["label_candidates"] = None
             entry["label_candidates_error"] = type(error).__name__
 
-    def missed(self, path, pair, reason, *, selector=None, rate_text=None, item_key=None):
+    def missed(self, path, pair, reason, *, selector=None, rate_text=None, item_key=None,
+               row=None, code_basis=None, value_basis=None):
+        attempt = self.attempts[path]
+        if sum(1 for m in attempt["misses"] if m["pair"] == pair) >= MAX_MISSES_PER_PAIR:
+            # 관측과 같은 규칙: 버린 miss 가 다른 원천(행)일 수 있으니 완결을 확정하지 않는다. 남긴 miss 들로
+            # 이미 확인된 충돌은 판정 순서상 잘림보다 먼저 확정된다.
+            self.truncated = True
+            attempt["misses_truncated"] = True
+            _count_dropped(attempt, "misses", pair)
+            return
         entry = {"sequence": self._next_sequence(), "pair": pair, "reason": reason,
                  "selector": selector}
         if rate_text is not None:
             entry["rate_text"] = _snippet(rate_text)
         if item_key is not None:
             entry["item_key"] = item_key
-        self.attempts[path]["misses"].append(entry)
+        if code_basis is not None:
+            entry["code_basis"] = code_basis
+        if value_basis is not None:
+            entry["value_basis"] = value_basis
+        attempt["misses"].append(entry)
+        if row is not None:
+            # 파싱 실패가 전파되기 전에 그 행을 결속한다. 행 사실 수집 실패는 miss 자체를 지우지 않는다.
+            try:
+                entry["label_candidates"] = _row_facts(row)
+            except Exception as error:
+                entry["label_candidates"] = None
+                entry["label_candidates_error"] = type(error).__name__
 
     def item_missed(self, path, item_key, reason, *, selector=None):
         self.attempts[path]["misses"].append(
@@ -257,6 +352,70 @@ class BankReport:
 
     def loop_completed(self, path):
         self.attempts[path]["loop_completed"] = True
+
+    def table_structure(self, path, *, tbody, column_index, column_basis):
+        """MIBANK 표의 구조 사실. 헤더 인덱스는 colspan 을 고려하지 않는다 — 열 대응의 증거가 아니다."""
+        structure = {"column_index": column_index, "column_basis": column_basis}
+        self.attempts[path]["structure"] = structure
+        try:
+            table = tbody.find_parent("table")
+            header = table.select_one("thead tr") if table is not None else None
+            if header is not None:
+                cells = header.find_all(["th", "td"], recursive=False)
+                structure["header_text"] = _snippet(header.get_text(" ", strip=True))
+                structure["header_cell_count"] = len(cells)
+                structure["header_has_span"] = any(
+                    cell.get("colspan") or cell.get("rowspan") for cell in cells)
+        except Exception as error:
+            structure["header_facts_error"] = type(error).__name__
+
+    def code_outside_required(self, path, code, basis):
+        """필수 밖 코드는 값을 파싱하지 않으므로(기존 동작) 식별 사실만 남긴다 — 표 전체 통화가 들어오므로
+        코드 목록과 근거별 개수로 압축한다."""
+        outside = self.attempts[path].setdefault(
+            "outside_required_codes", {"codes": [], "basis_counts": {}, "truncated": False})
+        counts = outside["basis_counts"]
+        counts[basis] = counts.get(basis, 0) + 1
+        if len(outside["codes"]) >= MAX_OUTSIDE_REQUIRED_CODES:
+            outside["truncated"] = True
+            return
+        if len(code) > MAX_CODE_CHARS:
+            # `currency=` 쿼리값은 길이 제한 없이 코드가 된다 — 기록만 자른다(수집 판단은 원래 코드 그대로).
+            outside["code_text_clipped"] = True
+            code = code[:MAX_CODE_CHARS]
+        outside["codes"].append(code)
+
+    def range_checked(self, path, rates, error=None):
+        # ⚠️ 입력 통화만 기록한다 — `validate_rate_ranges` 는 첫 범위 초과에서 멈추므로 예외 시 실제로
+        # 비교된 통화 집합은 알 수 없다(예외 메시지를 파싱해 복원하지 않는다).
+        self.attempts[path]["ops_range_check"] = {
+            "termination": "raised" if error is not None else "returned",
+            "error_type": type(error).__name__ if error is not None else None,
+            "input_pairs": sorted(rates),
+            # 정상 반환이어도 이 통화들의 값은 범위 비교가 성립하지 않았다(NaN 은 모든 비교가 거짓).
+            "non_finite_input_pairs": sorted(
+                pair for pair, rate in rates.items() if not math.isfinite(rate)),
+        }
+
+    def deviation_evaluated(self, path, rates, result):
+        details = result.get("details") or {}
+        pairs = {}
+        for pair in sorted(rates):
+            detail = details.get(pair)
+            if detail is None:
+                # 직전 값·시각이 없으면 비교하지 않는다(evaluate_rate_deviation 의 continue) — 통과가 아니다.
+                pairs[pair] = {"compared": False, "reason": "prior_missing"}
+            else:
+                pairs[pair] = {"compared": True,
+                               **{key: _json_number(value) for key, value in detail.items()}}
+        self.attempts[path]["deviation"] = {
+            "soft_fail": bool(result.get("soft_fail")),
+            "hard_fail": bool(result.get("hard_fail")),
+            "pairs": pairs,
+        }
+
+    def adoption(self, path, decision, reason):
+        self.attempts[path]["adoption"] = {"decision": decision, "reason": reason}
 
     def writer_started(self, path, rates):
         call_id = f"{self.round_id}:{len(self.writer_calls) + 1}"
@@ -285,18 +444,23 @@ class BankReport:
     # ── 판정 ──────────────────────────────────────────────────────────────
 
     def _conflicts(self, attempt):
-        """같은 원천의 복수 귀속(한 항목 → 여러 통화)과 같은 통화의 복수 관측을 충돌로 본다.
+        """같은 원천의 복수 귀속(한 항목 → 여러 통화), 한 통화의 복수 원천(여러 항목·행 → 한 통화),
+        같은 통화의 복수 관측을 충돌로 본다.
 
-        값이 같다는 사실은 귀속 오류의 증거가 아니다 — 원천(항목·관측 횟수)만 본다.
+        값이 같다는 사실은 귀속 오류의 증거가 아니다 — 원천(항목·관측 횟수)만 본다. 값을 못 읽은 원천도
+        원천이다 — MIBANK 에서 같은 코드의 두 행 중 하나만 값이 있어도 어느 행이 그 통화인지 가를 수 없다.
         """
         conflicted = set()
         by_item = {}
+        by_pair = {}
         for entry in attempt["observations"] + attempt["misses"]:
             if entry.get("item_key") is not None and entry.get("pair") is not None:
                 by_item.setdefault(entry["item_key"], set()).add(entry["pair"])
+                by_pair.setdefault(entry["pair"], set()).add(entry["item_key"])
         for pairs in by_item.values():
             if len(pairs) > 1:
                 conflicted |= pairs
+        conflicted |= {pair for pair, items in by_pair.items() if len(items) > 1}
         counts = {}
         for entry in attempt["observations"]:
             counts[entry["pair"]] = counts.get(entry["pair"], 0) + 1
@@ -321,7 +485,8 @@ class BankReport:
                            observation_sequences=references)
         # 확인된 위반은 위에서 이미 확정했다. 여기부터는 관측이 빠졌을 수 있으면 확정하지 않는다 —
         # 뒤 후보의 관측이 유실됐다면 앞 후보의 miss 로 "미확보" 를 단정하면 안 된다.
-        if attempt["telemetry_incomplete"] or attempt.get("observations_truncated"):
+        if (attempt["telemetry_incomplete"] or attempt.get("observations_truncated")
+                or attempt.get("misses_truncated")):
             return _result("unknown", "evidence_incomplete", observation_sequences=references)
         if observations:
             # R1a: 통화·필드·단위 근거는 후보 텍스트만 있다 — 파싱 성공으로 올리지 않는다.
@@ -369,8 +534,18 @@ class BankReport:
             elif writer_failed:
                 writing[pair] = _result("unknown", "telemetry_error", writer_call_ids=[])
             else:
-                writing[pair] = _result("not_attempted", "not_submitted_to_writer",
-                                        writer_call_ids=[])
+                withheld = [
+                    attempt for attempt in self.attempts.values()
+                    if (attempt.get("adoption") or {}).get("decision") == "withheld"
+                    and any(o["pair"] == pair for o in attempt["observations"])]
+                if withheld:
+                    # 값은 얻었으나 채택 판단(편차 hard_fail)이 writer 에 넘기지 않았다.
+                    writing[pair] = _result("not_attempted", "withheld_before_writer",
+                                            detail=withheld[-1]["adoption"]["reason"],
+                                            path=withheld[-1]["path"], writer_call_ids=[])
+                else:
+                    writing[pair] = _result("not_attempted", "not_submitted_to_writer",
+                                            writer_call_ids=[])
         return {"collection": collection, "writing": writing, "final_db": "not_checked"}
 
     def finish(self, error=None):
@@ -411,6 +586,7 @@ class BankReport:
                 execution=self.execution,
                 truncated=self.truncated,
                 telemetry_errors=self.telemetry_errors,
+                telemetry_error_counts=self.telemetry_error_counts,
             )
         self.logger.info(json.dumps(payload, ensure_ascii=False, allow_nan=False,
                                     separators=(",", ":")))

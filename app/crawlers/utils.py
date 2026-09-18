@@ -254,54 +254,90 @@ MIBANK_RATE_CELL_SELECTORS = (
 MIBANK_DEFAULT_REQUIRED_CODES = ("USD", "JPY", "EUR")
 
 
-def _extract_mibank_currency_code(row) -> Optional[str]:
+def _mibank_currency_code_with_basis(row) -> tuple:
+    """(통화 코드, 근거). 근거는 실제로 쓴 분기 — `explicit_code_param` / `flag_filename` / None.
+
+    ⚠️ 근거는 **통화 축**만 채운다 — 필드(기준환율)·단위 근거가 아니다.
+
+    ⛔ 판별 로직은 여기 한 곳이다. 보고는 이 결과를 그대로 받고 다시 계산하지 않는다.
+    """
     link = row.select_one('a[href*="currency="]')
     if link:
         href = link.get("href", "")
         code = parse_qs(urlparse(href).query).get("currency", [None])[0]
         if code:
-            return code.upper()
+            return code.upper(), "explicit_code_param"
 
     flag = row.select_one('img[src*="flag_"]')
     if not flag:
-        return None
+        return None, None
     src = flag.get("src", "")
     match = re.search(r"flag_([a-z]{3})(?:_|\.)", src, re.IGNORECASE)
     code = match.group(1) if match else None
-    return code.upper() if code else None
+    return (code.upper(), "flag_filename") if code else (None, None)
 
 
-def _get_mibank_base_rate_column_index(tbody) -> Optional[int]:
+def _extract_mibank_currency_code(row) -> Optional[str]:
+    return _mibank_currency_code_with_basis(row)[0]
+
+
+def _mibank_base_rate_column_with_basis(tbody) -> tuple:
+    """(기준환율 열 인덱스, 근거). 근거는 `label_found` / `header_row_absent` / `label_not_found` —
+    헤더 자체가 없는 것과 라벨을 못 찾은 것은 다르다."""
     table = tbody.find_parent("table")
     header_row = table.select_one("thead tr") if table else None
     if not header_row:
-        return None
+        return None, "header_row_absent"
 
     for index, cell in enumerate(header_row.find_all(["th", "td"], recursive=False)):
         if "기준환율" in cell.get_text(" ", strip=True):
-            return index
-    return None
+            return index, "label_found"
+    return None, "label_not_found"
 
 
-def _extract_mibank_rate_text(row, base_rate_column_index: Optional[int] = None) -> Optional[str]:
+def _get_mibank_base_rate_column_index(tbody) -> Optional[int]:
+    return _mibank_base_rate_column_with_basis(tbody)[0]
+
+
+def _mibank_rate_text_with_basis(row, base_rate_column_index: Optional[int] = None) -> tuple:
+    """(환율 텍스트, 근거). 근거는 실제로 탄 분기다.
+
+    ① `header_index`: 헤더 인덱스 칸을 썼다 — ⛔ 그 칸이 비었거나 `-` 여도 **폴백하지 않고** None 이다.
+    ② `fallback` + `row_cells_insufficient`: 헤더 인덱스는 있으나 이 행의 `td` 가 모자란다.
+    ③ `fallback` + `column_index_unresolved`: 기준환율 열 인덱스를 확보하지 못했다.
+    폴백은 `MIBANK_RATE_CELL_SELECTORS` 중 처음 매칭된 selector 의 **마지막 요소**를 쓴다(마지막 `td` 가 아니다).
+    """
     if base_rate_column_index is not None:
         cells = row.find_all("td", recursive=False)
         if base_rate_column_index < len(cells):
             cell = cells[base_rate_column_index]
             counter = cell.select_one("span.counter")
             text = counter.get_text(strip=True) if counter else cell.get_text(strip=True)
-            return text if text and text != "-" else None
+            basis = {"branch": "header_index", "column_index": base_rate_column_index,
+                     "row_cell_count": len(cells), "used_counter_span": counter is not None}
+            return (text if text and text != "-" else None), basis
+        reason = "row_cells_insufficient"
+    else:
+        reason = "column_index_unresolved"
 
     cells = []
+    used_selector = None
     for selector in MIBANK_RATE_CELL_SELECTORS:
         cells = row.select(selector)
         if cells:
+            used_selector = selector
             break
+    basis = {"branch": "fallback", "reason": reason, "selector": used_selector,
+             "matched_count": len(cells)}
     if not cells:
-        return None
+        return None, basis
     # Last cell = base rate column on mibank
     text = cells[-1].get_text(strip=True)
-    return text if text and text != "-" else None
+    return (text if text and text != "-" else None), basis
+
+
+def _extract_mibank_rate_text(row, base_rate_column_index: Optional[int] = None) -> Optional[str]:
+    return _mibank_rate_text_with_basis(row, base_rate_column_index)[0]
 
 
 def crawl_mibank_rates(
@@ -309,9 +345,14 @@ def crawl_mibank_rates(
     bank_name: str,
     required_codes: tuple = MIBANK_DEFAULT_REQUIRED_CODES,
     require_all: bool = True,
+    observer=None,
 ) -> dict:
     """
     Crawl mibank rates using currency code from href query params.
+
+    `observer` 는 보고 전용(`bank_report.PathObserver`)이다. 기본 None 이면 보고 호출·추가 DOM 탐색이 없다
+    (판별 함수는 근거 튜플을 늘 함께 돌려준다 — 판별 로직을 두 벌 두지 않기 위해서다).
+    ⛔ 은행 이름으로 활성화를 판단하지 않는다 — 관측자를 넘긴 호출만 기록한다.
     """
     response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
     response.raise_for_status()
@@ -325,23 +366,48 @@ def crawl_mibank_rates(
     if not tbody:
         raise RuntimeError("mibank 테이블을 찾을 수 없음")
 
-    base_rate_column_index = _get_mibank_base_rate_column_index(tbody)
+    base_rate_column_index, column_basis = _mibank_base_rate_column_with_basis(tbody)
+    if observer is not None:
+        observer.table_structure(tbody=tbody, column_index=base_rate_column_index,
+                                 column_basis=column_basis)
     required_set = {code.upper() for code in required_codes}
     found_codes = []
     current_rates = {}
 
-    for row in tbody.find_all("tr"):
-        code = _extract_mibank_currency_code(row)
+    for row_index, row in enumerate(tbody.find_all("tr")):
+        code, code_basis = _mibank_currency_code_with_basis(row)
         if not code:
             continue
         found_codes.append(code)
         if code not in required_set:
+            if observer is not None:
+                # 필수 밖 코드는 값을 파싱하지 않는다(기존과 같다) — 식별 사실만 남긴다.
+                observer.code_outside_required(code, code_basis)
             continue
 
-        rate_text = _extract_mibank_rate_text(row, base_rate_column_index)
+        rate_text, value_basis = _mibank_rate_text_with_basis(row, base_rate_column_index)
+        pair = f"{code.lower()}-krw"
         if not rate_text:
+            if observer is not None:
+                observer.missed(pair, "empty_value", item_key=row_index, row=row,
+                                code_basis=code_basis, value_basis=value_basis)
             continue
-        current_rates[f"{code.lower()}-krw"] = parse_rate_text(rate_text)
+        try:
+            current_rates[pair] = parse_rate_text(rate_text)
+        except ValueError:
+            # 기존처럼 잡지 않고 전파한다 — 어느 행에서 멈췄는지만 그 행에 결속한다.
+            if observer is not None:
+                observer.missed(pair, "parse_error", rate_text=rate_text, item_key=row_index,
+                                row=row, code_basis=code_basis, value_basis=value_basis)
+            raise
+        if observer is not None:
+            # 값이 `current_rates` 에 들어간 직후 — 같은 코드의 뒤 행이 덮어쓰면 그 행도 따로 남는다.
+            observer.observed(pair, rate_text=rate_text, rate=current_rates[pair],
+                              item_key=row_index, row=row, matched_code=code,
+                              code_basis=code_basis, value_basis=value_basis)
+
+    if observer is not None:
+        observer.loop_completed()
 
     logger.debug(
         "mibank 수집 통화",

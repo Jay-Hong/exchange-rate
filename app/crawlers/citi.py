@@ -55,18 +55,23 @@ MIBANK_CITI_URL = 'https://exchange.mibank.me/bank?bank_cd=' + MIBANK_CITI_CODE
 logger = logging.getLogger(f"exchange_rate.crawler.{BANK_NAME}")
 
 
-def _crawl_mibank_citi(db: Session) -> tuple[dict, dict]:
+def _crawl_mibank_citi(db: Session, observer=None) -> tuple[dict, dict]:
+    """`observer` 는 보고 전용 — 범위 검사·편차 평가의 입력·결과를 그대로 받아 적기만 한다."""
     rates = crawl_mibank_rates(
         MIBANK_CITI_URL,
         BANK_NAME,
         required_codes=MIBANK_REQUIRED_CODES,
         require_all=True,
+        observer=observer,
     )
 
-    validate_rate_ranges(rates, MIBANK_RATE_RANGES)
+    bank_report.record_range_check(
+        observer, rates, lambda: validate_rate_ranges(rates, MIBANK_RATE_RANGES))
 
     last_info = crud.get_last_bank_rates_with_ts(db, BANK_NAME, MIBANK_REQUIRED_PAIRS)
     eval_result = evaluate_rate_deviation(rates, last_info, models.get_utc_now())
+    if observer is not None:
+        observer.deviation_evaluated(rates, eval_result)
     return rates, eval_result
 
 
@@ -117,14 +122,17 @@ def _crawl_and_save_citi(report):
                         "MIBANK_CITI_URL 시도 (평일 10:00 ~ 23:59 / 00:00~09:59,주말 제외)",
                         extra={"bank": BANK_NAME},
                     )
-                    rates, eval_result = _crawl_mibank_citi(db)
+                    rates, eval_result = _crawl_mibank_citi(db, observer=mibank)
 
                     if eval_result["hard_fail"]:
+                        mibank.adoption("withheld", "deviation_hard_fail")
                         logger.error(
                             "mibank hard_fail → 저장 보류",
                             extra={"bank": BANK_NAME, "details": eval_result["details"]},
                         )
                     else:
+                        # soft_fail 여부는 편차 기록에 있다 — 여기서 결과를 다시 읽어 분기하지 않는다.
+                        mibank.adoption("submitted", "deviation_not_hard_fail")
                         if eval_result["soft_fail"]:
                             logger.warning(
                                 "mibank soft_fail → 마지막 폴백이므로 저장",
