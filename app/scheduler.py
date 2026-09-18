@@ -2,10 +2,13 @@
 
 # 표준 라이브러리
 import asyncio
+import json
 import logging
 import os
 import sys
+import threading
 import time
+import uuid
 from datetime import date, datetime, timedelta, timezone as dt_timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -277,9 +280,11 @@ class CrawlerManager:
         self.config_cache[crawler_name] = enabled
 
         # 3. switch_jobs() 재실행 (현재 모드 유지)
+        # ⚠️ 정기 제어와 직렬화되지 않는다 — 전환과 동시에 토글되면 경합할 수 있다(미해결).
+        #    호출별 switch_id 로 기록이 섞이지 않게만 한다.
         global current_mode
         if current_mode:
-            switch_jobs(current_mode)
+            switch_jobs(current_mode, cause="admin_toggle")
 
             action = "활성화" if enabled else "비활성화"
             logger.info(
@@ -733,9 +738,11 @@ def make_selenium_job_wrapper(bank_name: str):
     return wrapper
 
 
-def switch_jobs(mode: str):
+def _switch_jobs_body(mode: str):
     """
     모드에 따라 작업 재등록 (4단계 세분화 + 크롤러 토글 통합)
+
+    ⛔ 직접 부르지 말 것 — `switch_jobs()` 가 이 본문을 감싸 호출별 전환 기록을 남긴다.
 
     [2025-11-16 재설계]
     - IN 모드: cron 절대 시간 동기화 - 월~금 08:00~18:59 (2026-08-28 ADR-042: 20:59 → 18:59)
@@ -754,7 +761,7 @@ def switch_jobs(mode: str):
     # 기존 작업 제거
     for job in scheduler.get_jobs():
         if job.id.startswith("task_"):
-            scheduler.remove_job(job.id)
+            _record_remove_job(job)
 
     if mode == "IN":
         # ═════════════════════════════════════════════════════════════
@@ -763,7 +770,7 @@ def switch_jobs(mode: str):
 
         # A Group: investing
         if crawler_manager.is_enabled('investing'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
                 CronTrigger(second='7,17,27,37,47,57', timezone=KST),
                 id='task_investing',
@@ -774,7 +781,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
                 CronTrigger(second='1,11,21,31,41,51', timezone=KST),
                 id='task_dxy',
@@ -791,7 +798,7 @@ def switch_jobs(mode: str):
         # KB/free snapshot 시간당 1회, hana/graph precompute 시간당 6회다.
         # 부동 IntervalTrigger는 smoke에서 별도 관측한다.
         if crawler_manager.is_enabled('kb'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
                 CronTrigger(second='9,19,29,39,49,59', timezone=KST),
                 id='task_kb',
@@ -802,7 +809,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('hana'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(second='2,12,22,32,42,52', timezone=KST),
                 id='task_hana',
@@ -817,7 +824,7 @@ def switch_jobs(mode: str):
         # 열거된 고정 IN job과 동일 시작초는 없고, 재기동 위상에 묶인 IntervalTrigger는
         # 고정 레인으로 회피할 수 없으므로 scheduler_event와 smoke에서 별도 관측한다.
         if crawler_manager.is_enabled('woori'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(minute='*', second='14,44', timezone=KST),
                 id='task_woori',
@@ -828,7 +835,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [woori] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('bs'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(minute='*', second='33', timezone=KST),
                 id='task_bs',
@@ -839,7 +846,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('citi'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
                 CronTrigger(minute='*', second='13', timezone=KST),
                 id='task_citi',
@@ -851,7 +858,7 @@ def switch_jobs(mode: str):
 
         # C Group: Selenium
         if crawler_manager.is_enabled('shinhan'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('shinhan'),
                 # IntervalTrigger(seconds=38.3, timezone=KST),
                 CronTrigger(minute='*', second='18', timezone=KST),
@@ -864,7 +871,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [shinhan] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('ibk'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
                 # IntervalTrigger(seconds=55.5, timezone=KST),
                 CronTrigger(minute='*', second='34', timezone=KST),
@@ -877,7 +884,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [ibk] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('nh'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('nh'),
                 # IntervalTrigger(seconds=90, timezone=KST),
                 CronTrigger(minute='*', second='54', timezone=KST),
@@ -890,7 +897,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('sc'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('sc'),
                 # IntervalTrigger(seconds=150, timezone=KST),
                 CronTrigger(minute='*', second='58', timezone=KST),
@@ -913,7 +920,7 @@ def switch_jobs(mode: str):
 
         # A Group: investing
         if crawler_manager.is_enabled('investing'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
                 CronTrigger(second='7,17,27,37,47,57', timezone=KST),
                 id='task_investing',
@@ -924,7 +931,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
                 CronTrigger(second='1,11,21,31,41,51', timezone=KST),
                 id='task_dxy',
@@ -938,7 +945,7 @@ def switch_jobs(mode: str):
         # 고정 작업과의 알려진 같은-초 시작은 KB/free snapshot 시간당 1회,
         # hana/graph precompute 시간당 6회이며, IN canary에서 정상 완료를 확인했다.
         if crawler_manager.is_enabled('kb'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
                 CronTrigger(second='9,19,29,39,49,59', timezone=KST),
                 id='task_kb',
@@ -949,7 +956,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('hana'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(second='2,12,22,32,42,52', timezone=KST),
                 id='task_hana',
@@ -974,7 +981,7 @@ def switch_jobs(mode: str):
         #    남아 있어도 마무리 발화가 차단된다. 다른 ID(`task_woori_terminal` 등)로 나누면
         #    별도 카운터라 Chrome 2개가 동시에 뜬다. 시간 간격으로는 보장되지 않는다.
         if crawler_manager.is_enabled('woori'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(hour='19-23,0-5', minute='*', second='14,44', timezone=KST),
                 id='task_woori',
@@ -985,7 +992,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [woori] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('bs'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(minute='*', second='33', timezone=KST),
                 id='task_bs',
@@ -996,7 +1003,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('citi'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
                 CronTrigger(minute='*', second='13', timezone=KST),
                 id='task_citi',
@@ -1008,7 +1015,7 @@ def switch_jobs(mode: str):
 
         # C Group: Selenium
         if crawler_manager.is_enabled('shinhan'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('shinhan'),
                 # IntervalTrigger(seconds=38.3, timezone=KST),
                 # 신한 고시는 02:45경 종료 → 02:59:18이 마지막 (현행 동작 고정, 변화 0)
@@ -1022,7 +1029,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [shinhan] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('ibk'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('ibk'),  # 하이브리드 (내부 시간대 체크)
                 # IntervalTrigger(seconds=55.5, timezone=KST),
                 CronTrigger(minute='*', second='34', timezone=KST),
@@ -1035,7 +1042,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [ibk] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('nh'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('nh'),
                 # IntervalTrigger(seconds=90, timezone=KST),
                 CronTrigger(minute='*', second='54', timezone=KST),
@@ -1060,7 +1067,7 @@ def switch_jobs(mode: str):
 
         # A Group: investing
         if crawler_manager.is_enabled('investing'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
                 CronTrigger(second='7,17,27,37,47,57', timezone=KST),
                 id='task_investing',
@@ -1071,7 +1078,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
                 CronTrigger(second='1,11,21,31,41,51', timezone=KST),
                 id='task_dxy',
@@ -1084,7 +1091,7 @@ def switch_jobs(mode: str):
         # B Group: kb, hana — IN에서 검증한 10초 분리 레인을 BREAK2에도 적용.
         # BREAK1과 같은 고정 작업 co-start 계약을 유지한다.
         if crawler_manager.is_enabled('kb'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
                 CronTrigger(second='9,19,29,39,49,59', timezone=KST),
                 id='task_kb',
@@ -1095,7 +1102,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('hana'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(second='2,12,22,32,42,52', timezone=KST),
                 id='task_hana',
@@ -1107,7 +1114,7 @@ def switch_jobs(mode: str):
 
         # B Group: woori, bs, citi (7초 전)
         if crawler_manager.is_enabled('bs'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),  # 하이브리드 (내부 폴백)
                 CronTrigger(minute='*', second='33', timezone=KST),
                 id='task_bs',
@@ -1118,7 +1125,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [bs] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('citi'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('citi', citi.crawl_and_save_citi_bank_exchange_rates),
                 CronTrigger(minute='*', second='13', timezone=KST),
                 id='task_citi',
@@ -1130,7 +1137,7 @@ def switch_jobs(mode: str):
 
         # C Group: Selenium
         if crawler_manager.is_enabled('nh'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('nh'),
                 # IntervalTrigger(seconds=90, timezone=KST),
                 CronTrigger(minute='*', second='54', timezone=KST),
@@ -1150,7 +1157,7 @@ def switch_jobs(mode: str):
         #   월 06:00은 일요일 세션이 없어 무의미, 토 06:00은 금요일 세션 종료라 필요.
         # ⚠️ task_ prefix 필수 — switch_jobs()가 모드 전환 시 task_* 를 제거한다.
         if crawler_manager.is_enabled('ibk'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('ibk'),
                 CronTrigger(hour=6, minute='0,1', second='34', day_of_week='tue-sat', timezone=KST),
                 id='task_ibk_terminal',
@@ -1170,7 +1177,7 @@ def switch_jobs(mode: str):
         #    ⚠️ 이것은 크롤러 **호출** 중복 방지다. 타임아웃 뒤 남는 Chrome 은 별개 문제다.
         # day_of_week='tue-sat': woori 야간 세션은 평일 19:00 → 익일 06:00 이라 화~토에만 끝난다.
         if crawler_manager.is_enabled('woori'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('woori', woori.crawl_and_save_woori_bank_exchange_rates),
                 OrTrigger([
                     CronTrigger(hour=6, minute='0-3', second='14,44',
@@ -1225,7 +1232,7 @@ def switch_jobs(mode: str):
 
         # A Group: investing (1분마다)
         if crawler_manager.is_enabled('investing'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('investing', investing.crawl_and_save_investing_exchange_rates),
                 CronTrigger(minute='*', second='8', timezone=KST),
                 id='task_investing',
@@ -1236,7 +1243,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [investing] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('dxy'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('dxy', dxy_spot.crawl_and_save_dxy_spot),
                 CronTrigger(minute='*', second='21', timezone=KST),
                 id='task_dxy',
@@ -1250,7 +1257,7 @@ def switch_jobs(mode: str):
 
         # B Group: kb, hana (각 1분마다)
         if crawler_manager.is_enabled('kb'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('kb', kb.crawl_and_save_kb_bank_exchange_rates),
                 CronTrigger(minute='*', second='28', timezone=KST),
                 id='task_kb',
@@ -1261,7 +1268,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [kb] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('hana'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('hana', hana.crawl_and_save_hana_bank_exchange_rates),
                 CronTrigger(minute='*', second='38', timezone=KST),
                 id='task_hana',
@@ -1273,7 +1280,7 @@ def switch_jobs(mode: str):
 
         # B Group: OUT에는 bs만 등록 (1분마다)
         if crawler_manager.is_enabled('bs'):
-            scheduler.add_job(
+            _record_add_job(
                 make_request_crawler_wrapper('bs', bs.crawl_and_save_bs_bank_exchange_rates),
                 CronTrigger(minute='*', second='51', timezone=KST),
                 id='task_bs',
@@ -1285,7 +1292,7 @@ def switch_jobs(mode: str):
 
         # C Group: Selenium enqueue (각 1분마다)
         if crawler_manager.is_enabled('nh'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('nh'),
                 CronTrigger(minute='*', second='10', timezone=KST),
                 id='task_nh',
@@ -1296,7 +1303,7 @@ def switch_jobs(mode: str):
             logger.info("⏸️ [nh] 비활성화 상태 - job 등록 스킵")
 
         if crawler_manager.is_enabled('shinhan'):
-            scheduler.add_job(
+            _record_add_job(
                 make_selenium_job_wrapper('shinhan'),
                 CronTrigger(minute='*', second='30', timezone=KST),
                 id='task_shinhan',
@@ -1314,14 +1321,224 @@ def switch_jobs(mode: str):
         }
     )
 
-def control_job():
-    """현재 시간대에 따라 모드 전환 (4단계: IN, BREAK1, BREAK2, OUT)"""
+# ─── 모드 전환 기록 (control_job 수정 A+B 1단계) ──────────────────────────────
+# 전환 경계에서 control_job 이 늦으면 새 모드 스케줄도 늦게 등록된다. 2026-09-18 06:00:01
+# 실행이 1.17초 지연으로 misfire 되어 06:01:01 에 전환됐고, 우리은행 마무리 첫 두 슬롯은
+# 그 사이에 지나갔다(ADR-044 2026-09-18 관측).
+#
+# 여기서는 **기록만** 한다 — 전환이 언제·왜·무엇을 바꿨는지. 지나간 슬롯을 복원하거나
+# 구 모드 실행을 막지 않는다. 등록 기록은 실제 발화·큐 실행의 증거가 아니다.
+# 호출마다 같은 switch_id 로 이벤트 둘을 남긴다. 시작(mode_switch_started)은 본문 **전에**
+# 내보내 멈춤·프로세스 종료에도 호출의 존재가 남게 하고, 종료(mode_switch_finished)에
+# 결과를 적는다.
+# ⛔ 종료 이벤트가 없으면 그 호출의 완료·겹침 여부는 **미확정**이다("경합 없음" 이 아니다).
+# ⛔ job 별 제거·등록은 본문의 실제 호출(_record_add_job / _record_remove_job)이 **호출한
+#    스레드의** 기록에 적는다. 전역 스냅샷의 차이로 대신하지 않는다 — 같은 ID·같은 트리거로
+#    다시 넣으면 차이가 0 이고, 겹친 다른 호출의 변경이 섞인다. 전후 스냅샷은 보조 자료다.
+# ⛔ 정기 제어와 관리자 토글은 직렬화되지 않는다(미해결). 기록의 결속만 호출별로 나눈다.
+# ⛔ 기록 실패는 전환을 막지 않고, 본문 예외를 삼키지도 않는다.
+
+# OUT(토 07:00 ~ 월 06:00)이 가장 긴 모드로 47시간이다. 그보다 넉넉히 둔다.
+_MODE_BOUNDARY_LOOKBACK_HOURS = 72
+
+# 모드 전환 job 의 misfire 정책. 시험이 같은 값을 쓰도록 모듈 상수로 둔다.
+# 30초는 **늦은 모드 복구를 허용하는 정책**이다 — 첫 슬롯 보장값이 아니며, 이미 지나간
+# 슬롯을 복원하지도 않는다. max_instances=1 은 control_job 끼리의 겹침만 막는다 —
+# 관리자 토글의 직접 호출까지 직렬화하지는 않는다.
+CONTROL_JOB_OPTIONS = {"misfire_grace_time": 30, "coalesce": True, "max_instances": 1}
+
+
+def _policy_boundary(now: datetime, mode: str) -> Optional[datetime]:
+    """`mode` 가 시작된 정시(정책 경계). 찾지 못하면 None.
+
+    `get_market_mode` 는 요일·시(hour)만 보므로 모드는 한 시간 안에서 바뀌지 않는다.
+    정시 단위로 거슬러 올라가 직전 시간의 모드가 다른 첫 지점을 경계로 본다.
+    """
+    boundary = now.replace(minute=0, second=0, microsecond=0)
+    if get_market_mode(boundary) != mode:
+        return None
+    for _ in range(_MODE_BOUNDARY_LOOKBACK_HOURS):
+        previous = boundary - timedelta(hours=1)
+        if get_market_mode(previous) != mode:
+            return boundary
+        boundary = previous
+    return None
+
+
+# 진행 중인 전환의 기록. 스레드별로 두면 본문의 제거·등록이 자기 호출의 기록에만 닿는다.
+# ⚠️ 전제: **같은 스레드 안에서 switch_jobs 가 재진입하지 않는다**(현재 호출 경로에 재귀·콜백
+#    재진입 없음). 재진입하면 안쪽 호출이 바깥 호출의 기록을 덮고 비운다.
+_switch_local = threading.local()
+
+
+def _snapshot_job_ids() -> list:
+    return sorted(job.id for job in scheduler.get_jobs())
+
+
+def _log_switch_event(event: str, fields: dict) -> None:
+    logger.info(json.dumps({"event": event, **fields}, ensure_ascii=False, default=str))
+
+
+def _note_job_op(op: str, describe: Callable[[], tuple],
+                 exc: Optional[BaseException]) -> None:
+    """`describe()` 는 (job_id, trigger) 를 돌려준다. 기록 중일 때만, 보호 구간 안에서 부른다."""
+    record = getattr(_switch_local, "record", None)
+    if record is None:
+        return
+    try:
+        job_id, trigger = describe()
+        entry = {
+            "op": op,
+            "job_id": job_id,
+            # 스케줄러 호출이 반환된(또는 예외를 잡은) 뒤의 기록 시각. 스케줄러 내부의 등록
+            # 순간이나 실제 발화 시각이 아니다.
+            "at": datetime.now(KST).isoformat(),
+            "trigger": str(trigger) if trigger is not None else None,
+        }
+        if exc is not None:
+            entry["exception_type"] = type(exc).__name__
+        record["operations"].append(entry)
+    except Exception:
+        # 관측 실패가 본문을 막으면 안 된다. 대신 이 호출의 작업 기록이 불완전하다고 남긴다.
+        try:
+            record["operations_complete"] = False
+        except Exception:
+            pass
+
+
+def _record_add_job(*args, **kwargs):
+    """본문 전용 `scheduler.add_job` — 호출·인자·반환값은 그대로 두고 등록을 기록한다."""
+    try:
+        job = scheduler.add_job(*args, **kwargs)
+    except BaseException as exc:
+        _note_job_op("add", lambda: (kwargs.get("id"),
+                                     args[1] if len(args) > 1 else kwargs.get("trigger")), exc)
+        raise
+    _note_job_op("add", lambda: (job.id, job.trigger), None)
+    return job
+
+
+def _record_remove_job(job) -> None:
+    """본문 전용 `scheduler.remove_job(job.id)` — 제거와 제거 전 트리거를 기록한다."""
+    try:
+        scheduler.remove_job(job.id)
+    except BaseException as exc:
+        _note_job_op("remove", lambda: (job.id, job.trigger), exc)
+        raise
+    _note_job_op("remove", lambda: (job.id, job.trigger), None)
+
+
+def _switch_record_start(mode: str, cause: str,
+                         policy_boundary: Optional[datetime]) -> Optional[dict]:
+    try:
+        # 두 시계를 스냅샷 **전에** 함께 잡는다 — 시작 스냅샷에 걸린 시간도 호출 구간이다.
+        started = datetime.now(KST)
+        t0 = time.monotonic()
+        record = {
+            "switch_id": uuid.uuid4().hex,
+            "cause": cause,
+            "requested_mode": mode,
+            "observed_mode_at_start": current_mode,
+            # 시작 경로는 scheduler.start() 전에 등록한다 — 이때의 add_job() 완료는
+            # 실행 가능한 스케줄이 아니다(pending). 둘을 가르기 위해 남긴다.
+            "scheduler_running": bool(getattr(scheduler, "running", False)),
+            "policy_boundary": policy_boundary.isoformat() if policy_boundary else None,
+            "started_at": started.isoformat(),
+            # 보조 자료 — 전역 상태라 겹친 다른 호출의 변경이 섞일 수 있다.
+            "observed_jobs_before": _snapshot_job_ids(),
+            "operations": [],
+            "operations_complete": True,
+            "_started": started,
+            "_boundary": policy_boundary,
+            "_t0": t0,
+        }
+    except Exception:
+        # 관측 실패가 전환을 막으면 안 된다. 이 호출의 기록만 잃는다.
+        try:
+            logger.warning("mode_switch 기록 시작 실패", exc_info=True)
+        except Exception:
+            pass
+        return None
+    try:
+        _log_switch_event("mode_switch_started", {
+            key: value for key, value in record.items()
+            if not key.startswith("_") and key not in ("operations", "operations_complete")
+        })
+    except Exception:
+        try:
+            logger.warning("mode_switch 시작 이벤트 출력 실패", exc_info=True)
+        except Exception:
+            pass
+    return record
+
+
+def _switch_record_end(record: Optional[dict], exc: Optional[BaseException]) -> None:
+    if record is None:
+        return
+    try:
+        started = record.pop("_started")
+        boundary = record.pop("_boundary")
+        t0 = record.pop("_t0")
+        record.update(
+            ended_at=datetime.now(KST).isoformat(),
+            duration_ms=round((time.monotonic() - t0) * 1000, 3),
+            observed_jobs_after=_snapshot_job_ids(),
+            # 전환 중간 예외를 정상 완료로 기록하지 않는다.
+            outcome="raised" if exc is not None else "completed",
+            exception_type=type(exc).__name__ if exc is not None else None,
+        )
+        if boundary is not None:
+            # 정책 경계 → 래퍼 진입(started_at). control_job 의 시작 지연도, 등록 완료 지연도
+            # 아니다 — 각 등록 호출이 반환된 시각은 operations[].at 에 있다.
+            record["delay_from_boundary_s"] = round((started - boundary).total_seconds(), 3)
+        _log_switch_event("mode_switch_finished", record)
+    except Exception:
+        # 전환은 이미 끝났다. 관측 실패는 기록 유실로만 남긴다.
+        try:
+            logger.warning("mode_switch 기록 종료 실패", exc_info=True)
+        except Exception:
+            pass
+
+
+def switch_jobs(mode: str, cause: str = "unspecified",
+                policy_boundary: Optional[datetime] = None):
+    """모드 전환. 본문(`_switch_jobs_body`)을 감싸 호출별 전환 기록을 남긴다.
+
+    ⛔ 본문 동작은 바꾸지 않는다. 기록은 관측이며, 실패해도 전환에 영향이 없다.
+    `cause` 는 호출 원인이다 — `scheduled_control` / `startup` / `admin_toggle`.
+    """
+    record = _switch_record_start(mode, cause, policy_boundary)
+    _switch_local.record = record
+    raised: Optional[BaseException] = None
+    try:
+        _switch_jobs_body(mode)
+    except BaseException as exc:
+        raised = exc
+        raise
+    finally:
+        _switch_local.record = None
+        _switch_record_end(record, raised)
+
+
+def control_job(cause: str = "scheduled_control"):
+    """현재 시간대에 따라 모드 전환 (4단계: IN, BREAK1, BREAK2, OUT)
+
+    APScheduler 는 인자 없이 부르므로 기본값이 정기 제어다. 시작 경로는 `cause="startup"`.
+    """
     global current_mode
     now = datetime.now(KST)
     new_mode = get_market_mode(now)
 
     if new_mode != current_mode:
-        switch_jobs(new_mode)
+        # 경계 대비 지연은 정기 제어에서만 뜻이 있다. 시작 시에는 과거 운영 모드의
+        # 지속 시간을 추정하지 않는다.
+        boundary = None
+        if cause == "scheduled_control":
+            try:
+                boundary = _policy_boundary(now, new_mode)
+            except Exception:
+                boundary = None   # 관측 실패가 전환을 막으면 안 된다
+        switch_jobs(new_mode, cause=cause, policy_boundary=boundary)
         current_mode = new_mode
 
 def cleanup_old_bank_data():
@@ -1752,12 +1969,16 @@ def start_scheduler():
             misfire_grace_time=config.USDT_WS_SUPERVISOR_INTERVAL_SECONDS,
         )
 
-    # 제어 작업: 매시 0분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
+    # 제어 작업: 매분 1초 모드 확인 (4단계 모드: IN, BREAK1, BREAK2, OUT)
     # - 모드 전환 시점: 19:00 (BREAK1), 06:00 (BREAK2), 08:00 (IN), 토 07:00 (OUT 시작), 월 06:00 (OUT 종료 → BREAK2)
+    # 모드 전환은 이 job 이 담당한다. grace 를 비워 두면 스케줄러 기본값 1초를 받는데,
+    # 2026-09-18 06:00:01 실행이 1.17초 지연으로 건너뛰어져 전환이 한 분 늦었다(ADR-044).
+    # 정책 값과 그 의미는 CONTROL_JOB_OPTIONS 에 있다.
     scheduler.add_job(
         control_job,
         CronTrigger(second='1', timezone=KST),
-        id="control_job"
+        id="control_job",
+        **CONTROL_JOB_OPTIONS,
     )
 
     # Queue 상태 모니터링: 10초마다 (포화 감지)
@@ -1974,8 +2195,8 @@ def start_scheduler():
 
     logger.info("✅ KB API 뉴스 수집 스케줄 등록 (5분마다 :15초)")
 
-    # 시작 시 즉시 모드 판별 및 등록
-    control_job()
+    # 시작 시 즉시 모드 판별 및 등록. ⚠️ scheduler.start() 전이라 이 등록은 pending 이다.
+    control_job(cause="startup")
 
     # 스케줄러 시작
     scheduler.start()
