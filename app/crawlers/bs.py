@@ -126,7 +126,8 @@ def _crawl_and_save_bs(report):
                         )
                     bank_report.record_writer_call(
                         mibank, rates,
-                        lambda: crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME))
+                        lambda: crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME,
+                                                                observer=mibank))
             except Exception as e2:
                 mibank.finish(error=e2)
                 logger.exception("MIBANK_BS_URL 크롤링 실패", extra={"url": MIBANK_BS_URL})
@@ -203,6 +204,7 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, observer=None
     if current_rates:
         return bank_report.record_writer_call(
             observer, current_rates,
-            lambda: crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME))
+            lambda: crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME,
+                                                    observer=observer))
     else:
         raise Exception(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception")

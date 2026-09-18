@@ -8,8 +8,8 @@ SOURCE_HEALTH_PLAN §7.2 값 체계(`valid`=유효관측 / `missing`=누락 / `u
 R1a 는 공식 경로의 근거 **후보 텍스트만** 남기고 판정은 `unknown` 으로 둔다(라벨 표기가 fixture 로
 확인되기 전이다). R1b 는 MIBANK 행 관측을 더한다 — 통화 코드 근거(`explicit_code_param` 등)는 **통화 축만**
 채우고, 헤더 인덱스·행 칸 수·span 은 구조 사실일 뿐 기준환율 열 대응의 증거가 아니다(V2b 미검증 →
-`unknown`). writer 가드는 아직 계측하지 않는다(`not_instrumented`) — 덜 구현된 상태가 정책 생략이나
-값 미확보로 둔갑하지 않게 한다.
+`unknown`). R1c 는 writer(`crud.insert_bank_rates_into_db(observer=)`)가 가드 결정·통화별 staging 결정·commit
+시도/정상 반환을 실제 분기에서 기록하게 한다 — 확정한 사실만 쓰기 축에 올리고 나머지는 `unknown` 이다.
 
 ⛔ 관측은 운영 판단을 대체하지 않는다. 루틴이 실제 추출에 쓴 요소·매칭 결과만 받고, 선택자를 다시
 계산하지 않는다. 추가 DOM 탐색·문자열 변환은 `safely_report` 경계 안에서만 한다.
@@ -168,6 +168,60 @@ def record_range_check(observer, rates, call):
         observer.range_checked(rates)
 
 
+# writer 내부 단계 기록 — 이 메서드들의 유실은 그 writer 호출에만 표시한다.
+_WRITER_STAGE_METHODS = frozenset({
+    "writer_finished", "writer_guard", "writer_pair_decision", "writer_staging_completed",
+    "writer_commit_attempted", "writer_committed",
+})
+
+
+def _call_pair_result(call, pair):
+    """한 writer 호출에서 한 통화의 쓰기 축(§7.2). 확정한 사실만 확정하고 나머지는 `unknown` 이다.
+
+    ⛔ `failed`(실패)는 쓰지 않는다: bs·citi 는 한 회차의 경로들이 같은 세션(autoflush=False, rollback 없음)을
+    쓰므로 commit 에 이르지 못한 행도 뒤 호출의 commit 에 섞여 반영될 수 있다 — 호출 단위로 실패를 확정할 수 없다.
+    """
+    if call["guard_decision"] == "blocked":
+        return _result("policy_blocked", call["guard_reason"])
+    decision = call["pair_decisions"].get(pair)
+    if decision == "none_skipped":
+        return _result("not_attempted", "value_none")
+    if decision == "unchanged":
+        # 이 통화의 비교 결과다 — 다른 통화의 commit 성공 여부와 무관하다.
+        return _result("no_change_needed", "equal_to_last_record")
+    if decision == "staged":
+        if call["commit_state"] == "committed":
+            # Session.commit() 은 None 을 돌려준다 — 예외 없는 정상 반환만 근거로 쓴다.
+            return _result("performed", "committed")
+        if call["telemetry_incomplete"]:
+            # commit 단계 기록이 유실됐을 수 있다 — "미도달" 로 단정하지 않는다.
+            return _result("unknown", "telemetry_error")
+        if call["commit_state"] == "attempted":
+            return _result("unknown", "commit_outcome_unknown")
+        return _result("unknown", "commit_not_reached")
+    if call["telemetry_incomplete"]:
+        return _result("unknown", "telemetry_error")
+    if call["guard_decision"] is None:
+        # 가드에 이르기 전에 끝났다(또는 관측자를 기록하지 않는 writer).
+        return _result("unknown", "guard_unrecorded")
+    return _result("unknown", "staging_incomplete")
+
+
+def _summarize_writing(pair, calls):
+    """회차 요약: 어느 호출이든 `performed` → 어느 호출이든 `unknown`(앞 호출 pending 행이 뒤 commit 에 섞였을 수
+    있으니 뒤 호출의 `no_change_needed`·차단이 그것을 부정하지 못한다) → 그 통화를 입력으로 가진 마지막 호출."""
+    results = [(call, _call_pair_result(call, pair)) for call in calls]
+    for status in ("performed", "unknown"):
+        chosen = [r for r in results if r[1]["status"] == status]
+        if chosen:
+            call, judged = chosen[-1]
+            break
+    else:
+        call, judged = results[-1]
+    return {**judged, "writer_call_id": call["writer_call_id"], "path": call["path"],
+            "writer_call_ids": [c["writer_call_id"] for c in calls]}
+
+
 class PathObserver:
     """한 경로의 관측자. 모든 호출이 `safely_report` 를 거친다 — 실패해도 수집은 그대로다."""
 
@@ -216,6 +270,23 @@ class PathObserver:
     def writer_finished(self, count=None, error=None):
         safely_report(self.report, "writer_finished", self.path, count=count, error=error)
 
+    # ── writer 내부(R1c) — `crud.insert_bank_rates_into_db(observer=)` 가 실제 분기에서 부른다 ──
+
+    def writer_guard(self, decision, mode):
+        safely_report(self.report, "writer_guard", self.path, decision, mode)
+
+    def writer_pair_decision(self, pair, decision):
+        safely_report(self.report, "writer_pair_decision", self.path, pair, decision)
+
+    def writer_staging_completed(self):
+        safely_report(self.report, "writer_staging_completed", self.path)
+
+    def writer_commit_attempted(self):
+        safely_report(self.report, "writer_commit_attempted", self.path)
+
+    def writer_committed(self):
+        safely_report(self.report, "writer_committed", self.path)
+
 
 class BankReport:
     def __init__(self, logger, bank, pairs, paths):
@@ -255,7 +326,12 @@ class BankReport:
         self.telemetry_error_counts[method] = self.telemetry_error_counts.get(method, 0) + 1
         path = args[0] if args else kwargs.get("path")
         attempt = self.attempts.get(path)
-        if attempt is not None:
+        if attempt is not None and method in _WRITER_STAGE_METHODS:
+            # writer 단계 기록 유실은 그 호출의 통화별 쓰기 판정만 "확인 불가" 쪽으로 내린다(수집 판정과 별개).
+            call = self._active_call(path, required=False)
+            if call is not None:
+                call["telemetry_incomplete"] = True
+        elif attempt is not None:
             # 빠진 관측이 있을 수 있다 — 그 시도의 판정을 "확인 불가" 쪽으로만 내린다.
             attempt["telemetry_incomplete"] = True
             if method == "start_attempt" and attempt["status"] == "not_reached":
@@ -424,22 +500,54 @@ class BankReport:
             "path": path,
             "input_pairs": sorted(rates),
             "call_state": "called",
-            # R1c 전에는 가드를 계측하지 않는다 — 결정 불명(unknown_telemetry)과도 구분한다.
-            "guard_decision": "not_instrumented",
+            # 아래 필드는 writer 가 실제 분기에서 채운다(R1c). 비어 있으면 "기록되지 않음" 이지 "하지 않음" 이 아니다.
+            "guard_decision": None,
+            "guard_reason": None,
+            "pair_decisions": {},
+            "staging_completed": False,
+            "commit_state": "not_reached",
+            "telemetry_incomplete": False,
             "termination": "unknown",
             "returned_count": None,
             "error_type": None,
         })
-        self.attempts[path]["writer_call_ids"].append(call_id)
+        attempt = self.attempts[path]
+        attempt["writer_call_ids"].append(call_id)
+        attempt["active_writer_call_id"] = call_id
+
+    def _active_call(self, path, required=True):
+        """지금 진행 중인 writer 호출. 시작 기록이 없으면(유실) 다른 호출에 붙이지 않는다."""
+        call_id = self.attempts[path].get("active_writer_call_id")
+        call = next((c for c in self.writer_calls if c["writer_call_id"] == call_id), None)
+        if call is None and required:
+            raise LookupError("no active writer call")
+        return call
 
     def writer_finished(self, path, count=None, error=None):
-        calls = [c for c in self.writer_calls if c["path"] == path]
-        if not calls:
-            return
-        call = calls[-1]
+        call = self._active_call(path)
         call["termination"] = "raised" if error is not None else "returned"
         call["returned_count"] = count
         call["error_type"] = type(error).__name__ if error is not None else None
+        self.attempts[path].pop("active_writer_call_id", None)
+
+    def writer_guard(self, path, decision, mode):
+        call = self._active_call(path)
+        call["guard_decision"] = decision
+        if decision == "blocked":
+            # §7.2 사유 표기(`write_mode_uninitialized`/`write_mode_halt`). 값은 writer 가 실제로 쓴 결정 그대로다.
+            call["guard_reason"] = f"write_mode_{getattr(mode, 'value', mode)}"
+
+    def writer_pair_decision(self, path, pair, decision):
+        self._active_call(path)["pair_decisions"][pair] = decision
+
+    def writer_staging_completed(self, path):
+        self._active_call(path)["staging_completed"] = True
+
+    def writer_commit_attempted(self, path):
+        self._active_call(path)["commit_state"] = "attempted"
+
+    def writer_committed(self, path):
+        self._active_call(path)["commit_state"] = "committed"
 
     # ── 판정 ──────────────────────────────────────────────────────────────
 
@@ -525,14 +633,20 @@ class BankReport:
                     break
         writing = {}
         writer_failed = "writer_started" in self.telemetry_errors
+        # 시작 기록을 잃은 writer 호출은 입력 통화를 모른다 — 어느 통화든 썼을 수 있다.
+        lost_calls = self.telemetry_error_counts.get("writer_started", 0)
         for pair in self.pairs:
-            call_ids = [c["writer_call_id"] for c in self.writer_calls if pair in c["input_pairs"]]
-            if call_ids:
-                # 가드·통화별 쓰기는 계측 전이다 — 호출됐다는 것만으로 쓰기를 확정하지 않는다.
-                writing[pair] = _result("unknown", "per_currency_write_unverified",
-                                        writer_call_ids=call_ids)
+            calls = [c for c in self.writer_calls if pair in c["input_pairs"]]
+            if calls:
+                summary = _summarize_writing(pair, calls)
+                if lost_calls and summary["status"] != "performed":
+                    # 기록된 호출의 변경 불필요·차단·미시도가 기록 없는 호출의 쓰기를 부정하지 못한다.
+                    summary = {**summary, **_result("unknown", "telemetry_error"),
+                               "lost_writer_calls": lost_calls}
+                writing[pair] = summary
             elif writer_failed:
-                writing[pair] = _result("unknown", "telemetry_error", writer_call_ids=[])
+                writing[pair] = _result("unknown", "telemetry_error", writer_call_ids=[],
+                                        lost_writer_calls=lost_calls)
             else:
                 withheld = [
                     attempt for attempt in self.attempts.values()
@@ -582,7 +696,10 @@ class BankReport:
                 format="detail",
                 attempts=attempts,
                 summary=self._summary(attempts),
-                writer_calls=self.writer_calls,
+                writer_calls=[
+                    {**call, "pair_results": {pair: _call_pair_result(call, pair)
+                                              for pair in call["input_pairs"]}}
+                    for call in self.writer_calls],
                 execution=self.execution,
                 truncated=self.truncated,
                 telemetry_errors=self.telemetry_errors,

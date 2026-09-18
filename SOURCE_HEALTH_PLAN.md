@@ -380,7 +380,7 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 
 ---
 
-### 7.12 bs·citi 보고 R1a·R1b — 공식 경로·MIBANK 관측 (2026-09-18 구현, **미배포**)
+### 7.12 bs·citi 보고 R1a~R1c — 공식 경로·MIBANK·writer 관측 (2026-09-18 구현, **미배포**)
 
 ⛔ 보고 전용. 반환값·폴백 순서·예외 전파(총실패를 로그만 남기고 삼키는 기존 동작 포함, §2.1)·writer 입력·
 재시도·crawler_stats 판단은 바꾸지 않는다. 캡처·집계·경보는 범위 밖이다.
@@ -432,13 +432,28 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
   직전 값·시각이 없으면 `compared=false`/`prior_missing` — 통과가 아니다), 채택 `adoption`(`withheld`/
   `deviation_hard_fail` 또는 `submitted`/`deviation_not_hard_fail`). 편차·범위는 판정 계약(V1~V4) 밖의 운영 사실이라
   수집 판정을 바꾸지 않는다. hard_fail 보류는 요약 `writing` 에 `not_attempted/withheld_before_writer`.
-- **미계측은 미계측으로 적는다**: writer 가드(R1c 전) → `guard_decision=not_instrumented`. 정책 생략·값 미확보로
-  둔갑시키지 않는다.
 - **상한**: 통화별 관측·miss 각 8건(`MAX_OBSERVATIONS_PER_PAIR`·`MAX_MISSES_PER_PAIR`), 넘으면 버리고 `truncated`·
   시도별 `*_truncated`·`dropped` 개수를 남긴다. 계측 실패는 `telemetry_errors`(메서드 이름, 처음 본 순서·중복 없음)와
   `telemetry_error_counts`(횟수) — 행마다 실패해도 목록이 응답 크기로 자라지 않는다.
-- writer: 호출 지점에서 `writer_calls[]`(호출 id·경로·입력 통화·`termination` returned/raised·반환값·예외 타입).
-  통화별 `writing` 은 제출됐으면 `unknown/per_currency_write_unverified`, 아니면 `not_attempted`. `final_db=not_checked`.
+- **writer(R1c)**: 호출 지점에서 `writer_calls[]`(호출 id·경로·입력 통화·`termination` returned/raised·반환값·예외
+  타입)에 더해, `crud.insert_bank_rates_into_db(observer=None)` 가 **실제 분기에서** 가드 결정(`legacy`/`atomic`/
+  `blocked` + `write_mode_uninitialized`·`write_mode_<모드>`), 통화별 staging 결정(`_stage_bank_rate_changes` 루프 안:
+  `none_skipped`/`staged`(db.add 직후)/`unchanged`)과 완료 여부, `db.commit()` 직전(`attempted`)·정상 반환 직후
+  (`committed` — `Session.commit()` 은 None 을 돌려주므로 예외 없는 반환만 근거)를 기록한다. 다른 은행은 관측자를 넘기지
+  않아 기록이 없고, crud 는 `bank_report` 를 import 하지 않는다. 시작 기록이 없는 writer 단계 기록은 다른 호출에 붙이지
+  않는다(진행 중 호출 id 로만 결속).
+  통화별 쓰기 축(§7.2): `policy_blocked`(정책 차단) / `not_attempted`·`value_none` / `no_change_needed`(변경 불필요 — 이
+  통화의 비교 결과라 다른 통화의 commit 과 무관) / `performed`(수행 — staged ∧ commit 정상 반환) / `unknown`
+  (`commit_outcome_unknown` commit 중 예외, `commit_not_reached` commit 전 예외, `staging_incomplete`, `guard_unrecorded`,
+  `telemetry_error` — writer 단계 기록 유실은 "미도달" 로 단정하지 않는다). ⛔ `failed`(실패)는 R1c 에서 쓰지 않는다 —
+  bs·citi 는 한 회차의 경로들이 같은 세션(`autoflush=False`, 경로 실패 뒤 rollback 없음)을 써서 commit 에 이르지 못한
+  행도 뒤 경로의 commit 에 섞여 반영될 수 있으므로 호출 단위로 실패를 확정할 수 없다(공통 계약에서 `실패` 를 없앤다는
+  뜻은 아니다). 회차 요약은 어느 호출이든 `performed` → 어느 호출이든 `unknown`(앞 호출 pending 행이 뒤 commit 에
+  섞였을 수 있어 뒤 호출의 `no_change_needed`·차단이 그것을 부정하지 못한다) → 그 통화를 입력으로 가진 마지막 호출,
+  호출별 결과는 `writer_calls[].pair_results` 에 모두 남는다. 시작 기록을 잃은 writer 호출이 있으면 그 호출의 입력을
+  모르므로, 확정된 `performed` 가 없는 통화는 모두 `unknown/telemetry_error`(`lost_writer_calls` 개수)다. NaN 은 staging
+  비교(`!=`)가 늘 참이라 매 회차 `staged` 가 되고, commit 정상 반환이 확인되면 `performed` 다(기존 동작, 수정 대상 아님).
+  `final_db=not_checked`(쓰기 ⊥ 최종 DB 확인).
 - 계측은 Investing 과 같은 `safely_report` 경계 안에서만 돈다. 핵심 추출 사실을 라벨 후보보다 먼저 저장해, 라벨
   수집 실패(`label_candidates_error`)가 관측을 지우지 않는다. 보고 초기화 실패 시 보고 없이 기존 동작 그대로.
 - 로그량(합성 측정, `bank_round_finished` 한 건): 2.4~6.6 KB(라벨 조각 상한까지 채운 경우 최대). bs 는 IN·BREAK1·
@@ -447,8 +462,9 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
   관측 아카이브 사용량은 **늘어난다**. 배포 전 대표 이벤트를 실응답으로 다시 재고 압축 형식 여부를 정한다.
   R1b 합성 측정(공식 실패 + MIBANK 경로 회차 한 건): 필수 3 + 필수 밖 41개 표 5.1 KB. 같은 USD 빈 행을 20·200·1,000개
   넣어도 7.7 KB 로 같다(상한 전 R1b 초안은 1,000개에서 약 359 KB — Codex 측정). MIBANK 는 공식 경로 실패 뒤에만 돈다.
-- 다음 단계: R1c(writer 가드 결속 — 증거 추가일 뿐 통화별 쓰기는 계속 `unknown`). R1a~R1c 뒤 한 번 배포한다.
-  fixture 캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정).
+  R1c 합성 측정(실제 writer·SQLite, 회차 한 건): 공식 경로 성공 4.4~4.5 KB, 공식 실패 + MIBANK(43행 표) 6.0 KB.
+- 다음 단계: R1a~R1c 를 한 번에 배포한다(배포 전 실응답으로 이벤트 크기를 다시 재고 압축 형식을 정한다). fixture
+  캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정).
 
 ## 열린 결정 (미해결)
 

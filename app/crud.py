@@ -246,8 +246,13 @@ class StagedRateChange:
         return atomic_revision.revision_from_row(self.row)
 
 
-def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -> List["StagedRateChange"]:
+def _stage_bank_rate_changes(
+    db: Session, current_rates: dict, bank_name: str, observer=None,
+) -> List["StagedRateChange"]:
     """은행 환율 insert-if-changed staging — 변경 row를 `db.add` + `StagedRateChange`(ChangedRate + ORM row) 생성.
+
+    `observer` 는 보고 전용(bs·citi 의 `bank_report.PathObserver`, 기본 None) — 통화마다 **이 루프가 내린 결정**을
+    그 자리에서 받아 적는다(`none_skipped`/`staged`/`unchanged`). 판정을 다시 계산하지 않는다.
 
     C6-5b-3b: 반환을 `StagedRateChange`로 (ORM row ref 동반 — atomic 분기의 flush-row-ref revision용,
     §16). **legacy 소비자는 `[sc.change for sc in staged]`로 ChangedRate 추출 → 관측 동작 불변**
@@ -257,6 +262,8 @@ def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -
     staged: List["StagedRateChange"] = []
     for pair, current_rate in current_rates.items():
         if current_rate is None:
+            if observer is not None:
+                observer.writer_pair_decision(pair, "none_skipped")
             continue
 
         last_record = (
@@ -286,12 +293,19 @@ def _stage_bank_rate_changes(db: Session, current_rates: dict, bank_name: str) -
                 timestamp = ts
             )
             db.add(row)
+            if observer is not None:
+                # db.add 직후 — 이 행은 이제 세션에 pending 이다(뒤 예외가 나도 같은 세션의 뒤 commit 에 섞일 수 있다).
+                observer.writer_pair_decision(pair, "staged")
             logger.debug("✅ DB에 새 레코드 저장됨")
             staged.append(StagedRateChange(
                 change=ChangedRate(source=bank_name, asset=pair, rate=current_rate, changed_at=ts),
                 row=row,
             ))
+        elif observer is not None:
+            observer.writer_pair_decision(pair, "unchanged")
 
+    if observer is not None:
+        observer.writer_staging_completed()
     return staged
 
 
@@ -618,7 +632,7 @@ def _atomic_write_changes_v2(captured, redis_updates, source_label: str, *, key_
     return applied
 
 
-def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) -> int:
+def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str, observer=None) -> int:
     """은행 환율 **atomic-mode** writer (C6-5b-3b) — DB commit은 legacy 동일, Redis는 v1 SET 대신 v2 compare_write.
 
     순서: stage → precommit payload 변환 → db.flush()(id 할당) → flush-row-ref revision capture(commit 전,
@@ -627,7 +641,7 @@ def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) 
     banner는 caller(insert_bank_rates_into_db)가 이미 출력. **post-commit Redis 실패/예외는 rollback·alert·
     return을 막지 않는다**(DB 이미 commit, codex guard). atomic mode는 C6-FLIP(must-confirm)까지 prod 미발화.
     """
-    staged = _stage_bank_rate_changes(db, current_rates, bank_name)
+    staged = _stage_bank_rate_changes(db, current_rates, bank_name, observer=observer)
     new_records_count = len(staged)
 
     if new_records_count > 0:
@@ -639,7 +653,11 @@ def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) 
         # flush 후·commit 전 revision capture (expire_on_commit=True면 commit 후 attr 접근이 re-query → 회피)
         captured = [(sc.change, sc.revision) for sc in staged]
 
+        if observer is not None:
+            observer.writer_commit_attempted()
         db.commit()
+        if observer is not None:
+            observer.writer_committed()
         logger.info(
             f"🎉 총 {new_records_count}개 {bank_name}은행의 새로운 환율 데이터 저장 완료 (atomic v2)",
             extra={"count": new_records_count, "bank": bank_name},
@@ -684,8 +702,12 @@ def _insert_bank_rates_atomic(db: Session, current_rates: dict, bank_name: str) 
     return new_records_count
 
 
-def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) -> int:
+def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str, observer=None) -> int:
     """은행 환율 DB 저장 + Redis direct write + 알림 조건 체크.
+
+    `observer` 는 보고 전용(bs·citi 의 `bank_report.PathObserver`, 기본 None). 가드 결정·통화별 staging 결정·
+    commit 시도/정상 반환을 **실제 분기 그 자리에서** 받아 적는다. ⛔ 은행 이름으로 활성화를 판단하지 않는다.
+    crud 는 `bank_report` 를 import 하지 않는다 — 관측자가 None 이면 호출이 없다.
 
     PR B(β observation fanout 1단계): staging → orchestration 분리. **직렬 순서
     (db.commit() → Redis write → process_rate_alerts) + signature + count==0 게이트
@@ -705,15 +727,23 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
     # 아래 legacy 경로로 진입. skip — refresh 확정 후 다음 cycle이 처리(mirror Fix B와 동일 불변).
     if not atomic_write_runtime.is_initialized():
         _record_write_mode_skip(bank_name, "uninitialized")
+        if observer is not None:
+            observer.writer_guard("blocked", "uninitialized")
         return 0
     enforced = atomic_write_runtime.snapshot().enforced_action
     if enforced == WriterMode.ATOMIC:
-        return _insert_bank_rates_atomic(db, current_rates, bank_name)
+        if observer is not None:
+            observer.writer_guard("atomic", None)
+        return _insert_bank_rates_atomic(db, current_rates, bank_name, observer=observer)
     if enforced != WriterMode.LEGACY:
         _record_write_mode_skip(bank_name, enforced)
+        if observer is not None:
+            observer.writer_guard("blocked", enforced)
         return 0
 
-    staged = _stage_bank_rate_changes(db, current_rates, bank_name)
+    if observer is not None:
+        observer.writer_guard("legacy", None)
+    staged = _stage_bank_rate_changes(db, current_rates, bank_name, observer=observer)
     new_records_count = len(staged)
 
     if new_records_count > 0:
@@ -723,7 +753,11 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str) 
         redis_updates = _changes_to_redis_updates(changes)
         changed_rates = _changes_to_fcm(changes)
 
+        if observer is not None:
+            observer.writer_commit_attempted()
         db.commit()
+        if observer is not None:
+            observer.writer_committed()
         logger.info(f"🎉 총 {new_records_count}개 {bank_name}은행의 새로운 환율 데이터 저장 완료", extra={"count": new_records_count, "bank": bank_name})
 
         # commit 성공 후 Redis direct write — broadcast hot path latency 단축.

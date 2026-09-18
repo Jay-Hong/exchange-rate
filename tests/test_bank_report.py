@@ -10,7 +10,7 @@ import logging
 import math
 from datetime import datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock
 
 import pytest
 import requests
@@ -157,7 +157,7 @@ def test_bs_normal_round_keeps_writer_input_and_reports_unconfirmed(harness):
     assert bs.crawl_and_save_bs_bank_exchange_rates() is None
     harness.writer.assert_called_once_with(
         db=harness.db, current_rates={"usd-krw": 1393.5, "jpy-krw": 942.64, "eur-krw": 1641.12},
-        bank_name="bs")
+        bank_name="bs", observer=ANY)
     event = finished(harness, bs)
     official = attempt(event, "official_primary")
     assert official["status"] == "succeeded"
@@ -165,7 +165,8 @@ def test_bs_normal_round_keeps_writer_input_and_reports_unconfirmed(harness):
         judged = official["collection"][pair]
         assert (judged["status"], judged["reason"]) == ("unknown", "v2_evidence_unconfirmed")
         assert event["summary"]["collection"][pair]["path"] == "official_primary"
-        assert event["summary"]["writing"][pair]["reason"] == "per_currency_write_unverified"
+        # writer 가 대역(Mock)이라 가드·staging 기록이 없다 — "기록되지 않음" 이지 쓰기 사실이 아니다.
+        assert event["summary"]["writing"][pair]["reason"] == "guard_unrecorded"
     usd = next(o for o in official["observations"] if o["pair"] == "usd-krw")
     assert "USD" in usd["label_candidates"]["row_text"]["text"]
     assert "매매기준율" in usd["label_candidates"]["header_text"]["text"]
@@ -174,7 +175,7 @@ def test_bs_normal_round_keeps_writer_input_and_reports_unconfirmed(harness):
         "status": "not_attempted", "reason": "previous_attempt_succeeded"}
     [call] = event["writer_calls"]
     assert (call["path"], call["termination"], call["returned_count"],
-            call["guard_decision"]) == ("official_primary", "returned", 3, "not_instrumented")
+            call["guard_decision"]) == ("official_primary", "returned", 3, None)
     assert event["summary"]["final_db"] == "not_checked"
     assert event["execution"]["status"] == "normal"
 
@@ -183,7 +184,7 @@ def test_bs_partial_selector_miss_and_parse_error(harness):
     harness.http.return_value = page(bs_html([("미국 USD", "1,393.50"), ("일본 JPY", "N/A")]))
     bs.crawl_and_save_bs_bank_exchange_rates()
     harness.writer.assert_called_once_with(
-        db=harness.db, current_rates={"usd-krw": 1393.5}, bank_name="bs")
+        db=harness.db, current_rates={"usd-krw": 1393.5}, bank_name="bs", observer=ANY)
     official = attempt(finished(harness, bs), "official_primary")
     assert official["collection"]["jpy-krw"]["reason"] == "no_value"
     assert official["collection"]["jpy-krw"]["detail"] == "parse_error"
@@ -223,7 +224,7 @@ def test_bs_fetch_failure_then_mibank_rows_are_observed(real_mibank):
     h = real_mibank
     h.serve(bs, mibank_html(MIBANK_NORMAL))
     bs.crawl_and_save_bs_bank_exchange_rates()
-    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="bs")
+    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="bs", observer=ANY)
     event = finished(h, bs)
     assert attempt(event, "official_primary")["collection"]["usd-krw"]["detail"] == "path_failed"
     mib = attempt(event, "mibank")
@@ -299,7 +300,7 @@ def test_citi_primary_text_match_records_item_and_code(harness):
     harness.writer.assert_called_once_with(
         db=harness.db,
         current_rates={"usd-krw": 1393.5, "eur-krw": 1641.12, "jpy-krw": 942.64},
-        bank_name="citi")
+        bank_name="citi", observer=ANY)
     event = finished(harness, citi)
     primary = attempt(event, "official_primary")
     usd = next(o for o in primary["observations"] if o["pair"] == "usd-krw")
@@ -470,7 +471,7 @@ def test_citi_mibank_soft_fail_calls_writer_and_records_it(harness):
     harness.mibank_citi.return_value = (rates, {"hard_fail": False, "soft_fail": True,
                                                 "details": []})
     citi.crawl_and_save_citi_bank_exchange_rates()
-    harness.writer.assert_called_once_with(db=harness.db, current_rates=rates, bank_name="citi")
+    harness.writer.assert_called_once_with(db=harness.db, current_rates=rates, bank_name="citi", observer=ANY)
     event = finished(harness, citi)
     [call] = event["writer_calls"]
     assert call["path"] == "mibank" and call["input_pairs"] == sorted(rates)
@@ -809,7 +810,7 @@ def test_citi_mibank_path_is_observed_through_the_same_routine(real_mibank):
     h = real_mibank
     h.serve(citi, mibank_html(MIBANK_NORMAL))
     citi.crawl_and_save_citi_bank_exchange_rates()
-    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="citi")
+    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="citi", observer=ANY)
     event = finished(h, citi)
     mib = attempt(event, "mibank")
     assert mib["loop_completed"] is True and len(mib["observations"]) == 3
@@ -824,7 +825,7 @@ def test_mibank_observer_failure_changes_nothing(real_mibank, monkeypatch, metho
     monkeypatch.setattr(bank_report.BankReport, method, Mock(side_effect=RuntimeError("probe")))
     h.serve(bs, mibank_html(MIBANK_NORMAL))
     assert bs.crawl_and_save_bs_bank_exchange_rates() is None
-    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="bs")
+    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="bs", observer=ANY)
     event = finished(h, bs)
     assert method in event["telemetry_errors"]
     judged = attempt(event, "mibank")["collection"]["usd-krw"]
@@ -895,7 +896,7 @@ def test_many_empty_rows_for_one_code_are_bounded_and_keep_the_conflict(real_mib
                                                     mrow("EUR", ["1", "1,640.00"])]
     h.serve(bs, mibank_html(rows))
     bs.crawl_and_save_bs_bank_exchange_rates()
-    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="bs")
+    h.writer.assert_called_once_with(db=h.db, current_rates=MIBANK_RATES, bank_name="bs", observer=ANY)
     event = finished(h, bs)
     mib = attempt(event, "mibank")
     assert event["truncated"] is True and mib["misses_truncated"] is True
@@ -945,3 +946,393 @@ def test_citi_usd_observed_and_another_item_usd_selector_miss_is_conflict(harnes
     assert (miss["item_key"], miss["reason"]) == ("2nd", "selector_miss")
     assert primary["collection"]["usd-krw"]["detail"] == "attribution_conflict"
     assert primary["collection"]["jpy-krw"]["reason"] == "v2_evidence_unconfirmed"
+
+
+# ── R1c: writer 가드·통화별 쓰기 결속 ──────────────────────────────────────
+
+
+from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+
+from app import atomic_write_runtime, crud, models  # noqa: E402
+from app.atomic_write_control import WriterMode  # noqa: E402
+from app.atomic_write_runtime import WriteModeSnapshot  # noqa: E402
+
+REAL_WRITER = crud.insert_bank_rates_into_db
+PAIRS3 = ("usd-krw", "jpy-krw", "eur-krw")
+BS_OFFICIAL_RATES = {"usd-krw": 1393.5, "jpy-krw": 942.64, "eur-krw": 1641.12}
+
+
+def _mode(enforced):
+    return WriteModeSnapshot(diagnostic_effective_mode=enforced,
+                             activation_latched=(enforced != WriterMode.LEGACY),
+                             enforced_action=enforced, mode_generation=0)
+
+
+@pytest.fixture
+def writer_env(monkeypatch):
+    """운영과 같은 세션 설정(autoflush=False)의 SQLite + 실제 crud writer. 쓰기 모드·commit 뒤 부수효과만 대역."""
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    models.BankExchangeRate.__table__.create(bind=engine)
+    factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    state = SimpleNamespace(snapshot=_mode(WriterMode.LEGACY), factory=factory)
+    monkeypatch.setattr(atomic_write_runtime, "snapshot", lambda: state.snapshot)
+    monkeypatch.setattr(crud, "_write_changed_bank_rates_to_redis", Mock(return_value=[]))
+    monkeypatch.setattr(crud, "_atomic_write_changes_v2", Mock(return_value=[]))
+    monkeypatch.setattr(crud, "process_rate_alerts", Mock(return_value=0))
+    monkeypatch.setattr(crud, "_emit_fx_alert_canary", Mock(return_value=False))
+    monkeypatch.setattr(crud, "_emit_fx_alert_shadow", Mock())
+    monkeypatch.setattr(crud, "_emit_topic_triggers", Mock())
+
+    def rows(bank="bs"):
+        with factory() as check:
+            return sorted((r.currency, r.rate) for r in
+                          check.query(models.BankExchangeRate).filter_by(bank=bank).all())
+
+    def seed(rates, bank="bs"):
+        with factory() as setup:
+            for pair, rate in rates.items():
+                setup.add(models.BankExchangeRate(bank=bank, currency=pair, rate=rate))
+            setup.commit()
+
+    state.rows = rows
+    state.seed = seed
+    return state
+
+
+def _direct(caplog, env, rates, db=None, *, pairs=PAIRS3):
+    """관측자를 넘겨 실제 writer 를 한 번 부르고 (반환 또는 예외, 보고) 를 돌려준다."""
+    caplog.set_level(logging.INFO, logger=bs.logger.name)
+    report = bank_report.BankReport(bs.logger, "bs", pairs, (bank_report.OFFICIAL_PRIMARY,))
+    observer = bank_report.PathObserver(report, bank_report.OFFICIAL_PRIMARY)
+    observer.start()
+    db = db or env.factory()
+    try:
+        outcome = ("returned", bank_report.record_writer_call(
+            observer, rates, lambda: crud.insert_bank_rates_into_db(db, rates, "bs", observer=observer)))
+    except BaseException as error:  # noqa: BLE001 - 전파 여부까지 비교한다
+        outcome = ("raised", error)
+    finally:
+        db.close()
+    return outcome, report
+
+
+def _writing(report):
+    return report._summary(report._attempt_payloads())["writing"]
+
+
+@pytest.fixture
+def real_writer(harness, writer_env, monkeypatch):
+    """bs·citi 진입 함수가 실제 writer 와 실제 세션을 쓰게 한다."""
+    monkeypatch.setattr(bs.crud, "insert_bank_rates_into_db", REAL_WRITER)
+    harness.session.side_effect = lambda: writer_env.factory()
+    harness.env = writer_env
+    return harness
+
+
+def test_writer_without_observer_returns_and_writes_the_same(writer_env):
+    db = writer_env.factory()
+    assert REAL_WRITER(db, dict(BS_OFFICIAL_RATES), "bs") == 3
+    db.close()
+    assert writer_env.rows() == sorted(BS_OFFICIAL_RATES.items())
+
+
+@pytest.mark.parametrize("mode", [WriterMode.LEGACY, WriterMode.ATOMIC])
+def test_all_new_values_are_performed_after_commit(writer_env, caplog, mode):
+    writer_env.snapshot = _mode(mode)
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome == ("returned", 3)
+    assert writer_env.rows() == sorted(BS_OFFICIAL_RATES.items())
+    [call] = report.writer_calls
+    assert (call["guard_decision"], call["commit_state"], call["staging_completed"]) == (
+        mode, "committed", True)
+    assert call["pair_decisions"] == {pair: "staged" for pair in PAIRS3}
+    assert all(_writing(report)[p]["status"] == "performed" for p in PAIRS3)
+    assert "active_writer_call_id" not in report.attempts["official_primary"], "끝난 호출은 진행 중이 아니다"
+
+
+def test_mixed_none_unchanged_staged(writer_env, caplog):
+    writer_env.seed({"jpy-krw": 942.64})
+    outcome, report = _direct(caplog, writer_env,
+                              {"usd-krw": None, "jpy-krw": 942.64, "eur-krw": 1641.12})
+    assert outcome == ("returned", 1)
+    writing = _writing(report)
+    assert (writing["usd-krw"]["status"], writing["usd-krw"]["reason"]) == ("not_attempted", "value_none")
+    assert (writing["jpy-krw"]["status"], writing["jpy-krw"]["reason"]) == (
+        "no_change_needed", "equal_to_last_record")
+    assert writing["eur-krw"]["status"] == "performed"
+
+
+def test_all_none_and_all_unchanged_never_reach_commit(writer_env, caplog):
+    outcome, report = _direct(caplog, writer_env, {p: None for p in PAIRS3})
+    assert outcome == ("returned", 0)
+    [call] = report.writer_calls
+    assert (call["commit_state"], call["staging_completed"]) == ("not_reached", True)
+    assert {_writing(report)[p]["reason"] for p in PAIRS3} == {"value_none"}
+    writer_env.seed(BS_OFFICIAL_RATES)
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome == ("returned", 0)
+    assert {_writing(report)[p]["status"] for p in PAIRS3} == {"no_change_needed"}
+
+
+@pytest.mark.parametrize(("snapshot", "reason"), [
+    (atomic_write_runtime._INITIAL, "write_mode_uninitialized"),
+    (_mode(WriterMode.HALT), "write_mode_halt"),
+])
+def test_blocked_modes_are_policy_blocked(writer_env, caplog, snapshot, reason):
+    writer_env.snapshot = snapshot
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome == ("returned", 0)
+    assert writer_env.rows() == []
+    [call] = report.writer_calls
+    assert (call["guard_decision"], call["guard_reason"], call["pair_decisions"]) == (
+        "blocked", reason, {})
+    assert {(_writing(report)[p]["status"], _writing(report)[p]["reason"]) for p in PAIRS3} == {
+        ("policy_blocked", reason)}
+
+
+def test_failure_before_commit_is_commit_not_reached(writer_env, caplog, monkeypatch):
+    monkeypatch.setattr(crud, "_changes_to_redis_updates", Mock(side_effect=RuntimeError("payload")))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome[0] == "raised" and str(outcome[1]) == "payload"
+    assert writer_env.rows() == [], "commit 에 이르지 않았고 세션을 닫았다"
+    assert {_writing(report)[p]["reason"] for p in PAIRS3} == {"commit_not_reached"}
+
+
+def test_atomic_flush_failure_is_commit_not_reached(writer_env, caplog):
+    writer_env.snapshot = _mode(WriterMode.ATOMIC)
+    db = writer_env.factory()
+    db.flush = Mock(side_effect=RuntimeError("flush"))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES), db=db)
+    assert outcome[0] == "raised"
+    assert {_writing(report)[p]["reason"] for p in PAIRS3} == {"commit_not_reached"}
+
+
+@pytest.mark.parametrize("error", [RuntimeError("commit"), asyncio.CancelledError()])
+def test_commit_exception_is_outcome_unknown_and_propagates(writer_env, caplog, error):
+    db = writer_env.factory()
+    db.commit = Mock(side_effect=error)
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES), db=db)
+    assert outcome == ("raised", error)
+    [call] = report.writer_calls
+    assert (call["commit_state"], call["termination"]) == ("attempted", "raised")
+    assert {_writing(report)[p]["reason"] for p in PAIRS3} == {"commit_outcome_unknown"}
+
+
+def test_unchanged_currency_stays_no_change_needed_when_another_commit_fails(writer_env, caplog):
+    writer_env.seed({"usd-krw": 1393.5})
+    db = writer_env.factory()
+    db.commit = Mock(side_effect=RuntimeError("commit"))
+    _, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES), db=db)
+    writing = _writing(report)
+    assert writing["usd-krw"]["status"] == "no_change_needed"
+    assert writing["jpy-krw"]["reason"] == "commit_outcome_unknown"
+
+
+def test_exception_after_commit_keeps_performed(writer_env, caplog, monkeypatch):
+    monkeypatch.setattr(crud, "_write_changed_bank_rates_to_redis",
+                        Mock(side_effect=RuntimeError("after commit")))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome[0] == "raised"
+    assert writer_env.rows() == sorted(BS_OFFICIAL_RATES.items())
+    [call] = report.writer_calls
+    assert (call["commit_state"], call["termination"]) == ("committed", "raised")
+    assert {_writing(report)[p]["status"] for p in PAIRS3} == {"performed"}
+
+
+def test_partial_staging_failure_keeps_earlier_decisions(writer_env, caplog):
+    db = writer_env.factory()
+    real_query = db.query
+    calls = {"n": 0}
+
+    def flaky_query(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("query")
+        return real_query(*args, **kwargs)
+
+    db.query = flaky_query
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES), db=db)
+    assert outcome[0] == "raised"
+    [call] = report.writer_calls
+    assert (call["pair_decisions"], call["staging_completed"]) == ({"usd-krw": "staged"}, False)
+    writing = _writing(report)
+    assert writing["usd-krw"]["reason"] == "commit_not_reached"
+    assert writing["jpy-krw"]["reason"] == writing["eur-krw"]["reason"] == "staging_incomplete"
+
+
+def test_lost_commit_marker_is_telemetry_error_not_commit_not_reached(writer_env, caplog, monkeypatch):
+    """Codex 반례: 커밋 시도 기록만 유실되고 실제 commit 이 예외 — '미도달' 로 단정하면 사유가 틀린다."""
+    monkeypatch.setattr(bank_report.BankReport, "writer_commit_attempted",
+                        Mock(side_effect=RuntimeError("probe")))
+    db = writer_env.factory()
+    db.commit = Mock(side_effect=RuntimeError("commit"))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES), db=db)
+    assert outcome[0] == "raised"
+    [call] = report.writer_calls
+    assert call["telemetry_incomplete"] is True and call["commit_state"] == "not_reached"
+    assert {_writing(report)[p]["reason"] for p in PAIRS3} == {"telemetry_error"}
+    assert not any(report.attempts[p]["telemetry_incomplete"] for p in report.attempts), \
+        "writer 단계 유실은 수집 판정을 흔들지 않는다"
+
+
+@pytest.mark.parametrize("method", ["writer_guard", "writer_pair_decision", "writer_staging_completed",
+                                    "writer_commit_attempted", "writer_committed"])
+def test_writer_stage_telemetry_failure_changes_nothing(writer_env, caplog, monkeypatch, method):
+    monkeypatch.setattr(bank_report.BankReport, method, Mock(side_effect=RuntimeError("probe")))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome == ("returned", 3)
+    assert writer_env.rows() == sorted(BS_OFFICIAL_RATES.items())
+    [call] = report.writer_calls
+    assert call["telemetry_incomplete"] is True
+    assert method in report.telemetry_errors
+    judged = {(_writing(report)[p]["status"], _writing(report)[p]["reason"]) for p in PAIRS3}
+    # 커밋 정상 반환 기록이 남아 있으면 수행이 확정이고, 그 기록이 없으면 확인 불가(계측 유실)다.
+    assert judged == ({("unknown", "telemetry_error")}
+                      if method in ("writer_pair_decision", "writer_committed")
+                      else {("performed", "committed")})
+
+
+def test_lost_writer_start_does_not_attach_stages_to_another_call(writer_env, caplog, monkeypatch):
+    monkeypatch.setattr(bank_report.BankReport, "writer_started", Mock(side_effect=RuntimeError("probe")))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES))
+    assert outcome == ("returned", 3), "writer 는 그대로 실행된다"
+    assert writer_env.rows() == sorted(BS_OFFICIAL_RATES.items())
+    assert report.writer_calls == []
+    assert {(_writing(report)[p]["status"], _writing(report)[p]["reason"]) for p in PAIRS3} == {
+        ("unknown", "telemetry_error")}
+
+
+def test_same_session_fallback_pending_rows_do_not_hide_behind_no_change(real_writer, real_mibank):
+    """공식 호출이 staged 후 commit 전 실패 → 같은 세션의 MIBANK commit 이 앞 pending 행까지 반영한다."""
+    h = real_writer
+    h.env.seed({"usd-krw": 1390.0, "jpy-krw": 930.0, "eur-krw": 1640.0})
+    real_payload = crud._changes_to_redis_updates
+    calls = {"n": 0}
+
+    def fail_first(changes):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("payload")
+        return real_payload(changes)
+
+    crud_patch = pytest.MonkeyPatch()
+    crud_patch.setattr(crud, "_changes_to_redis_updates", fail_first)
+    try:
+        h.http.side_effect = [page(bs_html(BS_NORMAL)), page(mibank_html(MIBANK_NORMAL))]
+        bs.crawl_and_save_bs_bank_exchange_rates()
+    finally:
+        crud_patch.undo()
+    assert ("usd-krw", 1393.5) in h.env.rows(), "공식 경로의 pending USD 행이 MIBANK commit 에 섞여 반영됐다"
+    event = finished(h, bs)
+    official_call, mibank_call = event["writer_calls"]
+    assert official_call["pair_results"]["usd-krw"]["reason"] == "commit_not_reached"
+    assert mibank_call["pair_results"]["usd-krw"]["status"] == "no_change_needed"
+    writing = event["summary"]["writing"]
+    assert (writing["usd-krw"]["status"], writing["usd-krw"]["path"]) == ("unknown", "official_primary")
+    assert (writing["jpy-krw"]["status"], writing["jpy-krw"]["path"]) == ("performed", "mibank")
+    assert writing["eur-krw"]["status"] == "unknown"
+
+
+def test_committed_then_raised_official_keeps_performed_over_later_no_change(real_writer, real_mibank,
+                                                                             monkeypatch):
+    h = real_writer
+    monkeypatch.setattr(crud, "_write_changed_bank_rates_to_redis",
+                        Mock(side_effect=[RuntimeError("after commit"), []]))
+    same = [mrow("USD", ["1", "1,393.50"]), mrow("JPY", ["1", "942.64"]), mrow("EUR", ["1", "1,641.12"])]
+    h.last.return_value = prior(BS_OFFICIAL_RATES)
+    h.http.side_effect = [page(bs_html(BS_NORMAL)), page(mibank_html(same))]
+    bs.crawl_and_save_bs_bank_exchange_rates()
+    event = finished(h, bs)
+    official_call, mibank_call = event["writer_calls"]
+    assert official_call["commit_state"] == "committed" and official_call["termination"] == "raised"
+    assert {mibank_call["pair_results"][p]["status"] for p in PAIRS3} == {"no_change_needed"}
+    assert {event["summary"]["writing"][p]["status"] for p in PAIRS3} == {"performed"}
+
+
+def test_citi_secondary_path_passes_its_observer_to_the_writer(real_writer):
+    h = real_writer
+    h.http.side_effect = [page(citi_first_html([])), page(citi_second_html(BS_NORMAL))]
+    citi.crawl_and_save_citi_bank_exchange_rates()
+    event = finished(h, citi)
+    [call] = event["writer_calls"]
+    assert (call["path"], call["guard_decision"], call["commit_state"]) == (
+        "official_secondary", "legacy", "committed")
+    assert {event["summary"]["writing"][p]["status"] for p in PAIRS3} == {"performed"}
+
+
+def test_add_failure_is_not_recorded_as_staged(writer_env, caplog):
+    """`staged` 는 db.add 가 끝난 뒤에만 — add 가 실패하면 세션에 pending 행이 없다."""
+    db = writer_env.factory()
+    db.add = Mock(side_effect=RuntimeError("add"))
+    outcome, report = _direct(caplog, writer_env, dict(BS_OFFICIAL_RATES), db=db)
+    assert outcome[0] == "raised"
+    [call] = report.writer_calls
+    assert call["pair_decisions"] == {}
+    assert _writing(report)["usd-krw"]["reason"] == "staging_incomplete"
+
+
+def test_lost_mibank_writer_start_does_not_touch_the_official_call(real_writer, real_mibank, monkeypatch):
+    """앞 호출(공식)이 있는 상태에서 MIBANK writer 시작 기록만 유실 — 단계 기록이 앞 호출에 붙으면 안 된다."""
+    h = real_writer
+    monkeypatch.setattr(crud, "_write_changed_bank_rates_to_redis",
+                        Mock(side_effect=[RuntimeError("after commit"), []]))
+    real_started = bank_report.BankReport.writer_started
+
+    def lose_mibank_start(self, path, rates):
+        if path == "mibank":
+            raise RuntimeError("probe")
+        return real_started(self, path, rates)
+
+    monkeypatch.setattr(bank_report.BankReport, "writer_started", lose_mibank_start)
+    h.env.seed({"usd-krw": 1.0})
+    h.http.side_effect = [page(bs_html(BS_NORMAL)), page(mibank_html(MIBANK_NORMAL))]
+    bs.crawl_and_save_bs_bank_exchange_rates()
+    event = finished(h, bs)
+    [official_call] = event["writer_calls"]
+    assert official_call["path"] == "official_primary"
+    assert official_call["pair_decisions"] == {p: "staged" for p in PAIRS3}
+    assert official_call["commit_state"] == "committed" and official_call["telemetry_incomplete"] is False
+    assert "writer_guard" in event["telemetry_errors"]
+    assert {event["summary"]["writing"][p]["status"] for p in PAIRS3} == {"performed"}, \
+        "확정된 수행은 기록 없는 호출이 있어도 보존한다"
+
+
+def test_lost_later_writer_start_is_not_hidden_behind_earlier_no_change(real_writer, real_mibank,
+                                                                         monkeypatch):
+    """Codex 반례: 공식 호출은 USD unchanged·나머지 staged 후 commit 전 실패, MIBANK 호출은 시작 기록만 잃고
+    실제로 USD 1390 을 commit — 요약이 앞 호출의 no_change_needed 로 가려지면 안 된다."""
+    h = real_writer
+    h.env.seed({"usd-krw": 1393.5})
+    monkeypatch.setattr(crud, "_changes_to_redis_updates",
+                        Mock(side_effect=[RuntimeError("payload"), []]))
+    real_started = bank_report.BankReport.writer_started
+
+    def lose_mibank_start(self, path, rates):
+        if path == "mibank":
+            raise RuntimeError("probe")
+        return real_started(self, path, rates)
+
+    monkeypatch.setattr(bank_report.BankReport, "writer_started", lose_mibank_start)
+    h.http.side_effect = [page(bs_html(BS_NORMAL)), page(mibank_html(MIBANK_NORMAL))]
+    bs.crawl_and_save_bs_bank_exchange_rates()
+    assert [r for r in h.env.rows() if r[0] == "usd-krw"] == [("usd-krw", 1390.0), ("usd-krw", 1393.5)]
+    event = finished(h, bs)
+    [official_call] = event["writer_calls"]
+    assert official_call["pair_results"]["usd-krw"]["status"] == "no_change_needed"
+    usd = event["summary"]["writing"]["usd-krw"]
+    assert (usd["status"], usd["reason"], usd["lost_writer_calls"]) == ("unknown", "telemetry_error", 1)
+
+
+def test_same_pair_observed_twice_without_item_key_is_conflict():
+    """'같은 통화가 두 번 이상 관측·덮어써진 경우' 규칙을 보고 계층에서 직접 잠근다(원천 식별자가 없어도)."""
+    report = bank_report.BankReport(Mock(), "bs", PAIRS3, (bank_report.OFFICIAL_PRIMARY,))
+    report.start_attempt(bank_report.OFFICIAL_PRIMARY)
+    for rate in (1393.5, 1400.0):
+        report.observed(bank_report.OFFICIAL_PRIMARY, "usd-krw", rate_text=str(rate), rate=rate,
+                        selector="#usd")
+    report.finish_attempt(bank_report.OFFICIAL_PRIMARY)
+    [payload] = report._attempt_payloads()
+    assert payload["collection"]["usd-krw"]["detail"] == "attribution_conflict"
+    assert payload["collection"]["jpy-krw"]["reason"] == "unobserved"
