@@ -380,6 +380,52 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 
 ---
 
+### 7.12 bs·citi 보고 R1a — 공식 경로 관측 (2026-09-18 구현, **미배포**)
+
+⛔ 보고 전용. 반환값·폴백 순서·예외 전파(총실패를 로그만 남기고 삼키는 기존 동작 포함, §2.1)·writer 입력·
+재시도·crawler_stats 판단은 바꾸지 않는다. 캡처·집계·경보는 범위 밖이다.
+
+- 코드: `app/crawlers/bank_report.py`(보고 객체·`PathObserver`·`record_writer_call`), `bs.py`·`citi.py`(계측 경계).
+  회귀 시험: `tests/test_bank_report.py` — HTTP·세션·DB 대역, 합성 HTML(실제 페이지 의미를 주장하지 않는다).
+- 이벤트(각 은행 로거 → `message` 에 JSON): `bank_round_started`(`format=lifecycle`), `bank_round_finished`
+  (`format=detail`). `schema_version=1`, **판정 계약 `validity_contract=bank_v2_evidence/1`**, `source`, `round_id`.
+  ⚠️ `finished` 전에 프로세스가 끝나거나 로그가 실패하면 그 회차의 중간 증거는 남지 않고, `started` 만으로
+  진행 상태를 복원할 수 없다.
+- **판정은 §7.2 값 그대로**(`valid`/`missing`/`unknown`/`not_attempted`) — 별도 `invalid` 상태는 없다.
+  - `valid` = 통화·필드·단위 근거를 **그 회차 응답에서** 확인(판정 계약). R1a 는 근거 **후보 텍스트만** 남기고
+    (`label_candidates`: 표 칸이면 행 텍스트·칸 순번·`thead` 헤더 텍스트·헤더 `colspan`/`rowspan` 유무, citi 1차면
+    항목·값 묶음 텍스트; 조각 160자·640바이트, 잘림 표시·원래 길이) 판정은 **`unknown/v2_evidence_unconfirmed`**
+    — 라벨 표기가 실응답 fixture 로 확인되기 전이다. 파싱 성공으로 `valid` 를 만들지 않는다.
+  - 확인된 위반 → `missing/validation_rejected`: 비유한 값(`non_finite` — writer 로는 기존대로 간다), 귀속 충돌
+    (`attribution_conflict` — citi 1차의 한 항목이 여러 통화 코드를 포함하거나 같은 통화가 두 번 이상 관측·덮어써진
+    경우. 값이 같다는 것은 근거가 아니다). 값 미확보 확인 → `missing/no_value`(`selector_miss`·`parse_error`·
+    `not_matched`·`path_failed`). 계측 유실·관측 상한 초과 → `unknown/evidence_incomplete` — 확인된 위반은 지우지
+    않지만 miss 로 "미확보" 를 단정하지도 않는다.
+  - 후보 판정 우선순위: 위반 > 계측 불완전 > 관측(근거 미확인) > miss > 경로 결과.
+- **회차 요약은 `valid → unknown → missing → not_attempted`** 로 시도 간 증거를 고르고(같은 상태면 가장 최근 시도),
+  선택한 `path`·`attempt_id` 를 남긴다. ⚠️ Investing(§7.10, 유효 → 누락 → 확인 불가)과 다르다: 다른 시도의 유효
+  관측 확보 여부가 미확정이면 회차 전체를 `누락`("필요한 유효 관측을 확보하지 못함")으로 확정할 수 없다 — 예: 공식
+  경로 미확보 + MIBANK 값 확보(근거 미확인)는 `unknown`. Investing 의 같은 문제는 별도 검토(D9).
+- 폴백별 상태: `succeeded`(루틴 정상 반환 — 유효 관측·저장 성공 아님) / `failed` / `policy_skipped`
+  (`mibank_untrusted_window`) / `unnecessary`(앞 경로 성공) / `not_reached`. 실행되지 않은 경로는 품질 등급이 아니라
+  `not_attempted` 라는 별도 사실이다. 취소 등 `BaseException` 은 기존대로 폴백 없이 전파한다(`except Exception` 을
+  넓히지 않는다) — 각 경로 `try` 의 형제 절 `except BaseException` 이 **그 경로에** 종료 원인을 기록하고 그대로
+  재전파한다. 회차 종료 시점까지 `attempted` 로 남은 시도(종료 기록 유실)는 회차 예외를 추정해 붙이지 않고
+  `unknown/attempt_end_unrecorded` 로 둔다. 취소 뒤 `db.close()` 도 실패하면 경로에는 취소가, 회차에는 close 예외가 남는다.
+- **미계측은 미계측으로 적는다**: MIBANK 내부(R1b 전) → 실행된 MIBANK 시도의 수집은 `unknown/not_instrumented`,
+  writer 가드(R1c 전) → `guard_decision=not_instrumented`. 정책 생략·값 미확보로 둔갑시키지 않는다.
+- writer: 호출 지점에서 `writer_calls[]`(호출 id·경로·입력 통화·`termination` returned/raised·반환값·예외 타입).
+  통화별 `writing` 은 제출됐으면 `unknown/per_currency_write_unverified`, 아니면 `not_attempted`. `final_db=not_checked`.
+- 계측은 Investing 과 같은 `safely_report` 경계 안에서만 돈다. 핵심 추출 사실을 라벨 후보보다 먼저 저장해, 라벨
+  수집 실패(`label_candidates_error`)가 관측을 지우지 않는다. 보고 초기화 실패 시 보고 없이 기존 동작 그대로.
+- 로그량(합성 측정, `bank_round_finished` 한 건): 2.4~6.6 KB(라벨 조각 상한까지 채운 경우 최대). bs 는 IN·BREAK1·
+  BREAK2·OUT 모두 매분, citi 는 OUT 제외 매분 → 하루 bs ≈ 5~9.5 MB, citi(평일) ≈ 6~8.5 MB. §7.11 실측 Docker 로그
+  증가율(약 5.58 MiB/h)에 **10% 안팎**을 더한다 — Docker 로그 보존 창은 그만큼 **줄고**, 원문을 보존하는 Investing
+  관측 아카이브 사용량은 **늘어난다**. 배포 전 대표 이벤트를 실응답으로 다시 재고 압축 형식 여부를 정한다.
+- 다음 단계: R1b(MIBANK 선택 관측자 — 통화 판별 근거·분기 ①②③·열 대응·중복 행, 호출 지점의 운영 범위 검사·편차·채택),
+  R1c(writer 가드 결속 — 증거 추가일 뿐 통화별 쓰기는 계속 `unknown`). 세 단계 뒤 한 번 배포한다. fixture 캡처는 별도
+  슬라이스(비식별 규칙·상한이 열린 결정).
+
 ## 열린 결정 (미해결)
 
 - (D1) collection_success 저장: crawler_stats export vs source_registry TODO 기반 신규 필드 — **단, §6-2 실행결과(observed_assets 포함)가 정해진 뒤 결정**(crawler_stats는 source 단위라 per-asset 목표 단독 미충족).
@@ -390,3 +436,7 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 - (D6) source-health가 무료 트랙 출시 blocker인지 fast-follow인지 (제품/타임라인 결정).
 - (D7) §7.4 — `partial` / `unknown` / `preserved` 의 집계 방식과 `success_rate` 분모, 구 의미 누적 통계와의 구분. 이 결정 전에는 관리자 API 의미 호환을 주장하지 않는다.
 - (D8) §7.5 — 지속장애 알림의 구체 임계·재알림 간격, 그리고 IBK 기존 통지와 공통 알림의 **사건 소유권**(같은 사건 중복 발송 방지).
+- (D9) §7.10·§7.12 — Investing 회차 요약 순서(유효 → 누락 → 확인 불가)가 뒤 시도의 미확정 유효 관측을 `누락` 으로
+  덮는지 재검토. 은행 보고는 `valid → unknown → missing` 로 정했다. 운영 Investing 이벤트는 바꾸지 않은 상태다.
+- (D10) §7.12 — 소스별 판정 계약(`validity_contract`)을 집계가 어떻게 분리할지. 필드 없는 기존 Investing 이벤트는
+  확인한 이벤트 종류·`schema_version`·배포/아카이브 출처 범위의 명시적 매핑으로만 해석하고, 모르면 `basis_unknown`.

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud, models
 from app.database import SessionLocal
+from app.crawlers import bank_report
 from app.crawlers.constants import (
     DEFAULT_TIMEOUT,
     HEADERS,
@@ -66,16 +67,37 @@ def _crawl_mibank_bs(db: Session) -> tuple[dict, dict]:
 
 
 def crawl_and_save_bs_bank_exchange_rates():
-    """부산은행 환율 크롤링"""
+    """부산은행 환율 크롤링
+
+    보고(`bank_report`)는 회차 시작·종료만 감싼다 — 반환·예외 전파·폴백 순서는 본문 그대로다.
+    """
+    report = bank_report.start_report(
+        logger, BANK_NAME, tuple(BS_BANK_SELECTORS),
+        (bank_report.OFFICIAL_PRIMARY, bank_report.MIBANK))
+    try:
+        _crawl_and_save_bs(report)
+    except BaseException as error:
+        bank_report.safely_report(report, "finish", error=error)
+        raise
+    bank_report.safely_report(report, "finish")
+
+
+def _crawl_and_save_bs(report):
+    official = bank_report.PathObserver(report, bank_report.OFFICIAL_PRIMARY)
+    mibank = bank_report.PathObserver(report, bank_report.MIBANK)
     db = SessionLocal()
     try:
         logger.info(f"BS_BANK_URL 시도", extra={"bank": BANK_NAME})
-        crawl_and_save_routine(BS_BANK_URL, BS_BANK_SELECTORS, db)
+        official.start()
+        crawl_and_save_routine(BS_BANK_URL, BS_BANK_SELECTORS, db, observer=official)
+        official.finish()
     except Exception as e:
+        official.finish(error=e)
         logger.exception("BS_BANK_URL 크롤링 실패", extra={"url": BS_BANK_URL})
         
         # 2차 시도: MIBANK (자정/주말 차단, 일반 공휴일은 고려하지 못함)
         if is_mibank_rate_reliable():
+            mibank.start()
             try:
                 logger.info(
                     "MIBANK_BS_URL 시도 (평일 10:00 ~ 23:59 / 00:00~09:59,주말 제외)",
@@ -94,12 +116,23 @@ def crawl_and_save_bs_bank_exchange_rates():
                             "mibank soft_fail → 마지막 폴백이므로 저장",
                             extra={"bank": BANK_NAME, "details": eval_result["details"]},
                         )
-                    crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME)
+                    bank_report.record_writer_call(
+                        mibank, rates,
+                        lambda: crud.insert_bank_rates_into_db(db=db, current_rates=rates, bank_name=BANK_NAME))
             except Exception as e2:
+                mibank.finish(error=e2)
                 logger.exception("MIBANK_BS_URL 크롤링 실패", extra={"url": MIBANK_BS_URL})
                 error_msg = f"모든 URL 실패: {str(e2)[:100]}"
                 logger.error(f"❌ {BANK_NAME} 크롤링 실패 (모든 URL)", extra={"error": error_msg})
+            except BaseException as interrupted:
+                # 취소 등은 기존대로 전파한다 — 종료 원인만 이 경로에 결속한다.
+                mibank.finish(error=interrupted)
+                raise
+            else:
+                mibank.finish()
         else:
+            bank_report.safely_report(report, "policy_skipped", bank_report.MIBANK,
+                                      "mibank_untrusted_window")
             logger.warning(
                 f"⏰ MIBANK - {BANK_NAME} - 크롤링 건너뜀 (자정/주말)",
                 extra={
@@ -108,12 +141,19 @@ def crawl_and_save_bs_bank_exchange_rates():
                 }
             )
             # 아무것도 하지 않음 → DB에 INSERT 없음 → 클라이언트가 마지막 BS 환율 표시
+    except BaseException as interrupted:
+        # 취소 등은 기존대로 폴백 없이 전파한다(`except Exception` 을 넓히지 않는다) — 종료 원인만 결속한다.
+        official.finish(error=interrupted)
+        raise
     finally:
         db.close()
 
 
-def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
-    """크롤링 + DB 저장 루틴 (변경 개수 반환)"""
+def crawl_and_save_routine(url: str, selectors: dict, db: Session, observer=None) -> int:
+    """크롤링 + DB 저장 루틴 (변경 개수 반환)
+
+    `observer` 는 보고 전용(`bank_report.PathObserver`) — 실제 추출에 쓴 요소·값만 넘긴다.
+    """
     current_rates = {}
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
@@ -125,6 +165,8 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
 
             if not rate_element:
                 logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
+                if observer is not None:
+                    observer.missed(pair, "selector_miss", selector=selector)
                 continue
 
             rate_text = rate_element.get_text(strip=True)
@@ -134,7 +176,16 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
                 current_rates[pair] = current_rate
             except ValueError:
                 logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
+                if observer is not None:
+                    observer.missed(pair, "parse_error", selector=selector, rate_text=rate_text)
                 continue
+
+            if observer is not None:
+                observer.observed(pair, rate_text=rate_text, rate=current_rate,
+                                  selector=selector, element=rate_element)
+
+        if observer is not None:
+            observer.loop_completed()
 
     except Exception as e:
         logger.exception("⚠️ URL 오류", extra={"url": url, "bank": BANK_NAME})
@@ -142,6 +193,8 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session) -> int:
 
     # db 저장
     if current_rates:
-        return crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME)
+        return bank_report.record_writer_call(
+            observer, current_rates,
+            lambda: crud.insert_bank_rates_into_db(db=db, current_rates=current_rates, bank_name=BANK_NAME))
     else:
         raise Exception(f"🈚️ {BANK_NAME}은행 환율 데이터 없음 from CRAWLER Exception")

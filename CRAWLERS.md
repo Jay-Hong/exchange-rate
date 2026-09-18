@@ -98,6 +98,10 @@
 - `requests.get()` + `BeautifulSoup` 사용 (Investing만 `curl_cffi` 사용, TLS 지문 위장)
 - **Selenium 없음** (가장 빠르고 가벼움)
 - 정적 HTML 파싱
+- **부산·씨티 결과 보고(R1a, 보고 전용·미배포)**: `bank_report.py` 가 회차마다 `bank_round_started`/`bank_round_finished`
+  를 기존 은행 로거로 남긴다. 공식 루틴은 `observer=None` 인자로 실제 추출에 쓴 요소·값만 넘기고, writer 호출은
+  `record_writer_call` 로 호출 지점에서 기록한다. 폴백 순서·총실패를 삼키는 기존 동작·writer 입력은 그대로다.
+  판정 의미는 [SOURCE_HEALTH_PLAN.md](SOURCE_HEALTH_PLAN.md) §7.12 를 따른다.
 
 **mibank 사용 패턴:**
 - **조건부 사용 (BS, CITI)**: `is_mibank_rate_reliable()` 함수로 시간대 체크 (평일 10:00~23:59만 허용)
@@ -264,6 +268,8 @@
 
 **핵심 로직:**
 - 국가 순서 동적 변경 → 문자열 검색으로 통화 매칭 ("USD", "JPY", "EUR" 텍스트 검색)
+- ⚠️ 매칭에 `break` 가 없다 — 한 항목이 두 코드를 포함하면 같은 값이 두 통화에, 다른 항목이 같은 코드를 포함하면
+  마지막 값이 남는다. 동작은 그대로 두고, 보고(R1a)가 이를 `attribution_conflict` 로 표시한다.
 
 **주의사항:**
 - Selector 순서 의존 금지
