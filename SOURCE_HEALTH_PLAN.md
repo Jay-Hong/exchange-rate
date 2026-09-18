@@ -77,6 +77,30 @@
 
 → **subprocess returncode 0 = "top-level 함수가 raise 안 함"이지 "크롤 성공"이 아니다.** 그리고 **raise 한다고 정확히 보고하는 것도 아니다**(kb·hana·woori도 부분 통화·저장 0을 성공으로 접는다). crawler_stats.last_success_at은 장애 중에도 갱신될 수 있어 그대로는 collection-success 신호로 부적합. (초기 오해: "Selenium은 returncode 기반이라 신뢰"는 틀림 — 함수가 삼키면 returncode도 0.)
 
+### 2.2 운영 로그에서 보이지 않는 사실
+
+운영은 `LOG_LEVEL=INFO` 다. 아래 사실은 **DEBUG 로만 남거나, 자식 프로세스의 출력이 Docker 로그로 오지
+않아** 운영 Docker 로그로 판정할 수 없다(2026-09-18 코드 확인, 심볼로 적는다). ADR-044 의 우리은행
+마무리 조회 판정과 bs·citi 결과 보고 설계가 이 표에 걸린다.
+
+| 확인하려는 사실 | 현재 증거·레벨 | 로그에 있는 필드 / 회차·시도 ID | 증거로 말할 수 있는 범위 | 추가 관측 후보 |
+| --- | --- | --- | --- | --- |
+| Selenium 큐 **일반 스케줄 적재** | `scheduler` 의 `📥 … Priority Queue 추가` — **DEBUG**. 재시도 재적재 `🔄 … 재시도 Queue 추가` 는 INFO | 은행 이름·우선순위·대기 수 / **없음** | 운영에서는 **꺼낸** 시각(`selenium_job_executor` 의 `🔄 … Queue 처리 시작`, INFO)과 재시도 재적재만 보인다. 일반 적재를 누가·언제 했는지 모르고, 재시도 로그도 적재→꺼냄을 잇지 못한다(2026-09-18 IBK 06:00:34 는 꺼낸 시각만 확인) | 적재 시각·발화 job ID·예정 시각을 꺼냄과 같은 식별자로 |
+| Request 경로 회차의 **정상 완료**(공통 wrapper) | `make_request_crawler_wrapper` 의 `✅ [은행] 완료 (N초)` — **DEBUG** | 은행 이름·소요 시간 / **없음** | 공통 wrapper 로는 시작(`… 시도`, INFO)과 저장(`🎉`, 값이 바뀐 회차만)만 보인다. 값이 같은 정상 회차의 **끝**을 볼 수 없다. Investing 의 별도 INFO 보고 이벤트(§7.10)는 이 행과 무관하다 | 회차 식별자 + 완료 기록 |
+| **값 불변** | `crud` 의 `📼 [유지]`·`✋ … 변경사항 없음` — **DEBUG** | `pair`·`rate`·`type`·`bank` / **없음** | 저장 0 이 값 불변인지 알 수 없다(§2.1 "저장 0 은 세 사실을 뭉갠다") | 회차 단위 통화별 결과(신규·변경·불변) |
+| **쓰기 모드 차단** | `crud._record_write_mode_skip` — 근사 계수 + **DEBUG** `write-mode skip (staging 전 차단)` | `source`·`enforced` / **없음** | 차단 사실이 그 회차 결과·부모 집계와 연결되지 않는다 | 회차 결과에 차단 사유 |
+| MIBANK 로 **얻은 통화 목록** | `utils` 의 `mibank 수집 통화`(found·captured 전체 목록) — **DEBUG** | `bank`·`found`·`captured` / **없음** | found·captured 전체 목록은 운영에서 모른다. 다른 경고·저장 로그에서 일부 통화가 드러날 수는 있다 | 경로·시도 식별자와 함께 |
+| Selenium **자식 프로세스의 출력** | 부모가 자식 stdout 을 Docker 로그로 넘기지 않는다. legacy 큐 경로 `execute_with_timeout` 은 PIPE 를 성공 시 읽지 않고 실패 시 stderr 앞 500자만, 우리·하나 Selenium 경로는 `subprocess.run(capture_output=True)` 뒤 실패 시 stderr 앞 500자만 로그. 운영 IBK 는 별도 실행기(`ibk_parent.execute`) | — | 자식이 남긴 로그는 **부모 Docker 로그로 오지 않는다** — 레벨을 올려도 Docker 로그에는 안 보인다. 다만 자식도 `app` 로깅 설정으로 `/app/logs/app.log`·`error.log`(RotatingFileHandler)에 쓰는 경로가 있으므로, 그 파일의 실제 보존·회차 귀속 여부는 별도로 확인한다 | 자식 결과를 구조화된 frame 으로 부모에 전달(IBK result frame 선례) |
+
+⛔ **INFO 로 올리는 것만으로는 풀리지 않는다.** 위 행들은 공통으로 회차·시도를 묶는 식별자가 없다 —
+레벨만 올리면 "무언가 완료됐다" 는 줄이 늘 뿐, **어느 예약 발화의 어느 시도가** 끝났는지 잇지 못한다.
+마지막 행은 레벨 문제가 아니라 전달 경로 문제다.
+
+⚠️ **코드상 위험 후보, 운영 발생 미확인**: legacy 큐 경로(`execute_with_timeout`)는 stdout·stderr 를 PIPE 로
+잡은 채 읽지 않고 `proc.wait()` 를 기다린다. 자식 출력이 파이프 버퍼를 넘으면 자식이 쓰기에서 멈춰
+타임아웃처럼 보일 수 있다(파이썬 문서가 경고하는 형태). 실제 자식 출력량은 재지 않았다. `subprocess.run`
+경로(우리·하나)는 내부에서 출력을 끝까지 읽으므로 해당하지 않는다.
+
 ---
 
 ## 3. 핵심 설계 제약
