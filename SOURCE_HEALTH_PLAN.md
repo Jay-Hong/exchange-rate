@@ -509,6 +509,50 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
   판정하지 않는다(§7.7).
 - **R1 관측 뒤 확정**: 실측 크기·로그 증가율·상한·압축, 실제 예외 분포, `bank_report` 공통화 범위.
 
+
+### 7.14 bs·citi fixture 캡처(C) — 설계 합의 (2026-09-19 Claude·Codex) + C1a 추출 경계
+
+⛔ fixture 는 **계약 수준 근거**(라벨·헤더→행 열 대응·단위 표기가 어디 있는가)다. 회차 판정은 여전히 그 회차 응답에서 근거를 다시 읽는다.
+캡처는 보고 계측과 별도이며, `_judge` 가 `valid` 를 내게 하는 연결(라벨 목록·열 대응·단위 근거·공식 경로 V3 정책)은 C1 **다음** 슬라이스다.
+
+- **두 단계**: C1 = 개발 머신 수동 계약 캡처 — 5경로(bs 공식·citi 1차·2차·bs MIBANK·citi MIBANK) 각 **요청 1회**(`allow_redirects=False`,
+  3xx 도 1회 소비, 재시도 없음), 운영과 같은 `requests`·`HEADERS`·`response.text`·파서, 메타 `origin=dev_machine`·`capture_id`(운영 회차가 없어
+  `round_id` 비해당). 개발 머신 응답의 운영 대표성은 주장하지 않는다. C2 = 운영 자동 캡처는 C1 뒤 필요성 재판단(현재 성공 관측도
+  `unknown/v2_evidence_unconfirmed` 라 unknown 비율만으로 의미 변화 감지를 주장할 수 없고, 보존 기한 정리 주체도 그때 정한다).
+- **합격 기준 = 왕복 일치**: 원본 추출 결과 == 비식별 HTML 을 직렬화·같은 파서로 재파싱해 추출한 결과(값·분기·**요소 대응**·순서·예외).
+  이것은 추출 재현성 기준이고, 비식별 검사와 사람 검토는 **독립 필수 조건**이다. fixture 는 사용자 검토 + 두 에이전트 exact 승인 커밋으로만 들어온다.
+- **비식별(값 수준 허용 목록)**: `id`·`class` 는 코드 선택자 등록부에서 도출한 값만(class 는 **토큰 단위 부분 보존**), `href` 는
+  `?currency=<원본 값>` 로 재구성(빈 값은 빈 채 보존 → 3자 영문이면 보존 → 그 밖 제거, 중복 파라미터의 개수·순서 보존 — 제거하면 다음 링크가
+  선택될 수 있어 왕복 일치에서 거부된다), `src` 는 `flag_<원본 세 글자><원본 구분자>`(파서 `flag_([a-z]{3})(?:_|\.)` 대소문자 무시),
+  `colspan`·`rowspan` 이 1~20 밖이면 **fixture 거부**, 그 밖 속성 제거. 보존 경계(선택자 조상 사슬·`nth-child` 형제·MIBANK `thead`·`table`)
+  안은 요소 골격을 보존하되 `script`·`style`·`noscript`·`template` **본문은 비우고 주석은 모두 제거**, 경계 밖 `meta`·`link`·`input` 은 지운다.
+  비운 결과 추출·근거가 달라지면 거부.
+- **등록부 검사**: 선택자는 변수로도 넘어가므로(`select_one(selector)`) 캡처 도구가 추출 중 **실제로 호출된** `select`/`select_one`/`find_*`
+  의 메서드·인자(`recursive=False` 포함)를 기록하고 하나라도 등록부 밖이면 거부한다. 라벨 수집 조회도 포함하며, 라벨 수집이 예외를 잡아도
+  위반은 도구가 따로 기록해 거부한다. 등록부가 지원하는 선택자 문법(태그·`#id`·`.class`·자식 `>`·자손 결합자·`:nth-child(n)`·
+  `[attr*="..."]`) 밖을 만나면 캡처를 중단한다.
+- **식별자 탐지기**: 페이지·응답 유래 문자열(fixture 텍스트·보존 속성·`recorded_extraction`·응답 메타)에 적용하고 걸리면 중단. 코드가 만든
+  필드(URL 상수·해시·`capture_id`·enum)는 필드별 형식·출처 검증. 정규식 미검출은 식별자 부재의 증명이 아니다 — 사람 검토 뒤에도 한계로 남는다.
+  의심 원문은 로그·오류에 남기지 않는다.
+- **상한·기록**: 총 경과 30초, 수신 중·압축 해제 뒤 각각 2 MiB, 파싱 10초, fixture HTML 256 KiB·메타 64 KiB. 원본 응답은 메모리에서만(해시만
+  기록), **모든 실패 경로에서 원문을 로그·오류에 남기지 않는다**. `recorded_extraction` 은 캡처용 완전 기록(보고 이벤트의 스니펫 절단·관측
+  상한을 재사용하지 않음, 중간 파싱 실패·덮어쓰기 포함) — 불완전하면 승인하지 않는다.
+- **계약 불일치 보류 `hold.json`**: fixture 식별자·해시·**정확한 현재 계약**에 결속(계약이 다시 바뀌면 재승인), 계약 불일치 판정만 면제
+  (비식별·해시·schema 검사는 유지), 대체 시험이 존재하고 **이번 실행에서 통과**했는지 확인, 승인은 실제 verdict 기록의 해시에 연결,
+  `review_by`(KST) 필수 — 만료는 hold 검사를 실행하는 **다음 완료된 CI** 에서 검출된다(전체 시험 워크플로는 Markdown 전용 변경을 건너뛴다).
+- **도구 위치**: 운영 이미지 밖(`Dockerfile` 이 `scripts/` 를 복사하므로 `tools/`). `app` import 가 로깅을 초기화하는 경계는 C1b 에서 정한다.
+
+**C1a — 순수 추출 경계(코드)**: `utils.extract_selector_rates`(bs 공식·citi 2차 — 두 벌이던 같은 루프), `citi.extract_citi_items`(citi 1차),
+`utils.extract_mibank_rates`(공유 MIBANK) 가 받은 `soup` 에서 값만 뽑는다(요청·DB·Redis 없음). 사건마다 호출자가 넘긴 `on_event` 를 **그
+자리에서** 부른다 — 운영 루틴 콜백은 기존 경고 로그·보고 관측자 호출을 그대로 남기고(파싱 실패 문자열 로그는 운영 콜백에만 있다), 캡처 도구는
+자기 콜백으로 완전 기록만 모은다. MIBANK 인라인 선택자 넷은 상수로 올렸다. 요청·`BeautifulSoup`·writer·`"URL 오류"` 예외 로그·
+MIBANK 디버그 로그와 필수 통화 검사(루프 완료 → 디버그 로그 → 누락 예외 순서)는 루틴에 남았다.
+동작 보존 근거: 리팩터 전 커밋(`f85eb7d`)에서 만든 특성 기록 125경우(공식 3경로·`crawl_mibank_rates` 직접·**9개 은행 `_crawl_mibank_*`
+경계** — 로그 로거·수준·문구·extra·예외 정보, 관측자 호출·인자, 예외, 요청·writer·DB 조회 인자)가 현재 코드와 같다
+(`tests/test_crawler_extraction_characterization.py`). ⚠️ 경고 로그를 찍는 위치가 콜백으로 옮겨져 운영 JSON 로그의 `function`·`line`
+필드는 달라진다(이 필드로 bs·citi 경고를 거르거나 세는 코드는 없다).
+다음: C1b(도구 — 변환·왕복 검사·탐지기·조회 기록기·요청 제한) → C1c(캡처·검토·커밋) → C1d(의미 시험).
+
 ## 열린 결정 (미해결)
 
 - (D1) collection_success 저장: crawler_stats export vs source_registry TODO 기반 신규 필드 — **단, §6-2 실행결과(observed_assets 포함)가 정해진 뒤 결정**(crawler_stats는 source 단위라 per-asset 목표 단독 미충족).

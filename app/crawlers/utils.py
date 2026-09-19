@@ -251,6 +251,11 @@ MIBANK_RATE_CELL_SELECTORS = (
     "td.right.counter.rollsty01",
     "span.counter",
 )
+# 행 안 통화 판별·헤더·값 칸 조회. fixture 캡처 도구가 선택자 등록부를 코드 상수에서 도출하므로 인라인 문자열로 두지 않는다.
+MIBANK_CODE_LINK_SELECTOR = 'a[href*="currency="]'
+MIBANK_FLAG_IMAGE_SELECTOR = 'img[src*="flag_"]'
+MIBANK_HEADER_ROW_SELECTOR = "thead tr"
+MIBANK_COUNTER_SELECTOR = "span.counter"
 MIBANK_DEFAULT_REQUIRED_CODES = ("USD", "JPY", "EUR")
 
 
@@ -261,14 +266,14 @@ def _mibank_currency_code_with_basis(row) -> tuple:
 
     ⛔ 판별 로직은 여기 한 곳이다. 보고는 이 결과를 그대로 받고 다시 계산하지 않는다.
     """
-    link = row.select_one('a[href*="currency="]')
+    link = row.select_one(MIBANK_CODE_LINK_SELECTOR)
     if link:
         href = link.get("href", "")
         code = parse_qs(urlparse(href).query).get("currency", [None])[0]
         if code:
             return code.upper(), "explicit_code_param"
 
-    flag = row.select_one('img[src*="flag_"]')
+    flag = row.select_one(MIBANK_FLAG_IMAGE_SELECTOR)
     if not flag:
         return None, None
     src = flag.get("src", "")
@@ -285,7 +290,7 @@ def _mibank_base_rate_column_with_basis(tbody) -> tuple:
     """(기준환율 열 인덱스, 근거). 근거는 `label_found` / `header_row_absent` / `label_not_found` —
     헤더 자체가 없는 것과 라벨을 못 찾은 것은 다르다."""
     table = tbody.find_parent("table")
-    header_row = table.select_one("thead tr") if table else None
+    header_row = table.select_one(MIBANK_HEADER_ROW_SELECTOR) if table else None
     if not header_row:
         return None, "header_row_absent"
 
@@ -311,7 +316,7 @@ def _mibank_rate_text_with_basis(row, base_rate_column_index: Optional[int] = No
         cells = row.find_all("td", recursive=False)
         if base_rate_column_index < len(cells):
             cell = cells[base_rate_column_index]
-            counter = cell.select_one("span.counter")
+            counter = cell.select_one(MIBANK_COUNTER_SELECTOR)
             text = counter.get_text(strip=True) if counter else cell.get_text(strip=True)
             basis = {"branch": "header_index", "column_index": base_rate_column_index,
                      "row_cell_count": len(cells), "used_counter_span": counter is not None}
@@ -358,56 +363,7 @@ def crawl_mibank_rates(
     response.raise_for_status()
 
     soup = BeautifulSoup(response.text, "html.parser")
-    tbody = None
-    for selector in MIBANK_TABLE_SELECTORS:
-        tbody = soup.select_one(selector)
-        if tbody:
-            break
-    if not tbody:
-        raise RuntimeError("mibank 테이블을 찾을 수 없음")
-
-    base_rate_column_index, column_basis = _mibank_base_rate_column_with_basis(tbody)
-    if observer is not None:
-        observer.table_structure(tbody=tbody, column_index=base_rate_column_index,
-                                 column_basis=column_basis)
-    required_set = {code.upper() for code in required_codes}
-    found_codes = []
-    current_rates = {}
-
-    for row_index, row in enumerate(tbody.find_all("tr")):
-        code, code_basis = _mibank_currency_code_with_basis(row)
-        if not code:
-            continue
-        found_codes.append(code)
-        if code not in required_set:
-            if observer is not None:
-                # 필수 밖 코드는 값을 파싱하지 않는다(기존과 같다) — 식별 사실만 남긴다.
-                observer.code_outside_required(code, code_basis)
-            continue
-
-        rate_text, value_basis = _mibank_rate_text_with_basis(row, base_rate_column_index)
-        pair = f"{code.lower()}-krw"
-        if not rate_text:
-            if observer is not None:
-                observer.missed(pair, "empty_value", item_key=row_index, row=row,
-                                code_basis=code_basis, value_basis=value_basis)
-            continue
-        try:
-            current_rates[pair] = parse_rate_text(rate_text)
-        except ValueError:
-            # 기존처럼 잡지 않고 전파한다 — 어느 행에서 멈췄는지만 그 행에 결속한다.
-            if observer is not None:
-                observer.missed(pair, "parse_error", rate_text=rate_text, item_key=row_index,
-                                row=row, code_basis=code_basis, value_basis=value_basis)
-            raise
-        if observer is not None:
-            # 값이 `current_rates` 에 들어간 직후 — 같은 코드의 뒤 행이 덮어쓰면 그 행도 따로 남는다.
-            observer.observed(pair, rate_text=rate_text, rate=current_rates[pair],
-                              item_key=row_index, row=row, matched_code=code,
-                              code_basis=code_basis, value_basis=value_basis)
-
-    if observer is not None:
-        observer.loop_completed()
+    current_rates, found_codes = extract_mibank_rates(soup, required_codes, _mibank_observer_events(observer))
 
     logger.debug(
         "mibank 수집 통화",
@@ -423,6 +379,134 @@ def crawl_mibank_rates(
         if missing:
             raise RuntimeError(f"mibank 필수 통화 누락: {missing}")
 
+    return current_rates
+
+
+def _mibank_observer_events(observer):
+    """`extract_mibank_rates` 사건 → 보고 관측자 호출(기존 호출·인자 그대로). 관측자가 없으면 아무것도 하지 않는다."""
+    def on_event(kind, **facts):
+        if observer is None:
+            return
+        if kind == "table_structure":
+            observer.table_structure(**facts)
+        elif kind == "code_outside_required":
+            observer.code_outside_required(facts["code"], facts["code_basis"])
+        elif kind == "empty_value":
+            observer.missed(facts["pair"], "empty_value", item_key=facts["row_index"], row=facts["row"],
+                            code_basis=facts["code_basis"], value_basis=facts["value_basis"])
+        elif kind == "parse_error":
+            observer.missed(facts["pair"], "parse_error", rate_text=facts["rate_text"], item_key=facts["row_index"],
+                            row=facts["row"], code_basis=facts["code_basis"], value_basis=facts["value_basis"])
+        elif kind == "observed":
+            observer.observed(facts["pair"], rate_text=facts["rate_text"], rate=facts["rate"],
+                              item_key=facts["row_index"], row=facts["row"], matched_code=facts["code"],
+                              code_basis=facts["code_basis"], value_basis=facts["value_basis"])
+        elif kind == "loop_completed":
+            observer.loop_completed()
+    return on_event
+
+
+def extract_mibank_rates(soup, required_codes, on_event) -> tuple:
+    """받은 MIBANK 페이지(soup)에서 필수 통화 값만 뽑는다 — 요청·DB·Redis 없음. (값, 발견 코드 순서) 를 돌려준다.
+
+    사건마다 `on_event(kind, **facts)` 를 **그 자리에서** 부른다 — 운영은 보고 관측자 호출을, fixture 캡처 도구는 완전 기록을 둔다.
+    표 없음은 `RuntimeError`, 값 칸 파싱 실패는 사건을 남긴 뒤 `ValueError` 를 그대로 전파한다(기존과 같다).
+    필수 통화 누락 판정은 호출자 몫이다(운영에서는 디버그 로그 뒤에 검사한다).
+    """
+    tbody = None
+    for selector in MIBANK_TABLE_SELECTORS:
+        tbody = soup.select_one(selector)
+        if tbody:
+            break
+    if not tbody:
+        raise RuntimeError("mibank 테이블을 찾을 수 없음")
+
+    base_rate_column_index, column_basis = _mibank_base_rate_column_with_basis(tbody)
+    on_event("table_structure", tbody=tbody, column_index=base_rate_column_index, column_basis=column_basis)
+    required_set = {code.upper() for code in required_codes}
+    found_codes = []
+    current_rates = {}
+
+    for row_index, row in enumerate(tbody.find_all("tr")):
+        code, code_basis = _mibank_currency_code_with_basis(row)
+        if not code:
+            continue
+        found_codes.append(code)
+        if code not in required_set:
+            # 필수 밖 코드는 값을 파싱하지 않는다 — 식별 사실만 남긴다.
+            on_event("code_outside_required", code=code, code_basis=code_basis)
+            continue
+
+        rate_text, value_basis = _mibank_rate_text_with_basis(row, base_rate_column_index)
+        pair = f"{code.lower()}-krw"
+        facts = {"pair": pair, "row_index": row_index, "row": row, "code_basis": code_basis,
+                 "value_basis": value_basis}
+        if not rate_text:
+            on_event("empty_value", **facts)
+            continue
+        try:
+            current_rates[pair] = parse_rate_text(rate_text)
+        except ValueError:
+            # 잡지 않고 전파한다 — 어느 행에서 멈췄는지만 사건으로 남긴다.
+            on_event("parse_error", rate_text=rate_text, **facts)
+            raise
+        # 값이 `current_rates` 에 들어간 직후 — 같은 코드의 뒤 행이 덮어쓰면 그 행도 따로 남는다.
+        on_event("observed", rate_text=rate_text, rate=current_rates[pair], code=code, **facts)
+
+    on_event("loop_completed")
+    return current_rates, found_codes
+
+
+def selector_routine_events(logger, bank_name, observer):
+    """`extract_selector_rates` 사건 → 기존 공식 루틴의 경고 로그와 보고 관측자 호출(문구·extra·순서 그대로).
+
+    ⛔ 파싱 실패 문자열을 로그에 남기는 것은 운영 루틴의 기존 동작이다 — fixture 캡처 도구는 이 함수를 쓰지 않는다.
+    """
+    def on_event(kind, **facts):
+        pair, selector = facts.get("pair"), facts.get("selector")
+        if kind == "selector_miss":
+            logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": bank_name})
+            if observer is not None:
+                observer.missed(pair, "selector_miss", selector=selector)
+        elif kind == "parse_error":
+            logger.warning(f"⚠️ 유효하지 않은 환율: {pair}",
+                           extra={"pair": pair, "rate_text": facts["rate_text"], "bank": bank_name})
+            if observer is not None:
+                observer.missed(pair, "parse_error", selector=selector, rate_text=facts["rate_text"])
+        elif kind == "observed":
+            if observer is not None:
+                observer.observed(pair, rate_text=facts["rate_text"], rate=facts["rate"],
+                                  selector=selector, element=facts["element"])
+        elif kind == "loop_completed":
+            if observer is not None:
+                observer.loop_completed()
+    return on_event
+
+
+def extract_selector_rates(soup, selectors, on_event) -> dict:
+    """통화별 선택자로 값 칸을 찾아 파싱한다(bs 공식·citi 2차) — 요청·DB·Redis 없음.
+
+    사건마다 `on_event(kind, **facts)` 를 그 자리에서 부른다: `selector_miss` / `parse_error`(건너뜀) / `observed` / 끝에
+    `loop_completed`. 그 밖의 예외는 그대로 전파한다.
+    """
+    current_rates = {}
+    for pair, selector in selectors.items():
+        rate_element = soup.select_one(selector)
+        if not rate_element:
+            on_event("selector_miss", pair=pair, selector=selector)
+            continue
+
+        rate_text = rate_element.get_text(strip=True)
+        try:
+            current_rate = parse_rate_text(rate_text)
+            current_rates[pair] = current_rate
+        except ValueError:
+            on_event("parse_error", pair=pair, selector=selector, rate_text=rate_text)
+            continue
+        on_event("observed", pair=pair, selector=selector, rate_text=rate_text, rate=current_rate,
+                 element=rate_element)
+
+    on_event("loop_completed")
     return current_rates
 
 

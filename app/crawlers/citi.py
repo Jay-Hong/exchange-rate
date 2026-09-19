@@ -25,6 +25,8 @@ from app.crawlers.utils import (
     is_mibank_rate_reliable,
     parse_rate_text,
     validate_rate_ranges,
+    extract_selector_rates,
+    selector_routine_events,
 )
 
 BANK_NAME = 'citi'
@@ -176,55 +178,81 @@ def _crawl_and_save_citi(report):
         db.close()
 
 
+def _citi_first_routine_events(observer):
+    """`extract_citi_items` 사건 → 기존 1차 루틴의 경고 로그와 보고 관측자 호출(문구·extra·순서 그대로).
+
+    ⛔ 파싱 실패 문자열을 로그에 남기는 것은 운영 루틴의 기존 동작이다 — fixture 캡처 도구는 이 함수를 쓰지 않는다.
+    """
+    def on_event(kind, **facts):
+        order = facts.get("order")
+        if kind == "item_miss":
+            logger.warning(f"⚠️ SELECTOR 오류: {order}", extra={"order": order, "selector": facts["selector"], "bank": BANK_NAME})
+            if observer is not None:
+                observer.item_missed(order, "selector_miss", selector=facts["selector"])
+        elif kind == "selector_miss":
+            logger.warning(f"⚠️ SELECTOR 오류: {order}", extra={"order": order, "selector": facts["selector"], "bank": BANK_NAME})
+            if observer is not None:
+                observer.missed(facts["pair"], "selector_miss", item_key=order, selector=facts["selector"])
+        elif kind == "parse_error":
+            logger.warning(f"⚠️ 유효하지 않은 환율: {order}", extra={"order": order, "rate_text": facts["rate_text"], "bank": BANK_NAME})
+            if observer is not None:
+                observer.missed(facts["pair"], "parse_error", item_key=order, rate_text=facts["rate_text"])
+        elif kind == "observed":
+            if observer is not None:
+                observer.observed(facts["pair"], rate_text=facts["rate_text"], rate=facts["rate"],
+                                  selector=facts["selector"], element=facts["element"], item_key=order,
+                                  item=facts["item"], matched_code=facts["matched_code"])
+        elif kind == "loop_completed":
+            if observer is not None:
+                observer.loop_completed()
+    return on_event
+
+
+def extract_citi_items(soup, selectors, on_event) -> dict:
+    """1차 페이지(soup)의 순서별 항목에서 통화 문자열로 귀속해 값을 뽑는다 — 요청·DB·Redis 없음.
+
+    한 항목에 여러 통화 문자열이 있으면 각 통화에 같은 값 요소를 귀속하고, 뒤 항목이 같은 통화를 덮어쓴다(기존과 같다).
+    사건마다 `on_event(kind, **facts)` 를 그 자리에서 부른다: `item_miss` / `selector_miss`(항목 안 값 요소) /
+    `parse_error`(건너뜀) / `observed` / 끝에 `loop_completed`.
+    """
+    current_rates = {}
+    for order, selector in selectors.items():
+        item = soup.select_one(selector)    # 미국(USD)1,393.50하락-5.95
+        if not item:
+            on_event("item_miss", order=order, selector=selector)
+            continue
+
+        for index, currency in enumerate(CURRENCY_TEXTS):   # 환율찾아 매칭 'USD', 'JPY', 'EUR'
+            if currency in item.get_text():  # 문자열 검색 - 'item.get_text()`가 currency를 포함하는지
+                rate_selector = f"{selector}{AFTER_CITI_BANK_SELECTORS}"
+                rate_element = item.select_one(AFTER_CITI_BANK_SELECTORS)   # 1,393.50  ⬅ 환율만 가져오기
+                if not rate_element:
+                    on_event("selector_miss", order=order, pair=PAIRS[index], selector=rate_selector)
+                    continue
+                rate_text = rate_element.get_text(strip=True)
+                try:
+                    current_rate = parse_rate_text(rate_text)
+                    current_rates[PAIRS[index]] = current_rate
+                except ValueError:
+                    on_event("parse_error", order=order, pair=PAIRS[index], rate_text=rate_text)
+                    continue
+                on_event("observed", order=order, pair=PAIRS[index], rate_text=rate_text, rate=current_rate,
+                         selector=rate_selector, element=rate_element, item=item, matched_code=currency)
+
+    on_event("loop_completed")
+    return current_rates
+
+
 def crawl_and_save_citi_first_routine(url: str, selectors: dict, db: Session, observer=None) -> int:
     """시티은행 첫번째 크롤링 루틴 (변경 개수 반환)
 
     `observer` 는 보고 전용 — 실제로 매칭된 항목(`order`)·통화 코드·값 요소를 그대로 넘긴다.
     """
-    current_rates = {}
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        for order, selector in selectors.items():
-            item = soup.select_one(selector)    # 미국(USD)1,393.50하락-5.95
-
-            if not item:
-                logger.warning(f"⚠️ SELECTOR 오류: {order}", extra={"order": order, "selector": selector, "bank": BANK_NAME})
-                if observer is not None:
-                    observer.item_missed(order, "selector_miss", selector=selector)
-                continue
-
-            for index, currency in enumerate(CURRENCY_TEXTS):   # 환율찾아 매칭 'USD', 'JPY', 'EUR'
-                if currency in item.get_text(): # 문자열 검색 - 'item.get_text()`가 curency를 포함하는지
-                    rate_element = item.select_one(AFTER_CITI_BANK_SELECTORS)   # 1,393.50  ⬅ 환율만 가져오기
-                    if not rate_element:
-                        logger.warning(f"⚠️ SELECTOR 오류: {order}", extra={"order": order, "selector": f"{selector}{AFTER_CITI_BANK_SELECTORS}", "bank": BANK_NAME})
-                        if observer is not None:
-                            observer.missed(PAIRS[index], "selector_miss", item_key=order,
-                                            selector=f"{selector}{AFTER_CITI_BANK_SELECTORS}")
-                        continue
-                    rate_text = rate_element.get_text(strip=True)
-
-                    try:
-                        current_rate = parse_rate_text(rate_text)
-                        current_rates[PAIRS[index]] = current_rate
-                    except ValueError:
-                        logger.warning(f"⚠️ 유효하지 않은 환율: {order}", extra={"order": order, "rate_text": rate_text, "bank": BANK_NAME})
-                        if observer is not None:
-                            observer.missed(PAIRS[index], "parse_error", item_key=order,
-                                            rate_text=rate_text)
-                        continue
-
-                    if observer is not None:
-                        observer.observed(PAIRS[index], rate_text=rate_text, rate=current_rate,
-                                          selector=f"{selector}{AFTER_CITI_BANK_SELECTORS}",
-                                          element=rate_element, item_key=order, item=item,
-                                          matched_code=currency)
-
-        if observer is not None:
-            observer.loop_completed()
+        current_rates = extract_citi_items(soup, selectors, _citi_first_routine_events(observer))
 
     except Exception as e:
         logger.exception("⚠️ URL 오류", extra={"url": url, "bank": BANK_NAME})
@@ -245,38 +273,12 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, observer=None
 
     `observer` 는 보고 전용(`bank_report.PathObserver`) — 실제 추출에 쓴 요소·값만 넘긴다.
     """
-    current_rates = {}
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        for pair, selector in selectors.items():
-            rate_element = soup.select_one(selector)
-
-            if not rate_element:
-                logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
-                if observer is not None:
-                    observer.missed(pair, "selector_miss", selector=selector)
-                continue
-
-            rate_text = rate_element.get_text(strip=True)
-
-            try:
-                current_rate = parse_rate_text(rate_text)
-                current_rates[pair] = current_rate
-            except ValueError:
-                logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
-                if observer is not None:
-                    observer.missed(pair, "parse_error", selector=selector, rate_text=rate_text)
-                continue
-
-            if observer is not None:
-                observer.observed(pair, rate_text=rate_text, rate=current_rate,
-                                  selector=selector, element=rate_element)
-
-        if observer is not None:
-            observer.loop_completed()
+        current_rates = extract_selector_rates(
+            soup, selectors, selector_routine_events(logger, BANK_NAME, observer))
 
     except Exception as e:
         logger.exception("⚠️ URL 오류", extra={"url": url, "bank": BANK_NAME})

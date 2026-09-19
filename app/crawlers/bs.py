@@ -23,8 +23,9 @@ from app.crawlers.utils import (
     crawl_mibank_rates,
     evaluate_rate_deviation,
     is_mibank_rate_reliable,
-    parse_rate_text,
     validate_rate_ranges,
+    extract_selector_rates,
+    selector_routine_events,
 )
 
 BANK_NAME = 'bs'
@@ -163,38 +164,12 @@ def crawl_and_save_routine(url: str, selectors: dict, db: Session, observer=None
 
     `observer` 는 보고 전용(`bank_report.PathObserver`) — 실제 추출에 쓴 요소·값만 넘긴다.
     """
-    current_rates = {}
     try:
         response = requests.get(url, headers=HEADERS, timeout=DEFAULT_TIMEOUT)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
-
-        for pair, selector in selectors.items():
-            rate_element = soup.select_one(selector)
-
-            if not rate_element:
-                logger.warning(f"⚠️ SELECTOR 오류: {pair}", extra={"pair": pair, "selector": selector, "bank": BANK_NAME})
-                if observer is not None:
-                    observer.missed(pair, "selector_miss", selector=selector)
-                continue
-
-            rate_text = rate_element.get_text(strip=True)
-
-            try:
-                current_rate = parse_rate_text(rate_text)
-                current_rates[pair] = current_rate
-            except ValueError:
-                logger.warning(f"⚠️ 유효하지 않은 환율: {pair}", extra={"pair": pair, "rate_text": rate_text, "bank": BANK_NAME})
-                if observer is not None:
-                    observer.missed(pair, "parse_error", selector=selector, rate_text=rate_text)
-                continue
-
-            if observer is not None:
-                observer.observed(pair, rate_text=rate_text, rate=current_rate,
-                                  selector=selector, element=rate_element)
-
-        if observer is not None:
-            observer.loop_completed()
+        current_rates = extract_selector_rates(
+            soup, selectors, selector_routine_events(logger, BANK_NAME, observer))
 
     except Exception as e:
         logger.exception("⚠️ URL 오류", extra={"url": url, "bank": BANK_NAME})

@@ -104,6 +104,10 @@
   넘기지 않아 기록 없음). 범위 검사·편차·채택·writer 호출은 호출 지점에서 기록한다. 폴백 순서·총실패를 삼키는 기존
   동작·MIBANK 반환/예외·writer 입력·반환·DB 쓰기는 그대로다.
   판정 의미는 [SOURCE_HEALTH_PLAN.md](SOURCE_HEALTH_PLAN.md) §7.12 를 따른다.
+- **추출 경계(C1a)**: 받은 HTML 에서 값만 뽑는 순수 함수 — `utils.extract_selector_rates`(부산 공식·씨티 2차),
+  `citi.extract_citi_items`(씨티 1차), `utils.extract_mibank_rates`(공유 MIBANK). 요청·DB 없이 사건마다 호출자 콜백을 그 자리에서 부르며,
+  운영 루틴 콜백이 기존 경고 로그·보고 관측자 호출을 그대로 남긴다. fixture 캡처 도구가 같은 함수를 자기 콜백으로 쓴다
+  ([SOURCE_HEALTH_PLAN.md](SOURCE_HEALTH_PLAN.md) §7.14). `crawl_mibank_rates` 의 서명·반환·예외는 그대로다.
 
 **mibank 사용 패턴:**
 - **조건부 사용 (BS, CITI)**: `is_mibank_rate_reliable()` 함수로 시간대 체크 (평일 10:00~23:59만 허용)
