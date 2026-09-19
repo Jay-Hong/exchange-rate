@@ -551,7 +551,23 @@ MIBANK 디버그 로그와 필수 통화 검사(루프 완료 → 디버그 로�
 경계** — 로그 로거·수준·문구·extra·예외 정보, 관측자 호출·인자, 예외, 요청·writer·DB 조회 인자)가 현재 코드와 같다
 (`tests/test_crawler_extraction_characterization.py`). ⚠️ 경고 로그를 찍는 위치가 콜백으로 옮겨져 운영 JSON 로그의 `function`·`line`
 필드는 달라진다(이 필드로 bs·citi 경고를 거르거나 세는 코드는 없다).
-다음: C1b(도구 — 변환·왕복 검사·탐지기·조회 기록기·요청 제한) → C1c(캡처·검토·커밋) → C1d(의미 시험).
+**C1b — 캡처 도구(코드, 운영 이미지 밖)**: `tools/fixture_capture/`(Dockerfile 은 `tools/` 를 복사하지 않는다). 실행은 개발 머신에서
+`python3 -m tools.fixture_capture.capture --route <bs_official|citi_primary|citi_secondary|bs_mibank|citi_mibank|all> --output <Git checkout 밖>`
+이고, 통과한 경로만 `<route>-<capture_id>/fixture.html`·`metadata.json` 쌍으로 쓴다(재시도·대체 요청 없음, 경로마다 요청 1회).
+- 등록부는 코드 상수 선택자를 지원 문법으로 파싱해 허용 id·class 토큰과 허용 조회(메서드·인자·`recursive`)를 도출한다. 조회 기록기가
+  추출·라벨 수집 중 bs4 조회를 가로채 등록부 밖이면 위반을 남기고(라벨 수집이 예외를 삼켜도) 최종 거부한다.
+- 왕복 검사는 원본 soup 과 "비식별 HTML 직렬화 → 같은 파서 재파싱" soup 에 같은 추출 함수를 돌려 사건(라벨 포함, 스니펫 절단 없음)·조회
+  경로·반환값·예외(종류·인자·크롤러 파일 안 발생 위치)를 비교한다. 예외도 양쪽이 같으면 fixture 가 될 수 있다 — 합격은 유효 환율의 보증이 아니다.
+- 요청기: 응답 훅이 3xx 를 본문 소비 전에 거부한다(`requests` 는 `allow_redirects=False` 여도 리다이렉트 준비 중 본문을 읽는다). gzip·deflate 만
+  압축 해제 호출마다 출력 상한을 걸어 푼다 — br·복합 인코딩은 출력 상한을 거는 이식 가능한 API 가 없어 **본문을 읽기 전에 거부**한다(공유
+  `HEADERS` 는 br 을 광고하므로 서버가 br 로 답하면 그 경로 캡처는 실패한다). 디코딩은 `requests` 의 `.text` 에 맡겨 운영과 같게 하고,
+  `original_body_sha256` 은 압축 해제 뒤 바이트의 해시다. 시간 상한은 SIGALRM 이라 **POSIX 메인 스레드에서만** 돈다.
+- 로깅 경계: `app` 을 import 하면 로그 디렉터리와 두 파일이 생긴다(끌 수 없음, 응답이 오기 전이다). 도구는 import 직후 루트 핸들러를 떼어
+  닫고, 캡처 동안 로깅을 끄고 stdout·stderr 를 버리며, 원문 없는 JSON 요약만 stdout 에 쓴다.
+- 탐지기는 페이지·응답 유래 문자열에 식별자 의심 규칙을 적용하고 코드 유래 필드는 필드별 형식·출처로 검증한다(`capture_id` 는 정규형 uuid4 —
+  uuid1 은 호스트 MAC 을 담아 거부). 미커밋 추출 소스가 있으면 provenance 가 거짓이 되므로 거부한다.
+- 시험: 합성 입력만(네트워크 차단) 188건. Claude 재검증 변이 55종 — 1회차 8종 생존(시험 빈틈 7·명세 시점 1) → 보강 뒤 2회차 전멸.
+다음: C1c(개발 머신 캡처 → 사용자 검토 → 두 에이전트 exact 승인 커밋) → C1d(의미 시험).
 
 ## 열린 결정 (미해결)
 
