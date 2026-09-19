@@ -525,5 +525,133 @@ class TestPolicyBoundary(unittest.TestCase):
         self.assertIsNone(sched._policy_boundary(CONTROL_RUN_TIME, "IN"))
 
 
+
+class TestToggleSerialization(unittest.TestCase):
+    """관리자 토글과 정기 전환이 겹칠 때(ADR-044 후속 — 토글 직렬화).
+
+    정기 전환은 `switch_jobs(new)` 가 끝난 **뒤에** `current_mode` 를 바꾼다. 그 사이 토글이 옛 `current_mode` 를 읽어 옛 모드로
+    재등록하면, 전환이 끝난 뒤 `current_mode` 는 새 모드인데 job 은 옛 모드가 섞여 남고 다음 경계까지 바로잡히지 않는다.
+    토글은 진행 중인 전환이 끝난 뒤 **그때의 모드**로, 본문이 서로 끼어들지 않게 재등록해야 한다.
+    """
+
+    def setUp(self):
+        saved_mode, saved_cache = sched.current_mode, dict(sched.crawler_manager.config_cache)
+        self.addCleanup(setattr, sched, "current_mode", saved_mode)
+        self.addCleanup(setattr, sched.crawler_manager, "config_cache", saved_cache)
+        self.addCleanup(setattr, sched._switch_local, "record", None)
+        for name in ("SessionLocal", "crud"):
+            patcher = patch.object(sched, name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_toggle_during_scheduled_transition_waits_and_uses_new_mode(self):
+        entered, release, second_start = threading.Event(), threading.Event(), threading.Event()
+        calls, errors = [], []
+
+        def fake_body(mode):
+            calls.append(("start", mode))
+            if len(calls) == 1:          # 정기 전환의 본문 — 토글이 끼어들 틈을 만든다
+                entered.set()
+                if not release.wait(GATE_TIMEOUT_S):
+                    raise TimeoutError("release 가 오지 않았다")
+            else:
+                second_start.set()
+            calls.append(("end", mode))
+
+        def run(target):
+            try:
+                target()
+            except BaseException as exc:   # 시험 스레드의 예외를 본 스레드로 넘긴다
+                errors.append(exc)
+
+        sched.current_mode = "BREAK1"
+        with patch.object(sched, "_switch_jobs_body", side_effect=fake_body), \
+                patch.object(sched, "datetime", _fixed_now(CONTROL_RUN_TIME)):
+            control = threading.Thread(target=run, args=(sched.control_job,))
+            control.start()
+            self.assertTrue(entered.wait(GATE_TIMEOUT_S), "정기 전환이 본문에 들어가야 한다")
+            toggle = threading.Thread(target=run, args=(lambda: sched.crawler_manager.toggle_crawler("kb", True),))
+            toggle.start()
+            # 직렬화되어 있으면 토글 본문은 정기 전환이 끝날 때까지 시작하지 못한다.
+            interleaved = second_start.wait(0.5)
+            release.set()
+            control.join(GATE_TIMEOUT_S)
+            toggle.join(GATE_TIMEOUT_S)
+        self.assertFalse(control.is_alive() or toggle.is_alive())
+        self.assertEqual(errors, [])
+        self.assertFalse(interleaved, "토글 본문이 진행 중인 정기 전환 안에 끼어들었다")
+        self.assertEqual(calls, [("start", "BREAK2"), ("end", "BREAK2"), ("start", "BREAK2"), ("end", "BREAK2")])
+        self.assertEqual(sched.current_mode, "BREAK2")
+
+    def test_toggle_without_transition_reapplies_current_mode(self):
+        sched.current_mode = "IN"
+        with patch.object(sched, "switch_jobs") as switch:
+            sched.crawler_manager.toggle_crawler("kb", False)
+        switch.assert_called_once_with("IN", cause="admin_toggle")
+        self.assertIs(sched.crawler_manager.config_cache["kb"], False)
+
+    def test_toggle_before_first_mode_only_updates_config(self):
+        # 시작 전환 전(`current_mode` 없음)에는 설정만 바꾸고 재등록하지 않는다 — 첫 전환이 새 설정으로 등록한다.
+        sched.current_mode = None
+        with patch.object(sched, "switch_jobs") as switch:
+            sched.crawler_manager.toggle_crawler("kb", False)
+        switch.assert_not_called()
+        self.assertIs(sched.crawler_manager.config_cache["kb"], False)
+
+    def test_scheduled_transition_updates_mode_before_releasing_lock(self):
+        # 잠금이 풀리는 순간 이미 새 모드여야 한다. 풀린 뒤에 갱신하면 기다리던 토글이 그 틈에 옛 모드를 읽는다 —
+        # 스레드 경합으로는 그 틈을 결정적으로 재현할 수 없어 잠금 해제 시점의 `current_mode` 를 직접 기록한다.
+        inner, released = threading.RLock(), []
+
+        class RecordingLock:
+            def __enter__(self):
+                inner.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                released.append(sched.current_mode)
+                inner.release()
+                return False
+
+        sched.current_mode = "BREAK1"
+        with patch.object(sched, "_mode_switch_lock", RecordingLock()), \
+                patch.object(sched, "switch_jobs") as switch, \
+                patch.object(sched, "datetime", _fixed_now(CONTROL_RUN_TIME)):
+            sched.control_job()
+        switch.assert_called_once()
+        self.assertEqual(switch.call_args.args, ("BREAK2",))
+        self.assertEqual(released, ["BREAK2"])
+
+    def test_mode_is_decided_after_waiting_for_the_lock(self):
+        # 잠금을 기다리는 사이 경계를 넘으면 기다린 **뒤의** 시각으로 모드를 정해야 한다. 대기 전 시각으로 정하면
+        # 옛 모드에 머물고, 그 사이 경계 직후의 정기 실행은 max_instances=1 로 건너뛰어져 다음 분까지 전환이 늦는다.
+        clock = {"now": CONTROL_RUN_TIME - timedelta(minutes=1)}       # 금 05:59:01 — 아직 BREAK1
+        inner = threading.RLock()
+
+        class WaitingLock:
+            def __enter__(self):
+                clock["now"] = CONTROL_RUN_TIME + timedelta(seconds=1)  # 대기하는 동안 06:00 경계를 넘었다
+                inner.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                inner.release()
+                return False
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock["now"] if tz is None else clock["now"].astimezone(tz)
+
+        sched.current_mode = "BREAK1"
+        with patch.object(sched, "_mode_switch_lock", WaitingLock()), \
+                patch.object(sched, "switch_jobs") as switch, \
+                patch.object(sched, "datetime", Clock):
+            sched.control_job()
+        switch.assert_called_once()
+        self.assertEqual(switch.call_args.args, ("BREAK2",))
+        self.assertEqual(sched.current_mode, "BREAK2")
+
+
 if __name__ == "__main__":
     unittest.main()

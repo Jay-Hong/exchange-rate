@@ -187,6 +187,10 @@ queue_status_cache = {
 
 # 현재 모드 상태 저장
 current_mode = None
+# 정기 전환(`control_job`)과 관리자 토글이 `current_mode` 읽기부터 job 재등록·`current_mode` 갱신까지를 겹치지 않게 한다.
+# 없으면 전환 본문 도중 토글이 옛 `current_mode` 로 재등록해, 전환이 끝난 뒤 `current_mode` 는 새 모드인데 job 은 옛 모드가
+# 섞인 채 다음 경계까지 남는다(ADR-044 후속 — 토글 직렬화). 정기 전환은 실행기 스레드, 토글은 이벤트 루프 스레드에서 온다.
+_mode_switch_lock = threading.RLock()
 
 
 # ═════════════════════════════════════════════════════════════
@@ -280,16 +284,18 @@ class CrawlerManager:
         self.config_cache[crawler_name] = enabled
 
         # 3. switch_jobs() 재실행 (현재 모드 유지)
-        # ⚠️ 정기 제어와 직렬화되지 않는다 — 전환과 동시에 토글되면 경합할 수 있다(미해결).
-        #    호출별 switch_id 로 기록이 섞이지 않게만 한다.
-        global current_mode
-        if current_mode:
-            switch_jobs(current_mode, cause="admin_toggle")
+        # 정기 전환과 `_mode_switch_lock` 으로 직렬화한다 — 진행 중인 전환이 끝나 `current_mode` 가 갱신된 뒤 그 모드로
+        # 재등록한다. 설정 반영은 잠금 밖에서 끝났으므로, 잠금을 기다린 뒤의 재등록이 최신 설정을 쓴다.
+        with _mode_switch_lock:
+            mode = current_mode
+            if mode:
+                switch_jobs(mode, cause="admin_toggle")
 
+        if mode:
             action = "활성화" if enabled else "비활성화"
             logger.info(
-                f"✅ 크롤러 토글 완료: {crawler_name} → {action} (현재 모드: {current_mode})",
-                extra={"crawler": crawler_name, "enabled": enabled, "mode": current_mode}
+                f"✅ 크롤러 토글 완료: {crawler_name} → {action} (현재 모드: {mode})",
+                extra={"crawler": crawler_name, "enabled": enabled, "mode": mode}
             )
 
 
@@ -1335,7 +1341,7 @@ def _switch_jobs_body(mode: str):
 # ⛔ job 별 제거·등록은 본문의 실제 호출(_record_add_job / _record_remove_job)이 **호출한
 #    스레드의** 기록에 적는다. 전역 스냅샷의 차이로 대신하지 않는다 — 같은 ID·같은 트리거로
 #    다시 넣으면 차이가 0 이고, 겹친 다른 호출의 변경이 섞인다. 전후 스냅샷은 보조 자료다.
-# ⛔ 정기 제어와 관리자 토글은 직렬화되지 않는다(미해결). 기록의 결속만 호출별로 나눈다.
+# ⛔ 정기 제어와 관리자 토글은 `_mode_switch_lock` 으로 직렬화한다(ADR-044 후속). 기록 결속은 여전히 호출별이다.
 # ⛔ 기록 실패는 전환을 막지 않고, 본문 예외를 삼키지도 않는다.
 
 # OUT(토 07:00 ~ 월 06:00)이 가장 긴 모드로 47시간이다. 그보다 넉넉히 둔다.
@@ -1344,7 +1350,7 @@ _MODE_BOUNDARY_LOOKBACK_HOURS = 72
 # 모드 전환 job 의 misfire 정책. 시험이 같은 값을 쓰도록 모듈 상수로 둔다.
 # 30초는 **늦은 모드 복구를 허용하는 정책**이다 — 첫 슬롯 보장값이 아니며, 이미 지나간
 # 슬롯을 복원하지도 않는다. max_instances=1 은 control_job 끼리의 겹침만 막는다 —
-# 관리자 토글의 직접 호출까지 직렬화하지는 않는다.
+# 관리자 토글과의 겹침은 `_mode_switch_lock` 이 막는다(control_job·toggle_crawler 가 함께 잡는다).
 CONTROL_JOB_OPTIONS = {"misfire_grace_time": 30, "coalesce": True, "max_instances": 1}
 
 
@@ -1526,20 +1532,22 @@ def control_job(cause: str = "scheduled_control"):
     APScheduler 는 인자 없이 부르므로 기본값이 정기 제어다. 시작 경로는 `cause="startup"`.
     """
     global current_mode
-    now = datetime.now(KST)
-    new_mode = get_market_mode(now)
+    # 관리자 토글과 직렬화한다(`_mode_switch_lock`) — 비교·재등록·`current_mode` 갱신이 한 덩어리여야 한다.
+    with _mode_switch_lock:
+        now = datetime.now(KST)
+        new_mode = get_market_mode(now)
 
-    if new_mode != current_mode:
-        # 경계 대비 지연은 정기 제어에서만 뜻이 있다. 시작 시에는 과거 운영 모드의
-        # 지속 시간을 추정하지 않는다.
-        boundary = None
-        if cause == "scheduled_control":
-            try:
-                boundary = _policy_boundary(now, new_mode)
-            except Exception:
-                boundary = None   # 관측 실패가 전환을 막으면 안 된다
-        switch_jobs(new_mode, cause=cause, policy_boundary=boundary)
-        current_mode = new_mode
+        if new_mode != current_mode:
+            # 경계 대비 지연은 정기 제어에서만 뜻이 있다. 시작 시에는 과거 운영 모드의
+            # 지속 시간을 추정하지 않는다.
+            boundary = None
+            if cause == "scheduled_control":
+                try:
+                    boundary = _policy_boundary(now, new_mode)
+                except Exception:
+                    boundary = None   # 관측 실패가 전환을 막으면 안 된다
+            switch_jobs(new_mode, cause=cause, policy_boundary=boundary)
+            current_mode = new_mode
 
 def cleanup_old_bank_data():
     """30일 이상 지난 은행 환율 데이터 삭제"""
