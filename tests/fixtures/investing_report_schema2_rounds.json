@@ -1,0 +1,368 @@
+{
+ "producer": {
+  "blob": "bcac4a73be54142ff8381ce8683607223b1f81de",
+  "commit": "3e677159e18b8b9a4f97f8df3c828d58151bf379",
+  "path": "app/crawlers/investing_report.py"
+ },
+ "rounds": {
+  "compact": [
+   {
+    "attempt_id": null,
+    "event": "investing_round_started",
+    "format": "lifecycle",
+    "round_id": "fixture-compact",
+    "schema_version": 2,
+    "source": "investing"
+   },
+   {
+    "attempt_id": 1,
+    "event": "investing_fx_evidence",
+    "execution": {
+     "reason": "round_started",
+     "status": "running"
+    },
+    "final_db": "not_checked",
+    "format": "compact",
+    "fx_attempt_id": 1,
+    "outcome": "all_valid",
+    "rates": {
+     "eur-krw": 1500.0,
+     "jpy-krw": 900.0,
+     "usd-krw": 1350.0
+    },
+    "round_id": "fixture-compact",
+    "schema_version": 2,
+    "session": "open",
+    "source": "investing",
+    "writer_returned_count": 0,
+    "writing": "per_currency_write_unverified"
+   },
+   {
+    "attempt_id": null,
+    "event": "investing_round_finished",
+    "execution": {
+     "exception_propagated": false,
+     "reason": "returned",
+     "status": "normal"
+    },
+    "final_db": "not_checked",
+    "format": "compact",
+    "fx_attempt_id": 1,
+    "outcome": "all_valid",
+    "rates": {
+     "eur-krw": 1500.0,
+     "jpy-krw": 900.0,
+     "usd-krw": 1350.0
+    },
+    "round_id": "fixture-compact",
+    "schema_version": 2,
+    "session": "closed",
+    "source": "investing",
+    "writer_returned_count": 0,
+    "writing": "per_currency_write_unverified"
+   }
+  ],
+  "cooldown": [
+   {
+    "attempt_id": null,
+    "event": "investing_round_started",
+    "format": "lifecycle",
+    "round_id": "fixture-cooldown",
+    "schema_version": 2,
+    "source": "investing"
+   },
+   {
+    "attempt_id": null,
+    "attempts": [
+     {
+      "attempt_id": 1,
+      "collection": {
+       "eur-krw": {
+        "reason": "cooldown",
+        "status": "not_attempted"
+       },
+       "jpy-krw": {
+        "reason": "cooldown",
+        "status": "not_attempted"
+       },
+       "usd-krw": {
+        "reason": "cooldown",
+        "status": "not_attempted"
+       }
+      },
+      "execution": {
+       "reason": "not_started",
+       "status": "not_attempted"
+      },
+      "reason": "cooldown",
+      "status": "policy_skipped",
+      "writer": {
+       "called": false,
+       "error_type": null,
+       "input_pairs": [],
+       "returned_count": null
+      }
+     },
+     {
+      "attempt_id": 2,
+      "collection": {
+       "eur-krw": {
+        "reason": "cooldown",
+        "status": "not_attempted"
+       },
+       "jpy-krw": {
+        "reason": "cooldown",
+        "status": "not_attempted"
+       },
+       "usd-krw": {
+        "reason": "cooldown",
+        "status": "not_attempted"
+       }
+      },
+      "execution": {
+       "reason": "not_started",
+       "status": "not_attempted"
+      },
+      "reason": "cooldown",
+      "status": "policy_skipped",
+      "writer": {
+       "called": false,
+       "error_type": null,
+       "input_pairs": [],
+       "returned_count": null
+      }
+     }
+    ],
+    "collection_attempts": {
+     "eur-krw": 2,
+     "jpy-krw": 2,
+     "usd-krw": 2
+    },
+    "event": "investing_round_finished",
+    "execution": {
+     "exception_propagated": false,
+     "reason": "cooldown",
+     "status": "normal"
+    },
+    "final_db": "not_checked",
+    "format": "detail",
+    "round_id": "fixture-cooldown",
+    "schema_version": 2,
+    "session": "closed",
+    "source": "investing",
+    "telemetry_errors": [],
+    "writing": {
+     "eur-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     },
+     "jpy-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     },
+     "usd-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     }
+    }
+   }
+  ],
+  "d9_missing_then_timeout": [
+   {
+    "attempt_id": null,
+    "event": "investing_round_started",
+    "format": "lifecycle",
+    "round_id": "fixture-d9_missing_then_timeout",
+    "schema_version": 2,
+    "source": "investing"
+   },
+   {
+    "attempt_id": 1,
+    "attempts": [
+     {
+      "attempt_id": 1,
+      "collection": {
+       "eur-krw": {
+        "reason": "selector_missing",
+        "status": "missing"
+       },
+       "jpy-krw": {
+        "reason": "selector_missing",
+        "status": "missing"
+       },
+       "usd-krw": {
+        "normalized_rate": 1350.0,
+        "reason": "validated",
+        "status": "valid"
+       }
+      },
+      "execution": {
+       "reason": "attempt_started",
+       "status": "running"
+      },
+      "reason": "started",
+      "status": "attempted",
+      "writer": {
+       "called": true,
+       "error_type": null,
+       "input_pairs": [
+        "usd-krw"
+       ],
+       "returned_count": 0
+      }
+     },
+     {
+      "attempt_id": 2,
+      "reason": "not_started",
+      "status": "not_reached"
+     }
+    ],
+    "collection_attempts": {
+     "eur-krw": 1,
+     "jpy-krw": 1,
+     "usd-krw": 1
+    },
+    "event": "investing_fx_evidence",
+    "execution": {
+     "reason": "round_started",
+     "status": "running"
+    },
+    "final_db": "not_checked",
+    "format": "detail",
+    "round_id": "fixture-d9_missing_then_timeout",
+    "schema_version": 2,
+    "session": "open",
+    "source": "investing",
+    "telemetry_errors": [],
+    "writing": {
+     "eur-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     },
+     "jpy-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     },
+     "usd-krw": {
+      "attempt_ids": [
+       1
+      ],
+      "reason": "per_currency_write_unverified",
+      "status": "unknown"
+     }
+    }
+   },
+   {
+    "attempt_id": null,
+    "attempts": [
+     {
+      "attempt_id": 1,
+      "collection": {
+       "eur-krw": {
+        "reason": "selector_missing",
+        "status": "missing"
+       },
+       "jpy-krw": {
+        "reason": "selector_missing",
+        "status": "missing"
+       },
+       "usd-krw": {
+        "normalized_rate": 1350.0,
+        "reason": "validated",
+        "status": "valid"
+       }
+      },
+      "execution": {
+       "error_type": "RuntimeError",
+       "reason": "exception",
+       "status": "abnormal"
+      },
+      "reason": "exception",
+      "status": "failed",
+      "writer": {
+       "called": true,
+       "error_type": null,
+       "input_pairs": [
+        "usd-krw"
+       ],
+       "returned_count": 0
+      }
+     },
+     {
+      "attempt_id": 2,
+      "collection": {
+       "eur-krw": {
+        "reason": "not_observed",
+        "status": "unknown"
+       },
+       "jpy-krw": {
+        "reason": "not_observed",
+        "status": "unknown"
+       },
+       "usd-krw": {
+        "reason": "not_observed",
+        "status": "unknown"
+       }
+      },
+      "execution": {
+       "error_type": "TimeoutError",
+       "reason": "timeout",
+       "status": "timeout"
+      },
+      "reason": "exception",
+      "status": "failed",
+      "writer": {
+       "called": false,
+       "error_type": null,
+       "input_pairs": [],
+       "returned_count": null
+      }
+     }
+    ],
+    "collection_attempts": {
+     "eur-krw": 1,
+     "jpy-krw": 1,
+     "usd-krw": 1
+    },
+    "event": "investing_round_finished",
+    "execution": {
+     "error_type": "TimeoutError",
+     "exception_propagated": false,
+     "reason": "timeout",
+     "status": "timeout"
+    },
+    "final_db": "not_checked",
+    "format": "detail",
+    "round_id": "fixture-d9_missing_then_timeout",
+    "schema_version": 2,
+    "session": "closed",
+    "source": "investing",
+    "telemetry_errors": [],
+    "writing": {
+     "eur-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     },
+     "jpy-krw": {
+      "attempt_ids": [],
+      "reason": "not_submitted_to_writer",
+      "status": "not_attempted"
+     },
+     "usd-krw": {
+      "attempt_ids": [
+       1
+      ],
+      "reason": "per_currency_write_unverified",
+      "status": "unknown"
+     }
+    }
+   }
+  ]
+ }
+}

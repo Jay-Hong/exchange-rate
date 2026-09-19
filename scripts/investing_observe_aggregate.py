@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and aggregate archived Investing v2 events, without inferring DB writes."""
+"""Validate and aggregate archived Investing events (schema 2 and 3), without inferring DB writes."""
 
 import argparse
 from collections import Counter, defaultdict
@@ -21,6 +21,10 @@ FINISH = "investing_round_finished"
 EVENTS = (START, FX, FINISH)
 PAIRS = {"usd-krw", "jpy-krw", "eur-krw"}
 STATES = {"valid", "missing", "unknown", "not_attempted"}
+# schema_version -> judgment contract (SOURCE_HEALTH_PLAN D10). Schema 2 events predate the field and are
+# mapped explicitly; an unknown combination is rejected rather than guessed. Summary-dependent metrics are
+# reported per contract and never summed: /1 picks missing before unknown, /2 picks unknown before missing.
+CONTRACTS = {2: "investing_range_checked/1", 3: "investing_range_checked/2"}
 
 
 def require(condition, message):
@@ -54,8 +58,12 @@ def validate_record(record):
     require(string(record.get("container_id")), "container_id missing")
     event = record.get("event")
     require(isinstance(event, dict), "event must be an object")
-    require(type(event.get("schema_version")) is int and event["schema_version"] == 2,
-            "unsupported schema_version")
+    version = event.get("schema_version")
+    require(type(version) is int and version in CONTRACTS, "unsupported schema_version")
+    if version == 2:
+        require("validity_contract" not in event, "schema 2 must not carry validity_contract")
+    else:
+        require(event.get("validity_contract") == CONTRACTS[version], "unsupported validity_contract")
     require(event.get("source") == "investing", "invalid source")
     require(string(event.get("round_id")), "round_id missing")
     name = event.get("event")
@@ -144,6 +152,10 @@ def validate_record(record):
         ids = writing.get("attempt_ids")
         require(isinstance(ids, list) and all(type(i) is int and i in by_id for i in ids),
                 "invalid writing attempt_ids")
+
+
+def contract(event):
+    return CONTRACTS[event["schema_version"]]
 
 
 def collection(event):
@@ -299,17 +311,23 @@ def summarize(groups, invalid, runs, bad_runs, days):
                 {"event": v["event"], "timestamps": sorted(v["timestamps"])} for v in ordered]})
     by_day = defaultdict(list)
     conflict_days = set()
+    mixed_rounds = 0
     for identity, variants in sorted(rounds.items()):
         starts = [v for v in variants if v["event"]["event"] == START]
         at = min(v["time"] for v in (starts or variants))
         day = at.astimezone(KST).date().isoformat()
+        if len({contract(v["event"]) for v in variants}) > 1:
+            # One process emits one contract per round. A mix has no authoritative meaning.
+            mixed_rounds += 1
+            variants = [{**v, "conflict": True} for v in variants]
         by_day[day].append((identity, variants, bool(starts)))
         if any(v["conflict"] for v in variants):
             conflict_days.add(day)
             conflict_days.update(v["time"].astimezone(KST).date().isoformat() for v in variants)
     result = {}
     for day in days:
-        status, reasons, execution, cross = Counter(), Counter(), Counter(), Counter()
+        status, reasons, cross = defaultdict(Counter), defaultdict(Counter), defaultdict(Counter)
+        execution = Counter()
         attempt_calls, returned, round_calls, telemetry = Counter(), Counter(), Counter(), Counter()
         missing = Counter({"start_only": 0, "finish_only": 0, "fx_only": 0})
         excluded, provisional, finalized = 0, 0, 0
@@ -327,12 +345,14 @@ def summarize(groups, invalid, runs, bad_runs, days):
                 continue
             finalized += 1
             event = finished[0]
+            kind = contract(event)
             observed = collection(event)
-            status.update(item["status"] for item in observed.values())
-            reasons.update(item["reason"] for item in observed.values())
+            status[kind].update(item["status"] for item in observed.values())
+            reasons[kind].update(item["reason"] for item in observed.values())
             ex = event["execution"]
             execution[(ex["status"], ex["reason"], ex["exception_propagated"])] += 1
-            cross[(ex["status"], ex["reason"], sum(o["status"] == "valid" for o in observed.values()))] += 1
+            cross[kind][(ex["status"], ex["reason"],
+                         sum(o["status"] == "valid" for o in observed.values()))] += 1
             if event["format"] == "compact":
                 writers = [{"called": True, "returned_count": event["writer_returned_count"]}]
             else:
@@ -349,21 +369,25 @@ def summarize(groups, invalid, runs, bad_runs, days):
             "finalized_unambiguous_rounds": finalized, "conflicted_rounds_excluded": excluded,
             "provisional_date_rounds": provisional, "lifecycle": dict(missing),
             "format_by_event": {name: dict(formats[(day, name)]) for name in EVENTS},
-            "currency_status": dict(status), "currency_reason": dict(reasons),
+            "by_contract": {kind: {
+                "currency_status": dict(status[kind]), "currency_reason": dict(reasons[kind]),
+                "execution_valid_currencies_rounds": counter_rows(cross[kind], ("status", "reason", "valid")),
+            } for kind in sorted(status)},
             "execution_rounds": counter_rows(execution, ("status", "reason", "exception_propagated")),
-            "execution_valid_currencies_rounds": counter_rows(cross, ("status", "reason", "valid")),
             "writer_called_attempts": dict(attempt_calls),
             "writer_returned_count_attempts": dict(returned),
             "writer_call_count_rounds": dict(round_calls), "telemetry_error_rounds": dict(telemetry),
             "coverage": coverage(day, runs, bad_runs, invalid, day in conflict_days),
             "both_lifecycle_events_absent_rounds": "not_identifiable",
         }
-    return {"schema_version": 1, "timezone": "Asia/Seoul", "days": result,
+    return {"schema_version": 2, "timezone": "Asia/Seoul", "days": result,
+            "contract_mixed_rounds": mixed_rounds,
             "conflict_keys": len(conflicts), "conflict_extra_variants": sum(len(c["variants"]) - 1 for c in conflicts),
             "conflicts": conflicts, "invalid_events": invalid, "invalid_runs": bad_runs,
             "script_sha256": {name: sha256(Path(__file__).with_name(name)) for name in
                               ("investing_observe_extract.py", "investing_observe_aggregate.py")},
-            "metric_scope": "finalized unambiguous rounds; writer returned counts are per attempt, not DB writes"}
+            "metric_scope": "finalized unambiguous rounds; writer returned counts are per attempt, not DB writes; "
+                            "by_contract metrics must not be summed across contracts"}
 
 
 def main(argv=None):

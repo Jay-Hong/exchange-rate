@@ -1,6 +1,7 @@
 """슬라이스 1: 실제 파싱/오케스트레이션 + HTTP/DB 대역, 보고와 실행의 분리."""
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import math
@@ -11,7 +12,7 @@ import pytest
 import requests
 
 from app import scheduler
-from app.crawlers import constants, investing, investing_report
+from app.crawlers import bank_report, constants, investing, investing_report
 from app.logging import CustomJsonFormatter
 
 
@@ -147,7 +148,8 @@ def test_normal_order_and_round_identity(harness):
     assert evidence["format"] == "compact"
     assert evidence["rates"] == report["rates"]
     assert evidence["execution"]["status"] == "running"
-    assert all(event["schema_version"] == 2 for event in h.events())
+    assert all(event["schema_version"] == 3
+               and event["validity_contract"] == "investing_range_checked/2" for event in h.events())
     h.http.assert_called_once()
     assert_unknown_storage(report)
 
@@ -555,6 +557,8 @@ def test_lost_retry_start_preserves_prior_observations(harness, monkeypatch, sec
     expected = ({"status": "unknown", "reason": "telemetry_error"}
                 if second_result == "timeout" else {"status": "missing", "reason": "http_403"})
     assert report["attempts"][1]["collection"] == dict.fromkeys(PAIRS, expected)
+    # 회차 요약: 2차 시작 계측 유실(timeout)은 미확정이라 1차 누락보다 앞서고, 403 은 같은 누락 중 마지막 시도다.
+    assert observed["jpy-krw"] == observed["eur-krw"] == {**expected, "attempt_id": 2}
 
 
 @pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit()])
@@ -673,3 +677,135 @@ def test_scheduler_stats_mapping_remains_legacy(harness, monkeypatch, scenario):
         assert stats.record_success.call_args.args[0] == "investing"
         stats.record_failure.assert_not_called()
     finished(h)
+
+
+# --- D9·D10: 실패한 시도의 미관측 확정 + 회차 요약 순서 (investing_range_checked/2) ---------------------
+
+
+class _Log:
+    def __init__(self):
+        self.events = []
+
+    def info(self, value):
+        self.events.append(json.loads(value))
+
+
+def _report():
+    report = investing_report.InvestingReport(_Log(), PAIRS)
+    report.session_state("open")
+    return report
+
+
+@pytest.mark.parametrize("error, status, reason", [
+    (RuntimeError("parse"), "missing", "attempt_failed"),
+    (TimeoutError("http"), "missing", "attempt_failed"),
+    (requests.exceptions.Timeout("http"), "missing", "attempt_failed"),
+    # future.result() 호출 지점에서 동기로 던져진다 — Exception 계열이라 관측 훅 안에 끼어들지 않는다.
+    (concurrent.futures.CancelledError(), "missing", "attempt_failed"),
+    (asyncio.CancelledError(), "unknown", "attempt_interrupted"),
+    (KeyboardInterrupt(), "unknown", "attempt_interrupted"),
+    (SystemExit(), "unknown", "attempt_interrupted"),
+])
+def test_failed_attempt_settles_only_unobserved_pairs(error, status, reason):
+    report = _report()
+    report.start_attempt(1)
+    report.observation(1, "usd-krw", text="1350", rate=1350.0)
+    report.observation(1, "jpy-krw", reason="selector_missing")
+    report.finish_attempt(1, error)
+    assert report.attempts[1]["collection"] == {
+        "usd-krw": {"status": "valid", "reason": "validated", "normalized_rate": 1350.0},
+        "jpy-krw": {"status": "missing", "reason": "selector_missing"},
+        "eur-krw": {"status": status, "reason": reason, "error_type": type(error).__name__},
+    }
+
+
+def test_recorded_evidence_is_never_overwritten_whatever_its_reason():
+    """전환 대상은 정확히 unknown/not_observed 뿐이다 — 기록된 누락은 사유 문자열이 같아도 덮지 않는다."""
+    report = _report()
+    report.start_attempt(1)
+    report.observation(1, "usd-krw", reason="not_observed")
+    report.finish_attempt(1, RuntimeError("after recorded miss"))
+    collected = report.attempts[1]["collection"]
+    assert collected["usd-krw"] == {"status": "missing", "reason": "not_observed"}
+    assert collected["jpy-krw"] == {"status": "missing", "reason": "attempt_failed", "error_type": "RuntimeError"}
+
+
+def test_recorded_observation_loss_is_not_settled():
+    report = _report()
+    report.start_attempt(1)
+    report.telemetry_failed("observation", 1, "jpy-krw")
+    report.finish_attempt(1, RuntimeError("after lost observation"))
+    collected = report.attempts[1]["collection"]
+    assert collected["jpy-krw"] == {"status": "unknown", "reason": "telemetry_error"}
+    assert collected["usd-krw"] == collected["eur-krw"] == {
+        "status": "missing", "reason": "attempt_failed", "error_type": "RuntimeError"}
+
+
+def test_lost_attempt_start_is_not_settled():
+    report = _report()
+    report.telemetry_failed("start_attempt", 2)
+    report.finish_attempt(2, TimeoutError("second URL"))
+    assert report.attempts[2]["collection"] == dict.fromkeys(
+        PAIRS, {"status": "unknown", "reason": "telemetry_error"})
+
+
+def test_interruption_inside_observation_hook_is_not_settled(monkeypatch):
+    """safely_report 는 Exception 만 잡는다 — 관측 훅 안의 BaseException 은 표식 없이 빠져나온다."""
+    report = _report()
+    report.start_attempt(1)
+
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(report, "observation", interrupted)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        investing_report.safely_report(report, "observation", 1, "usd-krw", text="1350", rate=1350.0)
+    assert report.telemetry_errors == []
+    report.finish_attempt(1, caught.value)
+    assert report.attempts[1]["collection"]["usd-krw"] == {
+        "status": "unknown", "reason": "attempt_interrupted", "error_type": "KeyboardInterrupt"}
+
+
+def test_http_403_and_normal_return_keep_their_rules():
+    report = _report()
+    report.start_attempt(1)
+    report.finish_attempt(1, RuntimeError("403"), reason="http_403")
+    assert report.attempts[1]["collection"] == dict.fromkeys(
+        PAIRS, {"status": "missing", "reason": "http_403"})
+    report.start_attempt(2)
+    report.finish_attempt(2)
+    assert report.attempts[2]["collection"] == dict.fromkeys(
+        PAIRS, {"status": "unknown", "reason": "not_observed"})
+
+
+@pytest.mark.parametrize("first, second, chosen", [
+    ("missing", "unknown", 2), ("unknown", "missing", 1),
+    ("valid", "unknown", 1), ("unknown", "valid", 2),
+    ("missing", "not_attempted", 1), ("not_attempted", "unknown", 2),
+    ("missing", "missing", 2), ("not_attempted", "not_attempted", 2), ("valid", "valid", 2),
+])
+def test_round_summary_prefers_unknown_over_missing(first, second, chosen):
+    report = _report()
+    for attempt_id, status in ((1, first), (2, second)):
+        report.attempts[attempt_id]["collection"] = {
+            pair: {"status": status, "reason": f"from_{attempt_id}"} for pair in PAIRS}
+    summary = report._collection()
+    assert summary == {pair: {"status": (first, second)[chosen - 1], "reason": f"from_{chosen}",
+                              "attempt_id": chosen} for pair in PAIRS}
+    assert investing_report.SUMMARY_ORDER is bank_report._SUMMARY_ORDER
+
+
+def test_retry_timeout_after_partial_first_settles_on_second_attempt(harness):
+    harness.http.side_effect = [response({"usd-krw": "1350"}), TimeoutError()]
+    harness.dxy.side_effect = RuntimeError("DXY after FX")
+    investing.crawl_and_save_investing_exchange_rates()
+    report = finished(harness)
+    assert report["schema_version"] == 3
+    assert report["validity_contract"] == "investing_range_checked/2"
+    observed = collection(report)
+    assert observed["usd-krw"] == {
+        "status": "valid", "reason": "validated", "normalized_rate": 1350, "attempt_id": 1}
+    for pair in ("jpy-krw", "eur-krw"):
+        assert report["attempts"][0]["collection"][pair] == {"status": "missing", "reason": "selector_missing"}
+        assert observed[pair] == {"status": "missing", "reason": "attempt_failed",
+                                  "error_type": "TimeoutError", "attempt_id": 2}

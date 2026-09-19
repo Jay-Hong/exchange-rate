@@ -289,12 +289,13 @@
 - 보고 로그 보존·일별 집계: [INVESTING_OBSERVE.md](INVESTING_OBSERVE.md) — Git 밖 원문·실행 이력·커서 보존, v2 참조 기반 집계, 충돌·부분 관측 표시. 운영 실행·cron 설치는 별도 승인이다.
 - 코드: `app/crawlers/investing.py`(계측 경계), `app/crawlers/investing_report.py`(보고 객체). 회귀 시험: `tests/test_investing_report.py` — HTTP·세션·DB 대역 사용.
 - 기존 Investing 로거 → `logs/app.log`의 `message`에 JSON 이벤트: `investing_round_started`(세션 생성 전), `investing_fx_evidence`(FX writer 반환/예외 직후, DXY 저장/폴백 진입 전; 파싱 전패 시 미호출 증거), `investing_round_finished`(세션 생성~close의 최외곽 finally). 로깅 설정은 그대로다.
-- `schema_version=2`, `round_id`, `attempt_id`(URL 시도 1/2, 회차 이벤트는 null). JSON 공백을 제거하고 `format`으로 아래 세 형식을 구분한다. 이벤트 수·발행 위치는 유지한다.
+- `schema_version=3`, 판정 계약 `validity_contract=investing_range_checked/2`, `round_id`, `attempt_id`(URL 시도 1/2, 회차 이벤트는 null). JSON 공백을 제거하고 `format`으로 아래 세 형식을 구분한다. 이벤트 수·발행 위치는 유지한다. (코드 기준 — 운영 이미지는 이 변경을 배포하기 전까지 schema 2 를 낸다.) 이전 이미지의 이벤트는 `schema_version=2`·계약 필드 없음이며 집계기가 `investing_range_checked/1` 로 명시 매핑한다(D10).
   - `lifecycle`: 시작 이벤트는 식별자와 형식만. 의미는 **세션 생성 전·수집 미시도**이며 성공 증거가 아니다.
   - `compact`: **첫 시도에서 모든 통화 valid, 모든 통화 writer 제출·정수 반환 확인, 재시도·계측 오류 없음**일 때 FX 증거와 정상 종료를 각각 한 줄로 기록한다. 종료는 루틴 정상 반환·세션 closed까지 요구한다. `outcome=all_valid`, `fx_attempt_id=1`, `rates`(통화별 정규화 값), `writer_returned_count`, `writing=per_currency_write_unverified`를 보존한다. rates의 각 항목은 `valid/validated`이며 writer 제출 통화도 같은 키 집합이다. 0 반환도 압축 가능하지만 저장 성공·변경 불필요·정책 차단을 뜻하지 않는다. FX 이벤트 시점의 `execution=running`은 이후 DXY 성공을 보장하지 않는다.
   - `detail`: 부분/전면 누락, 쿨다운, 재시도(2차 성공 포함), 예외, 계측 실패는 상세 스냅샷. `attempts`에 시도별 원본 `collection`을 한 번만 담고, 회차 요약 `collection_attempts[pair]`는 선택된 원본의 attempt_id를 참조한다. 계측 오류가 없을 때만 `not_reached`/`unnecessary` 시도의 빈 collection·writer·execution을 생략하고 id/status/reason을 남긴다(생략된 collection은 `not_attempted/not_started`, writer는 미호출, execution은 `not_attempted/not_started`). 계측 오류가 있으면 상태 표식 자체가 유실됐을 수 있어 이 생략도 하지 않는다. `succeeded`는 **루틴 정상 반환**만 뜻하며 유효 관측·저장 성공으로 승격하지 않는다.
 - `collection`은 통화별 `valid`(유효관측) / `missing`(누락) / `not_attempted`(미시도) / `unknown`(확인 불가) + 사유. 판정 순서: `selector_missing` → `empty_or_placeholder`(공백, `-`, `N/A`) → `parse_failed` → JPY ×100 후 `nan_value` → 같은 정규화 값에 `out_of_range`(±inf 포함, 경계 포함 허용). `constants.MIBANK_RATE_RANGES`를 이름 변경·복제 없이 재사용한다.
-- 회차 수집 요약은 **유효 관측 → 누락 판정 → 확인 불가 → 미시도** 순으로 확보된 증거를 보존하고, 같은 상태 중 마지막 시도를 가리킨다. 재시도 timeout이나 DXY 실패가 앞 시도 증거를 지우지 않는다. 값은 쓰기 지시가 아니며 통화별 `attempt_id`로 원본을 추적한다.
+- **실패한 시도의 미관측(/2)**: 시도가 일반 예외(`Exception` — timeout·`concurrent.futures.CancelledError` 포함)로 끝나면 그 시도에서 `unknown/not_observed` 로 남은 통화만 `missing/attempt_failed`(+`error_type`)로 확정한다. 파싱 루프가 세 통화 모두에 관측을 한 번씩 남기고, 관측 계측 유실은 `unknown/telemetry_error` 로 따로 표시되기 때문이다. `BaseException`(`asyncio.CancelledError`·종료)으로 끝나면 `unknown/attempt_interrupted` — `safely_report` 는 `Exception` 만 격리하므로 관측 훅 안의 중단은 표식 없이 빠져나올 수 있다. 403 은 기존대로 `missing/http_403`, 정상 반환은 전환하지 않는다. ⚠️ 잔여: `telemetry_failed` 자체가 실패하면(첫 `append` 의 메모리 할당 실패 등) 유실된 관측이 `not_observed` 로 남아 누락으로 잘못 확정될 수 있다.
+- 회차 수집 요약은 **유효 관측 → 확인 불가 → 누락 판정 → 미시도** 순(은행 보고와 같은 `SUMMARY_ORDER`)으로 고르고, 같은 상태 중 마지막 시도를 가리킨다. 다른 시도의 유효 관측 확보가 미확정이면 회차를 누락으로 확정하지 않는다(D9 해소 — `/1` 은 누락 → 확인 불가 순이었다). 재시도 timeout이나 DXY 실패가 앞 시도 증거를 지우지 않는다. 값은 쓰기 지시가 아니며 통화별 `attempt_id`로 원본을 추적한다.
 - `writer`는 시도별 호출 여부·입력 통화·정수 반환값·예외 타입만 기록한다. 상세 형식의 통화별 `writing`은 호출 증거가 있으면 `unknown`, 미전달이 확인되면 `not_attempted`; 압축 형식의 공통 `writing`도 모든 제출 통화가 `unknown/per_currency_write_unverified`라는 뜻이다. 시작 이외 이벤트의 `final_db=not_checked`는 모든 통화가 **`unknown/not_checked`**임을 나타내는 공통 플래그이며 DB 대조는 하지 않는다. 정수 0·`db.add()`·commit 전 로그로 변경 불필요/정책 차단/저장 완료를 추정하지 않는다.
 - `execution`: `normal` / `timeout` / `cancelled` / `abnormal`. 마지막 시도의 timeout은 기존 코드가 삼켜도 timeout으로 보고하며, 호출자 전파 여부는 별도 `exception_propagated`에 기록한다. 세션 생성·close 예외는 기록 후 기존처럼 전파한다. `session`은 마지막 도달 단계(creating/open/closing/closed)다.
 - 계측 계산·직렬화·로그의 일반 예외는 격리한다. 남길 수 있는 보고에는 `telemetry_errors`를 붙인다. 시도 시작·종료 또는 관측 계측 유실 시 해당 범위의 미확정 수집 항목은 `unknown/telemetry_error`로 남기며, 이미 확보한 `valid`/`missing` 증거는 보존한다. 이후 확인된 403은 미확정 항목을 `missing/http_403`으로 갱신한다. writer 호출 계측 유실도 미시도로 단정하지 않는다. 계측 오류 회차는 압축하지 않는다. 로거/초기화 자체 실패 시 보고 유실 가능; 보고 실패를 이유로 재시도하지 않는다.
@@ -406,9 +407,13 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
     `unknown/evidence_incomplete` — 확인된 위반은 지우지 않지만 miss 로 "미확보" 를 단정하지도 않는다.
   - 후보 판정 우선순위: 위반 > 계측 불완전 > 관측(근거 미확인) > miss > 경로 결과.
 - **회차 요약은 `valid → unknown → missing → not_attempted`** 로 시도 간 증거를 고르고(같은 상태면 가장 최근 시도),
-  선택한 `path`·`attempt_id` 를 남긴다. ⚠️ Investing(§7.10, 유효 → 누락 → 확인 불가)과 다르다: 다른 시도의 유효
-  관측 확보 여부가 미확정이면 회차 전체를 `누락`("필요한 유효 관측을 확보하지 못함")으로 확정할 수 없다 — 예: 공식
-  경로 미확보 + MIBANK 값 확보(근거 미확인)는 `unknown`. Investing 의 같은 문제는 별도 검토(D9).
+  선택한 `path`·`attempt_id` 를 남긴다. 다른 시도의 유효 관측 확보 여부가 미확정이면 회차 전체를 `누락`("필요한
+  유효 관측을 확보하지 못함")으로 확정할 수 없다 — 예: 공식 경로 미확보 + MIBANK 값 확보(근거 미확인)는 `unknown`.
+  Investing 도 같은 순서로 맞췄다(§7.10 `/2`, D9 해소 — 순서 상수는 `investing_report.SUMMARY_ORDER` 하나다).
+  ⚠️ 알려진 한계: 관측 훅은 모두 `safely_report`(일반 `Exception` 만 격리)를 거치므로, 훅 안에서 `BaseException`
+  이 나면 `telemetry_incomplete` 표식 없이 경로가 끝나고 `_judge` 가 그 통화를 `missing/no_value(path_failed)` 로
+  확정한다(예외를 주입하면 재현된다). 현재 운영 경로(스케줄러 스레드 풀의 동기 wrapper)에서는 그런 중단의 발생원을
+  확인하지 못했다. Investing `/2` 처럼 `Exception` 으로 끝난 경로만 확정하는 조건은 다음 은행 계약 판올림 때 맞춘다.
 - 폴백별 상태: `succeeded`(루틴 정상 반환 — 유효 관측·저장 성공 아님) / `failed` / `policy_skipped`
   (`mibank_untrusted_window`) / `unnecessary`(앞 경로 성공) / `not_reached`. 실행되지 않은 경로는 품질 등급이 아니라
   `not_attempted` 라는 별도 사실이다. 취소 등 `BaseException` 은 기존대로 폴백 없이 전파한다(`except Exception` 을
@@ -476,7 +481,11 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 - (D6) source-health가 무료 트랙 출시 blocker인지 fast-follow인지 (제품/타임라인 결정).
 - (D7) §7.4 — `partial` / `unknown` / `preserved` 의 집계 방식과 `success_rate` 분모, 구 의미 누적 통계와의 구분. 이 결정 전에는 관리자 API 의미 호환을 주장하지 않는다.
 - (D8) §7.5 — 지속장애 알림의 구체 임계·재알림 간격, 그리고 IBK 기존 통지와 공통 알림의 **사건 소유권**(같은 사건 중복 발송 방지).
-- (D9) §7.10·§7.12 — Investing 회차 요약 순서(유효 → 누락 → 확인 불가)가 뒤 시도의 미확정 유효 관측을 `누락` 으로
-  덮는지 재검토. 은행 보고는 `valid → unknown → missing` 로 정했다. 운영 Investing 이벤트는 바꾸지 않은 상태다.
-- (D10) §7.12 — 소스별 판정 계약(`validity_contract`)을 집계가 어떻게 분리할지. 필드 없는 기존 Investing 이벤트는
-  확인한 이벤트 종류·`schema_version`·배포/아카이브 출처 범위의 명시적 매핑으로만 해석하고, 모르면 `basis_unknown`.
+- (D9) **해소(2026-09-19 Claude·Codex 설계 합의)** — Investing 요약도 `valid → unknown → missing` 으로 맞췄다. 순서만
+  바꾸면 실패한 재시도의 미관측(`unknown/not_observed`)이 앞 시도의 확정 누락을 약하게 만드는 회귀가 생겨, 실패 시도
+  미관측 확정(`missing/attempt_failed`, `Exception` 한정)을 함께 넣었다(§7.10 `/2`). 운영 반영은 별도 배포.
+- (D10) **Investing 부분 해소** — 이벤트에 `validity_contract` 를 싣고(`schema_version=3`), 필드 없는 schema 2 이벤트는
+  `investing_range_checked/1` 로 명시 매핑한다. 요약 의존 지표는 계약별로만 내고 합산하지 않는다
+  ([INVESTING_OBSERVE.md 집계 의미](INVESTING_OBSERVE.md#집계-의미)). 처음 적은 `basis_unknown` 대신 **거부**
+  (`invalid_events`, 모든 날 coverage partial)로 정했다 — 입력이 우리 추출기 산출물뿐이라 모르는 조합은 결함이다.
+  은행 계약 집계는 은행 집계기를 만들 때 정한다.

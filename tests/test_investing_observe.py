@@ -21,6 +21,13 @@ NOW = extract.timestamp("2026-09-17T01:00:00Z")
 TS = "2026-09-17T00:50:00.123456789Z"
 STARTED = "2026-09-01T00:00:00Z"
 RATES = {"usd-krw": 1350.0, "jpy-krw": 900.0, "eur-krw": 1500.0}
+V1, V2 = aggregate.CONTRACTS[2], aggregate.CONTRACTS[3]
+
+
+def contract_metric(day, key, kind=V2):
+    """요약 의존 지표는 계약별로만 나온다 — 계약을 합친 최상위 키가 있으면 안 된다."""
+    assert not {"currency_status", "currency_reason", "execution_valid_currencies_rounds"} & set(day)
+    return day["by_contract"][kind][key]
 
 
 class Logger:
@@ -106,8 +113,8 @@ def test_p1_selected_first_valid_survives_second_timeout(tmp_path):
     events = report_events(retry=True)
     assert events[-1]["collection_attempts"] == dict.fromkeys(RATES, 1)
     summary = summarize_rows(tmp_path, list(map(row, events)))["days"]["2026-09-17"]
-    assert summary["currency_status"] == {"valid": 3}
-    assert summary["execution_valid_currencies_rounds"] == [
+    assert contract_metric(summary, "currency_status") == {"valid": 3}
+    assert contract_metric(summary, "execution_valid_currencies_rounds") == [
         {"status": "timeout", "reason": "timeout", "valid": 3, "count": 1}]
     assert summary["writer_returned_count_attempts"] == {"0": 1}
 
@@ -120,7 +127,7 @@ def test_p2_conflicting_variants_are_order_and_repetition_independent(tmp_path):
     for sequence in ((a, b), (b, a), (a, b, b), (b, a, b), (b, b, a)):
         summary = summarize_rows(tmp_path, list(map(row, sequence)))
         assert summary["conflict_keys"] == summary["conflict_extra_variants"] == 1
-        assert summary["days"]["2026-09-17"]["currency_status"] == {}
+        assert summary["days"]["2026-09-17"]["by_contract"] == {}
         assert summary["days"]["2026-09-17"]["conflicted_rounds_excluded"] == 1
         snapshots.append(summary)
     assert all(s == snapshots[0] for s in snapshots)
@@ -131,7 +138,7 @@ def test_duplicate_payload_and_same_round_id_across_containers(tmp_path):
     rows = [row(event), row(event), row(event, cid=OTHER_CID)]
     summary = summarize_rows(tmp_path, rows)["days"]["2026-09-17"]
     assert summary["rounds_observed"] == 2
-    assert summary["currency_status"] == {"valid": 6}
+    assert contract_metric(summary, "currency_status") == {"valid": 6}
 
 
 def test_p3_replacement_after_inspect_stays_pinned_to_old_id(tmp_path):
@@ -312,7 +319,7 @@ def test_p6_event_date_partitions_and_cross_midnight_round(tmp_path):
     runs, bad = aggregate.load_runs(root)
     assert not invalid and not bad
     summary = aggregate.summarize(groups, invalid, runs, bad, ["2026-09-16", "2026-09-17"])
-    assert summary["days"]["2026-09-16"]["currency_status"] == {"valid": 3}
+    assert contract_metric(summary["days"]["2026-09-16"], "currency_status") == {"valid": 3}
     assert summary["days"]["2026-09-17"]["rounds_observed"] == 0
     assert summary["days"]["2026-09-17"]["event_variants"] == 2
     assert all(day["coverage"]["partial"] for day in summary["days"].values())
@@ -370,7 +377,7 @@ def test_extraction_finishing_during_aggregate_cannot_add_coverage_without_event
                            "--end-date", "2026-09-17"]) == 0
     summary = json.loads(capsys.readouterr().out)["days"]["2026-09-17"]
     assert summary["coverage"]["partial"] is False
-    assert summary["currency_status"] == {"valid": 3}
+    assert contract_metric(summary, "currency_status") == {"valid": 3}
 
 
 def test_writer_counts_are_attempts_not_rounds_and_skip_uncalled_returns(tmp_path):
@@ -387,13 +394,13 @@ def test_writer_counts_are_attempts_not_rounds_and_skip_uncalled_returns(tmp_pat
 def test_valid_abbreviated_attempt_and_cooldown(tmp_path):
     events = report_events(cooldown=True)
     summary = summarize_rows(tmp_path, list(map(row, events)))["days"]["2026-09-17"]
-    assert summary["currency_status"] == {"not_attempted": 3}
+    assert contract_metric(summary, "currency_status") == {"not_attempted": 3}
     assert summary["writer_returned_count_attempts"] == {}
     logger = Logger()
     report = InvestingReport(logger, RATES)
     report.finish(RuntimeError("session creation failed"))
     summary = summarize_rows(tmp_path, list(map(row, logger.events)))["days"]["2026-09-17"]
-    assert summary["currency_status"] == {"not_attempted": 3}
+    assert contract_metric(summary, "currency_status") == {"not_attempted": 3}
     assert summary["provisional_date_rounds"] == 1
 
 
@@ -403,6 +410,11 @@ def test_valid_abbreviated_attempt_and_cooldown(tmp_path):
     lambda r: {**r, "container_id": None},
     lambda r: {**r, "ts": "2026-09-17"},
     lambda r: {**r, "event": {**r["event"], "schema_version": 1}},
+    lambda r: {**r, "event": {**r["event"], "schema_version": 4}},
+    lambda r: {**r, "event": {**r["event"], "schema_version": 2}},  # schema 2 는 계약 필드가 없어야 한다
+    lambda r: {**r, "event": {k: v for k, v in r["event"].items() if k != "validity_contract"}},
+    lambda r: {**r, "event": {**r["event"], "validity_contract": "investing_range_checked/1"}},
+    lambda r: {**r, "event": {**r["event"], "validity_contract": "bank_v2_evidence/1"}},
     lambda r: {**r, "event": {**r["event"], "round_id": []}},
     lambda r: {**r, "event": {**r["event"], "attempt_id": True}},
     lambda r: {**r, "event": {**r["event"], "attempts": [None, None]}},
@@ -466,3 +478,94 @@ def test_cli_reports_empty_requested_day_and_nonzero_partial(tmp_path, capsys):
     summary = json.loads(capsys.readouterr().out)
     assert len(summary["days"]) == 2
     assert all(d["rounds_observed"] == 0 and d["coverage"]["partial"] for d in summary["days"].values())
+
+
+# --- D10: schema 2(계약 필드 없음) → /1 명시 매핑, 요약 의존 지표는 계약별로만 -------------------------
+
+FROZEN = json.loads((Path(__file__).parent / "fixtures" / "investing_report_schema2_rounds.json").read_text())
+
+
+def frozen_rows(name, ts=TS):
+    return [row(event, ts) for event in FROZEN["rounds"][name]]
+
+
+def d9_events(round_id):
+    """고정 fixture 의 d9 사례를 현재 producer 로 다시 만든다(1차 부분 관측·DXY 예외 → 2차 timeout)."""
+    logger = Logger()
+    report = InvestingReport(logger, RATES)
+    report.round_id = round_id
+    report.emit(aggregate.START)
+    report.session_state("open")
+    report.start_attempt(1)
+    report.observation(1, "usd-krw", text="1350", rate=1350.0)
+    report.observation(1, "jpy-krw", reason="selector_missing")
+    report.observation(1, "eur-krw", reason="selector_missing")
+    report.writer_started(1, {"usd-krw": 1350.0})
+    report.writer_finished(1, count=0)
+    report.emit(aggregate.FX, 1)
+    report.finish_attempt(1, RuntimeError("DXY failed"))
+    report.start_attempt(2)
+    report.finish_attempt(2, TimeoutError("second URL"))
+    report.session_state("closed")
+    report.finish()
+    return logger.events
+
+
+def test_schema2_fixture_comes_from_the_unmodified_producer():
+    assert FROZEN["producer"] == {"commit": "3e677159e18b8b9a4f97f8df3c828d58151bf379",
+                                  "path": "app/crawlers/investing_report.py",
+                                  "blob": "bcac4a73be54142ff8381ce8683607223b1f81de"}
+    finish = FROZEN["rounds"]["d9_missing_then_timeout"][-1]
+    assert finish["schema_version"] == 2 and "validity_contract" not in finish
+    # 구 요약: 1차의 누락이 2차의 미확정(unknown/not_observed)보다 앞선다 — 이 선택을 다시 계산하지 않는다.
+    assert finish["collection_attempts"] == dict.fromkeys(RATES, 1)
+    assert finish["attempts"][1]["collection"] == dict.fromkeys(
+        RATES, {"status": "unknown", "reason": "not_observed"})
+
+
+def test_schema2_maps_to_v1_and_keeps_its_own_selection(tmp_path):
+    rows = [r for name in ("compact", "cooldown", "d9_missing_then_timeout") for r in frozen_rows(name)]
+    summary = summarize_rows(tmp_path, rows)
+    assert summary["invalid_events"] == [] and summary["schema_version"] == 2
+    day = summary["days"]["2026-09-17"]
+    assert set(day["by_contract"]) == {V1}
+    assert contract_metric(day, "currency_status", V1) == {"valid": 4, "missing": 2, "not_attempted": 3}
+    assert contract_metric(day, "currency_reason", V1) == {
+        "validated": 4, "selector_missing": 2, "cooldown": 3}
+    assert day["finalized_unambiguous_rounds"] == 3
+
+
+def test_contracts_on_the_same_day_are_reported_separately(tmp_path):
+    rows = frozen_rows("d9_missing_then_timeout") + [row(e) for e in d9_events("new-d9")]
+    summary = summarize_rows(tmp_path, rows)
+    day = summary["days"]["2026-09-17"]
+    assert not summary["invalid_events"] and summary["contract_mixed_rounds"] == 0
+    assert set(day["by_contract"]) == {V1, V2}
+    # 같은 상황, 같은 상태 — 고른 시도와 사유가 다르다(/1 은 1차 selector_missing, /2 는 2차 attempt_failed).
+    assert contract_metric(day, "currency_status", V1) == contract_metric(day, "currency_status", V2) == {
+        "valid": 1, "missing": 2}
+    assert contract_metric(day, "currency_reason", V1) == {"validated": 1, "selector_missing": 2}
+    assert contract_metric(day, "currency_reason", V2) == {"validated": 1, "attempt_failed": 2}
+    rows_by_contract = {kind: contract_metric(day, "execution_valid_currencies_rounds", kind)
+                        for kind in (V1, V2)}
+    assert rows_by_contract[V1] == rows_by_contract[V2] == [
+        {"status": "timeout", "reason": "timeout", "valid": 1, "count": 1}]
+    assert day["execution_rounds"] == [
+        {"status": "timeout", "reason": "timeout", "exception_propagated": False, "count": 2}]
+
+
+@pytest.mark.parametrize("start_ts, finish_ts, days", [
+    (TS, TS, ("2026-09-17",)),
+    ("2026-09-16T14:59:59Z", "2026-09-16T15:00:01Z", ("2026-09-16", "2026-09-17")),
+])
+def test_mixed_contract_round_is_excluded_and_flagged(tmp_path, start_ts, finish_ts, days):
+    old_start = FROZEN["rounds"]["compact"][0]
+    new_finish = {**report_events()[-1], "round_id": old_start["round_id"]}
+    summary = summarize_rows(tmp_path, [row(old_start, start_ts), row(new_finish, finish_ts)], days)
+    assert not summary["invalid_events"]
+    assert summary["contract_mixed_rounds"] == 1
+    assert summary["conflict_keys"] == 0  # 서로 다른 이벤트 키 — 같은 키의 본문 충돌이 아니다
+    assert sum(summary["days"][d]["conflicted_rounds_excluded"] for d in days) == 1
+    for d in days:
+        assert summary["days"][d]["by_contract"] == {}
+        assert "conflicting_events" in summary["days"][d]["coverage"]["reasons"]

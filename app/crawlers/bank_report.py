@@ -19,7 +19,9 @@ import json
 import math
 from uuid import uuid4
 
-# timeout·cancelled·abnormal 분류와 "관측 실패가 수집을 바꾸지 않는" 경계는 Investing 보고와 같은 규칙이다.
+# 회차 요약 순서, timeout·cancelled·abnormal 분류, "관측 실패가 수집을 바꾸지 않는" 경계는 Investing 보고와
+# 같은 규칙이다.
+from app.crawlers.investing_report import SUMMARY_ORDER as _SUMMARY_ORDER
 from app.crawlers.investing_report import _execution as _classify_execution
 from app.crawlers.investing_report import safely_report
 
@@ -41,11 +43,6 @@ MAX_MISSES_PER_PAIR = 8
 # 필수 밖 통화 코드는 식별 사실만 남긴다 — 표 전체가 한 이벤트를 키우지 않게 개수와 길이 둘 다 제한한다.
 MAX_OUTSIDE_REQUIRED_CODES = 64
 MAX_CODE_CHARS = 16
-
-# 회차 요약은 시도 간 증거를 이 순서로 고른다. ⚠️ Investing 회차 집계(valid → missing → unknown)와 다르다:
-# 다른 시도의 유효 관측 확보 여부가 미확정(`unknown`)이면 회차 전체를 `missing`("필요한 유효 관측을 확보하지
-# 못함", §7.2)으로 확정할 수 없다. Investing 의 같은 문제는 SOURCE_HEALTH_PLAN (D9) 에서 따로 본다.
-_SUMMARY_ORDER = ("valid", "unknown", "missing", "not_attempted")
 
 
 def _result(status, reason, **evidence):

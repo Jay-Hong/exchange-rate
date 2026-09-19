@@ -26,7 +26,7 @@ python3 /absolute/path/exchange-rate/scripts/investing_observe_aggregate.py \
 날짜를 골라 출력한다. 따라서 자정을 넘은 회차의 시작과 종료도 함께 해석한다.
 위 집계 출력 파일명은 예시이며 기존 증거를 덮어쓰지 않도록 새 이름을 사용한다.
 이벤트 JSONL 경로들을 위치 인자로 넘길 수도 있다. 이 경우 이력이 없으면 부분 관측이다.
-구 scratchpad의 이벤트 envelope(`ts/container_id/event`)도 v2 구조가 유효하면 읽는다.
+구 scratchpad의 이벤트 envelope(`ts/container_id/event`)도 schema 2·3 구조가 유효하면 읽는다.
 구 추출기의 `runs.jsonl`은 내구성·보존창 증거가 부족하므로 새 이력으로 취급하지 않는다.
 
 기본 보존 경로는 `~/logs/investing-observe`다. CLI는 `~/logs/` 아래만 허용하고,
@@ -97,6 +97,13 @@ pytest -p no:asyncio
 - detail의 통화 상태는 `collection_attempts[pair]`가 가리키는 원본을 사용한다.
   생략 가능한 미도달/불필요 시도만 `not_attempted/not_started`로 복원한다.
   따라서 1차 valid → 2차 unknown/timeout이어도 valid 3을 보존한다.
+- **판정 계약별 분리(D10)**: schema 2 이벤트(계약 필드 없음)는 `investing_range_checked/1`, schema 3 은 필드 값
+  `investing_range_checked/2` 로 해석한다. 그 밖 조합(schema 2 에 필드가 있거나 schema 3 의 다른 값)은
+  `invalid_events` 다. 요약에 의존하는 `currency_status`·`currency_reason`·`execution_valid_currencies_rounds` 는
+  날짜별 `by_contract[계약]` 아래에만 있고 **계약 사이에 합산하지 않는다** — `/1` 은 같은 통화의 누락을 미확정보다
+  앞세우고 `/2` 는 미확정을 앞세운다(과거 이벤트를 새 규칙으로 재계산하지 않는다). 한 회차 안에서 계약이 섞이면
+  `contract_mixed_rounds` 로 세고 충돌 회차처럼 제외한다(해당 날짜 coverage `conflicting_events`). 집계 출력
+  `schema_version` 은 2 다.
 - 통화·execution·writer·telemetry 회차 지표는 **충돌 없는 종료 확인 회차**만 분모로 한다.
   FX 스냅샷 반복을 요청 횟수로 세지 않는다. `format_by_event`는 이벤트 종류별이며
   충돌 키는 제외한다. `event_variants`에는 충돌 변형도 포함한다.

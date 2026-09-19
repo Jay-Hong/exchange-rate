@@ -20,6 +20,14 @@ except Exception:
     # investing.py의 curl_cffi 로드 실패 시 requests 폴백과 같은 경계.
     CurlTimeout = RequestsTimeout
 
+SCHEMA_VERSION = 3
+# 판정 계약. `valid` = 파싱 + `MIBANK_RATE_RANGES` 범위 검사(은행의 통화·필드·단위 근거 계약과 다르다).
+# /2 = 실패한 시도의 미관측 확정 + 아래 요약 순서. schema 2 의 무필드 이벤트는 집계기가 /1 로 명시 매핑한다.
+VALIDITY_CONTRACT = "investing_range_checked/2"
+# 회차 요약이 시도 간 증거를 고르는 순서(SOURCE_HEALTH_PLAN §7.2). 은행 보고도 이 상수를 쓴다 —
+# 다른 시도의 유효 관측 확보가 미확정(`unknown`)이면 회차를 `missing` 으로 확정할 수 없다.
+SUMMARY_ORDER = ("valid", "unknown", "missing", "not_attempted")
+
 
 def _result(status, reason, **evidence):
     return {"status": status, "reason": reason, **evidence}
@@ -153,6 +161,18 @@ class InvestingReport:
             for pair, observed in attempt["collection"].items():
                 if observed["status"] in ("not_attempted", "unknown"):
                     attempt["collection"][pair] = _result("missing", reason)
+        elif error:
+            # 파싱 루프는 세 통화 모두에 observation 을 한 번씩 부른다 — 예외로 끝난 시도에 not_observed 로 남은
+            # 통화는 루프가 닿지 못한 것이다. 일반 예외는 관측 훅 안에서 나도 telemetry_failed 가 telemetry_error 로
+            # 바꿔 두므로 미확보를 확정한다. BaseException(취소·종료)은 safely_report 를 표식 없이 빠져나올 수 있어
+            # 관측이 유실됐을 가능성을 배제하지 못한다 — 확정하지 않는다.
+            confirmed = isinstance(error, Exception)
+            for pair, observed in attempt["collection"].items():
+                if observed["status"] == "unknown" and observed["reason"] == "not_observed":
+                    attempt["collection"][pair] = _result(
+                        "missing" if confirmed else "unknown",
+                        "attempt_failed" if confirmed else "attempt_interrupted",
+                        error_type=type(error).__name__)
         if error is None and attempt_id == 1:
             self.attempts[2].update(status="unnecessary", reason="previous_attempt_succeeded")
 
@@ -171,7 +191,7 @@ class InvestingReport:
                 for attempt in self.attempts.values()
             ]
             # 뒤 시도의 timeout/실패가 앞 시도의 유효 관측이나 판정 증거를 지우지 않는다.
-            for status in ("valid", "missing", "unknown", "not_attempted"):
+            for status in SUMMARY_ORDER:
                 candidates = [item for item in observations if item["status"] == status]
                 if candidates:
                     collection[pair] = candidates[-1]
@@ -228,7 +248,8 @@ class InvestingReport:
     def emit(self, event, attempt_id=None):
         payload = {
             "event": event,
-            "schema_version": 2,
+            "schema_version": SCHEMA_VERSION,
+            "validity_contract": VALIDITY_CONTRACT,
             "source": "investing",
             "round_id": self.round_id,
             "attempt_id": attempt_id,
