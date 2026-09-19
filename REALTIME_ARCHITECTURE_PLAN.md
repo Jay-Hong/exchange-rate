@@ -48,6 +48,9 @@
 
 ## 2. 현재 구조 요약
 
+> ⚠️ 부분 정정(2026-09-19): 이 절에서는 broadcast 전송 방식(아래 도표)과 "핵심 코드 참조" 의 줄 좌표만 현재 코드로 고쳤다.
+> 나머지 서술(예: broadcast 의 DB SELECT — 지금은 Redis-first, [ADR-026](DECISIONS.md))은 작성 시점 기준이며 전수 갱신하지 않았다.
+
 ```text
 [수집]
 크롤러(11개) + USDT(5개)
@@ -58,7 +61,7 @@
 Broadcasting cron job (매분 00,10,20,30,40,50초)
   └─ build_rates_payload (DB SELECT 30 row + USDT legacy adapter)
   └─ Redis BROADCAST_CACHE_KEY와 JSON diff
-  └─ 변경 시에만 → manager.broadcast (순차 send_json) → 전체 클라이언트
+  └─ 변경 시에만 → manager.broadcast (연결별 전송 timeout + gather 병렬, PR1) → 전체 클라이언트
 
 [알림]
 USDT 수집 완료 후 → changed_rates 기반 → 같은 트랜잭션에서 process_source_rate_alerts
@@ -66,10 +69,11 @@ USDT 수집 완료 후 → changed_rates 기반 → 같은 트랜잭션에서 pr
 
 ### 핵심 코드 참조
 
-- 크롤러 cron: [app/scheduler.py:604](app/scheduler.py#L604) (investing), [app/scheduler.py:1431](app/scheduler.py#L1431) (USDT)
-- Broadcasting: [app/main.py:348](app/main.py#L348) `broadcast_rates_once`, [app/main.py:202](app/main.py#L202) `build_rates_payload`
-- Connection 관리: [app/main.py:156](app/main.py#L156) `ConnectionManager`, [app/main.py:172](app/main.py#L172) 순차 broadcast
-- Graph 결합: [app/main.py:361-365](app/main.py#L361-L365) (broadcast 변경 시 graph_buckets 결합)
+- 크롤러 cron: [`_switch_jobs_body`](app/scheduler.py) 의 `task_investing` 등록 (investing), [`_register_usdt_legacy_polling_job`](app/scheduler.py) 의
+  `usdt_sources` job (USDT — `USDT_LEGACY_REST_POLLING_ENABLED` 일 때만, 기본 비활성)
+- Broadcasting: [`broadcast_rates_once`](app/main.py), [`build_rates_payload`](app/main.py)
+- Connection 관리: [`ConnectionManager`](app/main.py), [`ConnectionManager.broadcast`](app/main.py) (연결별 `asyncio.wait_for` + `asyncio.gather` 병렬 전송)
+- Graph 결합: [`broadcast_rates_once`](app/main.py) 안에서 [`build_graph_buckets`](app/main.py) 결과를 결합 (payload 변경 시, 연결이 있을 때만)
 - Snapshot 캐시: [app/main.py:423](app/main.py#L423) 단일 BROADCAST_CACHE_KEY
 - USDT 알림: [app/crawlers/usdt_sources.py:149](app/crawlers/usdt_sources.py#L149) `changed_rates`, [app/crawlers/usdt_sources.py:189-202](app/crawlers/usdt_sources.py#L189-L202) DB 트랜잭션 내 동기 호출
 - Investing TLS 우회: [app/crawlers/investing.py:102](app/crawlers/investing.py#L102) curl_cffi `safari17_0` (ADR-018)
@@ -82,7 +86,7 @@ USDT 수집 완료 후 → changed_rates 기반 → 같은 트랜잭션에서 pr
 |---|------|------|
 | 1 | REST polling이 10초 단위 — 거래소 가격 급변동 시 평균 5초 지연 | USDT 김치프리미엄 시나리오에 부족 |
 | 2 | 전체 broadcast 단일 채널 — 모든 클라이언트에 동일한 전체 payload | 탭별 차등 전송 불가, 대역폭 낭비 |
-| 3 | `manager.broadcast` 순차 전송 ([main.py:176-181](app/main.py#L176-L181)) | 1초 broadcast + 다수 연결 시 직렬 await가 병목 |
+| 3 | `manager.broadcast` 순차 전송 (작성 당시) — **PR1 에서 해소**: [`ConnectionManager.broadcast`](app/main.py) 가 연결별 전송 timeout + `asyncio.gather` 병렬 | 1초 broadcast + 다수 연결 시 직렬 await가 병목(당시) |
 | 4 | `--disable-javascript`가 SELENIUM_OPTIONS에 박혀 있음 ([constants.py:49](app/crawlers/constants.py#L49)) | Investing 자동 업데이트 감시용 long-running browser 시도 시 별도 옵션 필요 |
 | 5 | broadcast마다 graph_buckets DB 조회 ([main.py:361](app/main.py#L361)) | 1초 broadcast로 가면 매초 DB 조회 — 부담 |
 | 6 | snapshot 캐시가 단일 `BROADCAST_CACHE_KEY` ([main.py:423](app/main.py#L423)) | 토픽 분리 후에도 snapshot이 분리되지 않으면 재연결 시 비효율 |

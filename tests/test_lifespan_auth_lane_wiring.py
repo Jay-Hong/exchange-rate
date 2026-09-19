@@ -113,7 +113,7 @@ print("RUNNING=" + str(running))
 def test_failure_at_either_boundary_rolls_the_lane_back(tmp_path, target, kind):
     """⛔ **프로세스 격리**로 돌린다. 한 프로세스에서 실제 lifespan 을 여러 번 열면 앞 케이스가
     남긴 `AsyncIOScheduler` 가 **닫힌 loop 에 바인딩된 채** 남아 다음 `start_scheduler()` 의
-    `add_job` 이 죽는다(실측 `app/scheduler.py:1407`). job 제거만으로는 부족하고 인스턴스
+    `add_job` 이 죽는다(실측 — `start_scheduler()` 의 `scheduler.add_job`). job 제거만으로는 부족하고 인스턴스
     자체가 낡는다. scope 가 scheduler 를 되돌리지 **않는 것이 계약**이므로 격리는 테스트가 진다.
     """
     import subprocess

@@ -117,7 +117,7 @@
 
 ## 4. Cadence — `collection_expected` ⊥ `market_expected` (2 별개 축)
 
-**두 의미를 분리해야 한다** (codex Medium): `collection_expected`(스케줄러상 수집이 실행돼야 하는가 — **collection_success 판정을 gate**)와 `market_expected`(시장·고시 값이 움직일 수 있는가 — **value_changed 진단만** 마스킹). **시장 휴장만으로 collection 판정을 skip하면 주말에도 도는 crawler의 장애를 은폐**한다 — investing과 hana/shinhan/bs/nh는 OUT에도 등록된다([scheduler.py:983-1097](app/scheduler.py#L983)).
+**두 의미를 분리해야 한다** (codex Medium): `collection_expected`(스케줄러상 수집이 실행돼야 하는가 — **collection_success 판정을 gate**)와 `market_expected`(시장·고시 값이 움직일 수 있는가 — **value_changed 진단만** 마스킹). **시장 휴장만으로 collection 판정을 skip하면 주말에도 도는 crawler의 장애를 은폐**한다 — investing과 hana/shinhan/bs/nh는 OUT에도 등록된다([`_switch_jobs_body`](app/scheduler.py) 의 `elif mode == "OUT"` 분기).
 
 | source군 | collection_expected (수집 실행 스케줄) | market_expected (값 변화 가능) |
 |---|---|---|
@@ -153,7 +153,7 @@
 2. **실행 결과를 3계층으로 분리하는 계약 설계**(codex — 사건 발생 위치가 달라 collector 결과 하나로 못 묶음):
    - **eligibility**(스케줄러 등록 전): `enabled` / `scheduled_off`(mode) / `admin_disabled`(`crawler_config`) — collector 안 돎.
      ⛔ **정상 제외는 `scheduled_off`·`admin_disabled` 뿐이다.** 수집해야 하는데 등록·시작되지 않은 작업(**등록 누락**)은 정상 제외가 아니라 **탐지 대상**이다. 기대 실행 여부는 실제 등록 목록이 아니라 수집 정책·시간표·관리자 설정으로 **먼저 계산하고**, 그다음 등록·시작 여부와 대조한다(§7.6).
-   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([scheduler.py:485](app/scheduler.py#L485) 80% 거부) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
+   - **dispatch**(스케줄러→executor, started 안 됨): `dispatched` / `queue_full`([`enqueue_selenium_job`](app/scheduler.py) 의 80% 이상 거부 — `current_size >= 20`, 25칸 기준) / `misfire`(grace 초과) / `backpressure`. **반복 시 `degraded`**(계획 아니라 시스템 압력 누락).
    - **run**(collector 실행): `success` / `partial` / `failure`(`failure_reason`=timeout 등) / `skipped`. **timeout은 skip 아니라 run failure**(계획 skip과 재혼입 금지). (역사적 사례 — **IBK legacy 경로** `crawl_ibk_legacy_result` 기준, 2026-07-22 작성) legacy 경로는 00:00~00:05에도 collection을 시도한다. 날짜 지정 Request로 USD·JPY·EUR를 유효 관측하면 `changed_count=0`이어도 success이고, 이 Request 실패 뒤 자정 창 때문에 Selenium만 억제되면 `observed_assets=∅`, `failure_reason=request_failed`, `fallback_suppressed=midnight_transition`인 failure여야 한다. ⚠️ 운영(게이트 ON)의 IBK 타입 결과 경로 `produce_ibk_dated_result` 는 Selenium 안전망을 **HTTP 기술 실패(`CandidateSearchStop.TECHNICAL_FAILURE`)에서만** 열고 무고시·개장 전·예산 소진에서는 열지 않는다 — 이 문장을 그 경로의 동작으로 읽지 말 것(§2.1). 완전한 DB snapshot의 공식 무고시는 `no_observation_preserved`, 과거 서비스일 회귀 차단은 `stale_regression_preserved`(부분 안전 통화 관측이 있으면 `partial`)로 분리해 exit 0을 무조건 success로 오인하지 않는다.
    collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 다수 collector가 총실패를 삼키고, 예외를 올리는 collector도 부분 통화·저장 결과를 구분하지 못하므로(§2.1) 이 계약 선행 없이 shadow 무의미. 구체 계약은 §7.2. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
 3. **collection_expected(eligibility + interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected = eligibility(`scheduled_off`/`admin_disabled`)이며 timing은 Bool 아닌 **`expected_interval`/`next_due_at + grace`**(현재 등록 소스는 IN/OUT 모두 10~60s). **dispatch(queue_full/misfire)·run(timeout/transition) 결과는 collection_expected가 아니라 §6-2 3계층** — queue 포화는 억제가 아니라 health 영향(§4·§6-2 정합). market_mode(eligibility 파생) + kr_holidays(market_expected) realtime 연결.

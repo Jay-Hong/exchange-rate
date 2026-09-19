@@ -5648,6 +5648,11 @@ Phase 2d로 KRX/Hana/Bithumb의 `source_daily_rates` canonical daily table이 pr
 
 현재 가격알림은 **1회성(once-only)**: 조건 충족 시 1회 발송 후 `triggered=true, enabled=false`로 자동 비활성. 재무장은 사용자가 토글 ON([crud.py:2240-2242](app/crud.py#L2240) bank / [3095-3097](app/crud.py#L3095) source).
 
+> ⚠️ 정정(2026-09-19): 바로 위 재무장(토글 ON) 링크 둘은 작성 커밋 `268861c` 에서도 `mark_setting_triggered`·`mark_source_setting_triggered`
+> 의 발송 뒤 자동 비활성 줄(`triggered = True`·`enabled = False`)을 가리켰다 — 재무장 경로는 `update_notification_setting`·
+> `update_source_notification_setting` 이다. 이 절의 나머지 `crud.py` 줄 링크는 `268861c` 기준 좌표(당시 정확 — 리셋·ORM 재조회·함수 정의)이며,
+> 이후 코드 이동으로 지금은 다른 줄을 가리킨다. 현재 위치는 심볼로 찾는다.
+
 신규 앱 요구(사용자 확정): **조건이 만족되는 동안 사용자가 선택한 간격으로 반복 발송**. 가격알림 + (후속)비교알림 **공통 기능**(spec §B2).
 
 **검증된 현황(코드 직접 확인, 2026-06-29)**:

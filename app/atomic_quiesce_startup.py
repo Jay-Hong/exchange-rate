@@ -35,7 +35,7 @@ _BOOT_ID = uuid.uuid4().hex
 
 def _process_started_at() -> datetime:
     """OS process boot 시각 (naive UTC). psutil create_time — 무거운 lib이라 fn-local import (repo idiom)."""
-    import psutil  # fn-local (heavy lib, scheduler.py:1161 / main.py:1093 idiom)
+    import psutil  # fn-local (heavy lib — scheduler.cleanup_zombie_chrome_processes / main.get_dashboard idiom)
 
     created = psutil.Process().create_time()  # POSIX epoch float (UTC)
     return datetime.fromtimestamp(created, tz=timezone.utc).replace(tzinfo=None)
