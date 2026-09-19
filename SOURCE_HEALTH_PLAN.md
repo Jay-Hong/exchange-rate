@@ -249,7 +249,7 @@
 
 1. **investing** 첫 적용. **KB는 항목별 대조군** — 정상 수집 보존·전면 실패의 부모 실패 집계는 기준이 되지만, 부분 통화·저장 0은 KB도 공백이다.
 2. **bs · citi** — `hard_fail` 삼킴과 신뢰창 밖 종료를 woori 선례로 정렬.
-3. **hana · woori** — 내부 Selenium subprocess 폴백까지 한 흐름으로.
+3. **hana · woori** — 내부 Selenium subprocess 폴백까지 한 흐름으로(프로세스를 넘는 증거 계약은 §7.13).
 4. **shinhan · nh · sc** — ⚠️ **재시도 부하 검증 필수.** 실패를 전달하도록 고치는 순간 부모 재등록이 붙어 요청·Chrome 기동이 늘 수 있다.
 5. **ibk** — 기존 `IbkResult` 를 보존하며 공통 화면·집계에 연결.
 
@@ -470,6 +470,44 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
   R1c 합성 측정(실제 writer·SQLite, 회차 한 건): 공식 경로 성공 4.4~4.5 KB, 공식 실패 + MIBANK(43행 표) 6.0 KB.
 - 다음 단계: R1a~R1c 를 한 번에 배포한다(배포 전 실응답으로 이벤트 크기를 다시 재고 압축 형식을 정한다). fixture
   캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정).
+
+### 7.13 hana·woori 보고 — 프로세스를 넘는 증거 전달 계약 (2026-09-19 Claude·Codex 설계 합의, **구현 확정은 R1 운영 관측 뒤**)
+
+⛔ 설계만이다(코드 없음). 보고 전용 — 반환값·폴백 순서·예외 전파·writer 입력·재시도·crawler_stats 는 바꾸지 않는다(§7.12 와 같은 경계).
+
+- **사실**: 흐름은 공식 Request → Selenium subprocess(`python -m app.crawlers.runner <bank>_selenium`, `capture_output`, 45초) → MIBANK.
+  부모는 **종료 코드만** 받는다. 자식은 자기 `SessionLocal()` 로 writer 를 부르고 commit 은 writer 반환·`driver.quit()` 전에 일어나므로
+  timeout kill 뒤에도 저장됐을 수 있다. 부모는 `TimeoutExpired` 를 `RuntimeError` 로 바꿔 전파한다(그대로 분류하면 `abnormal`).
+  woori 만 과거 날짜를 순회한다(`selected_date` 는 요청 의도일 뿐 응답 기준일의 증거가 아니다).
+- **판정은 부모에서만**: 자식은 같은 `bank_report` 관측자로 원자료만 모으고 `finish()`·`emit()`(안에서 판정이 돈다)을 부르지 않으며
+  `bank_round_*` 도 발행하지 않는다. 자식 stderr 본문·자식 로그를 재파싱해 결과로 승격하지 않는다. Selenium 요소는 연결부에서 추출
+  텍스트와 제한된 구조 사실만 만든다(BeautifulSoup API 를 가정하지 않는다). 자식 writer ID·관측 sequence 는 자식 토큰 접두,
+  세션 태그는 `child:<토큰>`.
+- **채널**: 부모가 **Selenium 실행마다** 새 0700 임시 디렉터리와 1회용 토큰을 만들어 argv 로 넘긴다. 자식은 `O_EXCL` 임시 파일 → close
+  → `os.replace(frame.json)` 를 한 번만 한다(fsync 없음 — 이 계약은 충돌 후 프레임 복구를 요구하지 않고, fsync 는 45초 예산에 대기만
+  더한다). 부모는 자식 종료(또는 timeout kill·wait) 뒤 `O_NOFOLLOW|O_NONBLOCK` 로 한 번 열어 일반 파일인지 확인하고, 같은 fd 에서 EOF
+  또는 누적 65,537 B 까지 반복해 읽는다 — **수락 상한은 65,536 B**, 65,537 번째 바이트가 읽히면 `too_large`. 그 뒤 엄격 JSON·토큰·은행·
+  경로·schema·타입·참조를 검증한다. `O_NONBLOCK` 은 FIFO 열기 대기를 피할 뿐 **일반 파일 읽기의 시간 상한은 보장하지 않는다**.
+  프레임이 수락 상한을 넘으면 자식은 원자료 대신 **전송 잘림** 표지만 있는 최소 프레임을 보내고 부모는 `unknown` 으로 본다 — 이 전송
+  잘림은 기존 관측·miss **목록 상한**(`observations_truncated` 등)과 다르다: 목록 상한은 확인된 위반을 보존한 채 나머지만 unknown 으로
+  두는 기존 규칙 그대로다. 신뢰 전제: 원자적 게시 순간의 완전성뿐이다 —
+  같은 UID 의 악의적 변조는 범위 밖이고 토큰은 인증 수단이 아니다. IBK `result_fd` 분기와 분리하고 동시 지정은 거부한다.
+- **격리**: 보고 실패(자식 직렬화·쓰기, 부모 생성·읽기·검증·삭제)는 크롤러 반환·종료 코드·폴백을 바꾸지 않는다(IBK emitter 의 쓰기
+  오류 `return 1` 을 복사하지 않는다). 채널 생성 실패 → 오늘과 똑같이 실행(`unknown/child_report_channel_unavailable`),
+  삭제 실패 → `cleanup_failed` 기록만 한다.
+- **판정 표**: 완결 프레임(존재·크기·검증 통과·전송 잘림 없음)의 수집·쓰기 사실은 exit≠0·timeout 이어도 보존하고 실행 결과는 따로
+  적는다(timeout 은 catch 지점에서 결속). 프레임 없음·무효 → 수집 `unknown/child_report_*` + 필수 통화마다 쓰기 요약 후보
+  `unknown/child_report_*` — writer 호출은 지어내지 않고, 후보는 `performed → unknown → 마지막 호출` 에 참여한다(다른 호출의 확인된
+  `performed` 가 선택되어도 **프레임 유실 사유와 다른 호출의 불확실성을 함께 남기고**, `no_change_needed`·차단만으로 유실을
+  지우지 않는다). pending 행이 뒤 commit 에 섞인다는 전제는 같은 세션 안에서만.
+- **woori**: 조회마다 `query_id`(요청 날짜·응답 날짜 표기·관측·miss·루프 완료)를 두고 충돌은 조회 안에서만 본다. writer 는 채택한
+  조회를 참조하고, writer 미호출이어도 각 조회의 miss·확인된 위반은 남긴다. 과거 날짜 값은 `unknown/date_basis_unconfirmed` 이되
+  확인된 위반(`missing/validation_rejected`)이 앞선다.
+- **한계**: commit 뒤 `driver.quit()` 멈춤 → 프레임 없음 → `unknown`. **자식의** 보고 I/O(직렬화·쓰기·이름 바꾸기)가 45초 예산 안이라
+  timeout·MIBANK 폴백이 새로 생길 수 있다(밀리초 수준은 추정). 부모의 생성·읽기·삭제는 예산 밖의 별도 지연이다 — 자식 쓰기·rename,
+  부모 I/O, 프레임 없는 timeout 표본까지 잰 뒤 시간 경계를 정한다. 자손(Chrome) 정리는
+  판정하지 않는다(§7.7).
+- **R1 관측 뒤 확정**: 실측 크기·로그 증가율·상한·압축, 실제 예외 분포, `bank_report` 공통화 범위.
 
 ## 열린 결정 (미해결)
 
