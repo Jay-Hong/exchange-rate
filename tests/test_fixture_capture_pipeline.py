@@ -36,6 +36,13 @@ def registry():
     ('UserSession0123456789abcdef', 'long_alphanumeric'),
     ('abcdef1234567890', 'long_hex'), ('user@example.invalid', 'at_token'),
     ('https://example.invalid', 'url_scheme'), ('12345678901', 'long_number'),
+    ('901231-1234567', 'rrn_shape'), ('000000-1000000', 'rrn_shape'),
+    # The seventh digit is not narrowed, so 0 and 9 are caught like 1 and 8.
+    ('123456-0123456', 'rrn_shape'), ('123456-9123456', 'rrn_shape'),
+    ('123456-8123456', 'rrn_shape'),
+    # search(), not fullmatch(): a longer digit string that contains the shape is caught.
+    ('1234567-1234567', 'rrn_shape'), ('1234-5678-9012-3456-7890', 'card_shape'),
+    ('1234-5678-9012-3456', 'card_shape'),
 ])
 def test_representative_identifier_detection_reports_location_only(value, rule):
     with pytest.raises(CaptureError) as caught:
@@ -49,6 +56,29 @@ def test_representative_identifier_detection_reports_location_only(value, rule):
                                  'GhJkLmNpQrStUvWx', 'token-part-one-part-two'])
 def test_normal_text_and_documented_regex_blind_spots(value):
     scan_string(value, 'text')
+
+
+# The two shape rules are exactly two shapes, not an identifier detector. These values
+# occur in the captured bank pages (corporate phone numbers, a business registration
+# number, a date) and must keep passing; the last two are shapes the rules do NOT cover.
+@pytest.mark.parametrize('value', ['82-2-1588-6200', '1588-6200', '102-81-14717',
+                                 '2026-09-21', '010-1234-5678', '1234 5678 9012 3456',
+                                 # Group counts and widths are the rule, so one group short
+                                 # or one digit short is a different shape and must pass.
+                                 # Without these two a narrowed card_shape and a 5-digit
+                                 # rrn_shape both survived the battery.
+                                 '1234-5678-9012', '12345-1234567', '123456-123456'])
+def test_shape_rules_leave_corporate_values_and_their_own_blind_spots_alone(value):
+    scan_string(value, 'text')
+
+
+# The scan runs per text node, so a shape broken across inline tags is not seen. This
+# is a stated limit of the two shape rules, not an accident: recording it here keeps a
+# later reader from believing the fixture scan proves such a shape is absent.
+@pytest.mark.parametrize('html', ['<p>901231-<b>1234567</b></p>',
+                                 '<p>1234-<b>5678-9012-3456</b></p>'])
+def test_shape_rules_do_not_see_across_inline_tag_boundaries(html):
+    scan_fixture(BeautifulSoup(html, 'html.parser'))
 
 
 @pytest.mark.parametrize('html', ['<p>user@example.invalid</p>', '<a href="https://example.invalid">x</a>',

@@ -41,6 +41,21 @@ RULES = (
     ("at_token", re.compile(r"@")),
     ("url_scheme", re.compile(r"://")),
     ("long_number", re.compile(r"[0-9]{10,}")),
+    # `long_number` only sees UNBROKEN digit runs, so hyphenated identifiers pass it
+    # (measured: "901231-1234567" and "1234-5678-9012-3456" were both accepted).
+    # These two add exactly those two shapes. They are NOT a general identifier
+    # detector: "010-1234-5678" and space-separated card numbers still pass, and a
+    # digit-count threshold cannot be used instead because 11 joined digits occur in
+    # a legitimate corporate phone number ("82-2-1588-6200") in the captured pages.
+    # Known limits, deliberately out of scope here: these run per text node, so a
+    # shape split across inline tags ("901231-<b>1234567</b>") is not seen, and a
+    # non-ASCII hyphen is a different character. They also use search(), so a longer
+    # digit string that merely CONTAINS one of the shapes is rejected too.
+    # The seventh RRN digit is not narrowed: 9 and 0 occur (pre-1900 births), and
+    # narrowing to [1-8] would not have avoided a single false positive — a plain
+    # amount range like "100000-1000000" matches either way (measured).
+    ("rrn_shape", re.compile(r"[0-9]{6}-[0-9]{7}")),
+    ("card_shape", re.compile(r"[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{4}")),
 )
 # Exactly the format accepted as an ordinary decimal rate representation here;
 # no scientific notation, integer identifiers or arbitrary surrounding text.
