@@ -100,19 +100,32 @@ def getter(body, **kwargs):
     return Mock(return_value=result), result
 
 
-def official_html(route="bs_official", rates=("1,300.25", "900.5", "1,500"), extra=""):
+REVIEWED_NAME = "홍길동"
+
+
+def disclosure(name=REVIEWED_NAME):
+    """The reviewed citi footer shape: body's 2nd child > footer (5th) > div (5th) > div > ul (2nd) > li (1st)."""
+    if name is None:
+        return ""
+    return ("<div><p></p><p></p><p></p><p></p><footer><p></p><p></p><p></p><p></p><div><div><p></p><ul>"
+            f"<li>대표자 {name}</li><li>주소 서울</li></ul></div></div></footer></div>")
+
+
+def official_html(route="bs_official", rates=("1,300.25", "900.5", "1,500"), extra="", name=REVIEWED_NAME):
     rows = "".join(f"<tr><td>{code}</td><td>{rate}</td></tr>"
                    for code, rate in zip(("USD", "JPY", "EUR"), rates))
     table = '<thead><tr><th>통화</th><th>기준환율</th></tr></thead><tbody>' + rows + '</tbody>'
-    table = '<table id="resultTable">' + table + '</table>' if route == "bs_official" else (
-        '<div id="tab01"><table>' + table + '</table></div>')
-    return '<html><head></head><body>' + extra + table + '</body></html>'
+    if route == "bs_official":
+        return '<html><head></head><body>' + extra + '<table id="resultTable">' + table + '</table></body></html>'
+    return ('<html><head></head><body>' + extra + '<div id="tab01"><table>' + table + '</table></div>'
+            + disclosure(name) + '</body></html>')
 
 
-def citi_html(extra="", labels=("USD", "CNY", "EUR", "JPY")):
+def citi_html(extra="", labels=("USD", "CNY", "EUR", "JPY"), name=REVIEWED_NAME):
     items = "".join(f'<li><div><div>{code}</div><div><span>{1300 + index}</span></div></div></li>'
                     for index, code in enumerate(labels))
-    return '<html><head></head><body><div id="content">' + extra + '<ul>' + items + '</ul></div></body></html>'
+    return ('<html><head></head><body><div id="content">' + extra + '<ul>' + items + '</ul></div>'
+            + disclosure(name) + '</body></html>')
 
 
 def mibank_row(code="USD", rate="1,300.25", links=None, flag=None, rate_class="counter", cells=None):

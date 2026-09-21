@@ -150,7 +150,7 @@ def test_recorded_extraction_is_scanned_and_schema_closed(registry, target):
 @pytest.mark.parametrize('nested', [False, True])
 def test_exception_argument_strings_are_scanned(registry, nested):
     route = registry.routes['bs_mibank']
-    _, _, record = roundtrip(mibank_html(mibank_row(rate='broken')), route, registry, Deadline())
+    _, _, record, _replacements = roundtrip(mibank_html(mibank_row(rate='broken')), route, registry, Deadline())
     # First prove this is an otherwise valid record, including its real AST site.
     validate_recording(record, route, registry)
     secret = 'user@example.invalid'

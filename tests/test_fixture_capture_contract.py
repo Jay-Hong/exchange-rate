@@ -134,7 +134,7 @@ def test_deidentification_removes_sensitive_attributes_and_bodies(registry):
 ])
 def test_currency_empty_duplicate_order_and_case_preserved(registry, links, flag, expected_code, basis):
     html = mibank_html(mibank_row(links=links, flag=flag))
-    fixture, soup, record = roundtrip(html, registry.routes["bs_mibank"], registry, Deadline())
+    fixture, soup, record, _replacements = roundtrip(html, registry.routes["bs_mibank"], registry, Deadline())
     observed = next(event for event in record["events"] if event["kind"] == "observed")
     assert observed["facts"]["code"] == expected_code
     assert observed["facts"]["code_basis"] == basis
@@ -158,7 +158,7 @@ def test_out_of_range_spans_reject(registry, span, name):
 @pytest.mark.parametrize("span", ["1", "20", "01", "+1", " 20 "])
 def test_valid_spans_preserve_value_and_labels(registry, span):
     html = official_html().replace('<td>', f'<td colspan="{span}">', 1)
-    fixture, _, record = roundtrip(html, registry.routes["bs_official"], registry, Deadline())
+    fixture, _, record, _replacements = roundtrip(html, registry.routes["bs_official"], registry, Deadline())
     assert f'colspan="{span}"'.encode() in fixture
     assert record["events"][0]["labels"]["header_has_span"] is False
 
@@ -166,7 +166,7 @@ def test_valid_spans_preserve_value_and_labels(registry, span):
 @pytest.mark.parametrize("tag", ["script", "style", "noscript", "template"])
 def test_boundary_bodies_cleared_without_deleting_sibling(registry, tag):
     html = citi_html(extra=f'<{tag}>GhJkLmNpQrStUvWx</{tag}>')
-    fixture, soup, _ = roundtrip(html, registry.routes["citi_primary"], registry, Deadline())
+    fixture, soup, _, _replacements = roundtrip(html, registry.routes["citi_primary"], registry, Deadline())
     assert b'GhJkLmNpQrStUvWx' not in fixture
     assert soup.select_one(tag) is not None and not soup.select_one(tag).contents
 
@@ -192,7 +192,7 @@ def test_paths_detect_selection_change_even_with_identical_return(registry):
 def test_full_events_no_report_caps_or_label_clipping(registry):
     label = '긴 라벨 ' * 100
     rows = ''.join(mibank_row(rate=str(1300 + i), links=f'<a href="?currency=USD">{label}</a>') for i in range(12))
-    _, _, record = roundtrip(mibank_html(rows), registry.routes["bs_mibank"], registry, Deadline())
+    _, _, record, _replacements = roundtrip(mibank_html(rows), registry.routes["bs_mibank"], registry, Deadline())
     observed = [e for e in record["events"] if e["kind"] == "observed"]
     assert len(observed) == 12
     assert len(observed[0]["labels"]["row_text"]) > registry.sources.bank_report.SNIPPET_MAX_CHARS

@@ -2,7 +2,8 @@
 
 Spec: d1_detection_policy_v1.md
 (policy_spec_sha256 47d090a63997116d8df9af80b3a04a3e99a5a62c487aaba34236d1897e273635).
-This library is not wired into capture or admission. Evidence stays in memory;
+Capture calls it (slice 5a: roundtrip and capture_route's final check); admission
+does not yet (slice 5b). Evidence stays in memory;
 it is neither an approval record nor a substitute for inspecting stored bytes.
 """
 
@@ -212,12 +213,13 @@ def replace_names(soup, route, recorded_extraction, *, entries=None) -> Replacem
     return result
 
 
-def verify_stored(fixture_bytes, replacements, metadata=None) -> None:
+def verify_stored(fixture_bytes, replacements, metadata=None, *, parse=None) -> None:
     """Reparse actual UTF-8 bytes, rebind every edit, and recompute all of D1.
 
     Rebinding permits new Python identities only after exact path, ancestors,
     full text, single-node li and label-range checks. It never searches for text.
     metadata must already have passed the caller's closed schema (§1.2).
+    An optional parse(text) supplies the caller's budgeted BeautifulSoup parse.
     """
     if type(fixture_bytes) is not bytes:
         raise CaptureError("d1_invalid_fixture_bytes", "fixture")
@@ -226,8 +228,11 @@ def verify_stored(fixture_bytes, replacements, metadata=None) -> None:
     except UnicodeDecodeError:
         raise CaptureError("d1_invalid_utf8", "fixture") from None
     try:
-        soup = BeautifulSoup(text, "html.parser")
+        soup = BeautifulSoup(text, "html.parser") if parse is None else parse(text)
     except Exception:
+        # DeadlineExpired inherits BaseException and passes through unchanged.
         raise CaptureError("d1_fixture_parse", "fixture") from None
+    if parse is not None and not isinstance(soup, BeautifulSoup):
+        raise CaptureError("d1_fixture_parse", "fixture")
     _check_correspondence(soup, replacements, {} if metadata is None else metadata,
                           require_identity=False)

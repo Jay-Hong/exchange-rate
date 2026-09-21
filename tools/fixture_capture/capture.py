@@ -23,12 +23,13 @@ from uuid import uuid4
 import bs4
 import soupsieve
 
+from . import d1_replace
 from .detector import scan_fixture, validate_metadata
 from .errors import CaptureError, DeadlineExpired
 from .fetch import fetch_once
-from .limits import METADATA_LIMIT, Deadline, wall_timeout
+from .limits import METADATA_LIMIT, PARSE_SECONDS, Deadline, wall_timeout
 from .registry import Registry
-from .roundtrip import PARSER, roundtrip
+from .roundtrip import PARSER, parse_html, roundtrip
 from .runtime import quiet_logging
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -80,7 +81,9 @@ def capture_route(route_name, *, registry=None, get=None, deadline=None):
                 fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 fetched = fetch_once(route.url, registry.sources.constants.HEADERS,
                                      deadline=deadline, get=get)
-                fixture, soup, record = roundtrip(fetched.text, route, registry, deadline)
+                parse_budget = [PARSE_SECONDS]
+                fixture, soup, record, replacements = roundtrip(
+                    fetched.text, route, registry, deadline, parse_budget=parse_budget)
                 scan_fixture(soup)
                 capture_id = str(uuid4())
                 parser = parser_versions()
@@ -95,6 +98,9 @@ def capture_route(route_name, *, registry=None, get=None, deadline=None):
                 validate_metadata(meta, route=route, registry=registry, source_commit=source_commit,
                                   contract=contract, parser=parser,
                                   original_hash=fetched.original_body_sha256, fixture=fixture)
+                d1_replace.verify_stored(
+                    fixture, replacements, metadata=meta,
+                    parse=lambda text: parse_html(text, deadline, parse_budget))
                 metadata = (json.dumps(meta, ensure_ascii=False, allow_nan=False,
                                        separators=(",", ":")) + "\n").encode("utf-8")
                 if len(metadata) > METADATA_LIMIT:

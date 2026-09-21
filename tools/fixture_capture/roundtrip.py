@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup, Tag
 
+from . import d1_replace
 from .deidentify import deidentify
 from .errors import CaptureError
 from .limits import HTML_LIMIT, PARSE_SECONDS, wall_timeout
@@ -91,7 +92,7 @@ def record_extraction(soup, route, registry):
 
 
 def parse_html(text, deadline, parse_budget=None):
-    # One budget across both parser invocations, not a fresh ten seconds for each.
+    # Share the caller's remaining budget across every parser invocation.
     seconds = PARSE_SECONDS if parse_budget is None else parse_budget[0]
     started = time.monotonic()
     with wall_timeout(min(seconds, deadline.remaining()), "parse_timeout"):
@@ -102,25 +103,29 @@ def parse_html(text, deadline, parse_budget=None):
     return soup
 
 
-def roundtrip(text, route, registry, deadline):
-    """Return only a verified, reparsed fixture and the complete original record.
+def roundtrip(text, route, registry, deadline, parse_budget=None):
+    """Return verified bytes, reparsed soup, original record and D1 evidence.
 
     Matching extraction exceptions can be useful fixtures: args, last event and
     production traceback sites must match. Unexpected/unserializable records or
     lost callbacks are refused. Acceptance does not assert valid exchange rates.
     """
-    parse_budget = [PARSE_SECONDS]
+    if parse_budget is None:
+        parse_budget = [PARSE_SECONDS]
     soup = parse_html(text, deadline, parse_budget)
     original = record_extraction(soup, route, registry)
     deadline.remaining()
     fixture = deidentify(soup, registry)
+    replacements = d1_replace.replace_names(fixture, route.name, original)
     serialized = fixture.encode("utf-8")
     if len(serialized) > HTML_LIMIT:
         raise CaptureError("fixture_size", "fixture")
+    d1_replace.verify_stored(serialized, replacements,
+                             parse=lambda text: parse_html(text, deadline, parse_budget))
     reparsed = parse_html(serialized.decode("utf-8"), deadline, parse_budget)
     replayed = record_extraction(reparsed, route, registry)
     for field in ("events", "queries", "returned", "exception"):
         if original[field] != replayed[field]:
             raise CaptureError("roundtrip_mismatch", f"recorded_extraction.{field}")
     deadline.remaining()
-    return serialized, reparsed, original
+    return serialized, reparsed, original, replacements
