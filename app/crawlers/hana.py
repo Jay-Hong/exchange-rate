@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 # 로컬 애플리케이션
 from app import crud, models
 from app.database import SessionLocal
+from app.crawlers.child_output import child_log_fields, stdout_tail
 from app.crawlers.constants import (
     DEFAULT_TIMEOUT,
     HEADERS,
@@ -144,12 +145,28 @@ def _run_selenium_subprocess_fallback(subprocess_name: str, timeout: int):
         if result.returncode == 0:
             logger.debug(f"✅ Selenium subprocess 성공: {subprocess_name}")
         else:
-            stderr = result.stderr[:500] if result.stderr else "No error output"
-            logger.error(f"❌ Selenium subprocess 실패 (exit code: {result.returncode}): {stderr}")
+            # 자식의 예외 추적 기록은 stderr 가 아니라 **stdout** 에 있다
+            # (app/logging.py 가 StreamHandler(sys.stdout), runner.py 가 logger.exception).
+            # 그것 없이 남는 것은 "No error output" 한 줄뿐이라 Docker 로그만 보는 운영자는
+            # 원인을 못 찾는다(2026-09-21 실측 — 파일 로그에는 있었으나 아무도 그리 안 본다).
+            # ⛔ 로그 전용이다. 판정·반환값·폴백 순서에 쓰지 않는다(§7.13 경계).
+            # ⚠️ stderr 도 같은 로그에 실리므로 함께 마스킹한다.
+            stderr = stdout_tail(result.stderr, limit=500) or "No error output"
+            logger.error(
+                f"❌ Selenium subprocess 실패 (exit code: {result.returncode}): {stderr}",
+                extra={"subprocess_name": subprocess_name, "exit_code": result.returncode,
+                       **child_log_fields(result.stdout, prefix="child_stdout")},
+            )
             raise RuntimeError(f"Selenium subprocess failed with exit code {result.returncode}")
 
-    except subprocess.TimeoutExpired:
-        logger.warning(f"⏱️ Selenium subprocess 타임아웃 ({timeout}초): {subprocess_name}")
+    except subprocess.TimeoutExpired as expired:
+        # 죽기 전까지 자식이 남긴 것. 프레임 없는 타임아웃에서 유일하게 남는 흔적이다.
+        # ⚠️ text=True 여도 이 예외의 stdout 은 bytes 다(3.13.5 실측) — stdout_tail 이 받는다.
+        logger.warning(
+            f"⏱️ Selenium subprocess 타임아웃 ({timeout}초): {subprocess_name}",
+            extra={"subprocess_name": subprocess_name, "timeout": timeout,
+                   **child_log_fields(expired.stdout, prefix="child_stdout")},
+        )
         raise RuntimeError(f"Selenium subprocess timeout after {timeout}s")
     except Exception as e:
         logger.exception(f"❌ Selenium subprocess 실행 오류: {subprocess_name}")
