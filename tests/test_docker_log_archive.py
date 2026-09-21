@@ -471,3 +471,311 @@ def test_dry_run_cannot_accidentally_collect(tmp_path):
     with pytest.raises(SystemExit) as caught:
         A.main(["collect", "--dry-run", "--root", str(root)])
     assert caught.value.code == 2 and not root.exists()
+
+
+def expiry_history(tmp_path):
+    root = tmp_path / "archive"
+    assert collect(root, NOW - timedelta(days=20)) == 0
+    [old] = A.runs(root)
+    assert collect(root, NOW - timedelta(days=1)) == 0
+    return root, old
+
+
+@pytest.mark.parametrize("expiry_fails", [True, False])
+def test_cycle_cli_collects_when_failure_or_resolution_history_cannot_be_saved(
+        tmp_path, monkeypatch, capsys, expiry_fails):
+    root, old = expiry_history(tmp_path)
+    path = manifest_path(root, old)
+    original = path.read_bytes()
+    path.write_bytes(b"not json")
+    if not expiry_fails:
+        with pytest.raises(A.ArchiveError):
+            A.expire(root, now=NOW)
+        path.write_bytes(original)
+    real_json, real_cycle = A._atomic_json, A.cycle
+    attempts = []
+
+    def unavailable(path, value):
+        if path.name == A.EXPIRY_STATE:
+            attempts.append(value["expiry_failed"])
+            raise PermissionError(SECRET.decode())
+        return real_json(path, value)
+
+    docker = Docker()
+    monkeypatch.setattr(A, "_atomic_json", unavailable)
+    monkeypatch.setattr(A, "cycle", lambda root, **kwargs: real_cycle(root, runner=docker, now=NOW, **kwargs))
+    assert A.main(["cycle", "--root", str(root)]) == 5
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert attempts == [expiry_fails]  # exercises failure AND successful-clear writes
+    assert result["collection_code"] == 0 and result["exit_code"] == 5
+    assert result["expiry_failed"] is True and result["expiry_history_failed"] is True
+    assert (result["expiry"] is None) is expiry_fails
+    assert [call[1] for call in docker.calls] == ["inspect", "logs"]
+    assert A.cursor(root)["until"] == A._iso(NOW)
+    assert captured.err == "ARCHIVE_EXPIRY_HISTORY_UNAVAILABLE\n"
+    assert "PRIVATE9" not in captured.out + captured.err and "홍길동" not in captured.out + captured.err
+    if not expiry_fails:
+        assert result["expiry"]["deleted"] == [old["run_id"]]
+        assert A.check(root, first_slot=NOW, now=NOW + timedelta(minutes=11))["expiry_failed"] is True
+
+
+@pytest.mark.parametrize("error", [RuntimeError, KeyError, TypeError, ValueError, AssertionError])
+def test_cycle_does_not_swallow_programming_errors_in_expiry(tmp_path, monkeypatch, error):
+    root, _ = expiry_history(tmp_path)
+    docker = Docker()
+
+    def bug(*args):
+        raise error("programming error")
+
+    monkeypatch.setattr(A, "_expire_locked", bug)
+    with pytest.raises(error, match="programming error"):
+        A.cycle(root, runner=docker, now=NOW)
+    assert docker.calls == [] and not (root / A.EXPIRY_STATE).exists()
+
+
+@pytest.mark.parametrize("expiry_fails", [True, False])
+def test_expiry_history_does_not_swallow_programming_errors(tmp_path, monkeypatch, expiry_fails):
+    root, old = expiry_history(tmp_path)
+    if expiry_fails:
+        manifest_path(root, old).write_bytes(b"not json")
+    real_json = A._atomic_json
+
+    def bug(path, value):
+        if path.name == A.EXPIRY_STATE:
+            raise RuntimeError("history bug")
+        return real_json(path, value)
+
+    monkeypatch.setattr(A, "_atomic_json", bug)
+    with pytest.raises(RuntimeError, match="history bug"):
+        A.cycle(root, runner=Docker(), now=NOW)
+
+
+def test_unlink_refusal_is_injected_even_as_root_and_pending_deletion_is_retried(tmp_path, monkeypatch):
+    root, old = expiry_history(tmp_path)
+    directory = manifest_path(root, old).parent
+    real_unlink = os.unlink
+    refused = []
+
+    def unlink(path, *args, **kwargs):
+        if Path(path) == directory / "stdout.gz":
+            refused.append(path)
+            raise PermissionError("injected unlink refusal")
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "unlink", unlink)
+        result = A.cycle(root, runner=Docker(), now=NOW)
+    assert len(refused) > 0
+    assert result["expiry_failed"] is True and result["exit_code"] == 5 and result["collection_code"] == 0
+    assert not (directory / "manifest.json").exists() and (directory / "stdout.gz").exists()
+    report = A.check(root, first_slot=NOW, now=NOW + timedelta(minutes=11))
+    assert report["pending_deletions"] == [old["run_id"]] and report["ok"] is False
+    # A preview preserves both the intent and the unresolved state.
+    preview = A.expire(root, now=NOW, dry_run=True)
+    assert preview["candidates"] == [old["run_id"]] and preview["expiry_failed"] is True
+    later = NOW + timedelta(hours=1)
+    result = A.cycle(root, runner=Docker(later), now=later)
+    assert result["exit_code"] == 0 and result["expiry"]["deleted"] == [old["run_id"]]
+    assert not directory.exists()
+    report = A.check(root, first_slot=NOW, now=later + timedelta(minutes=11))
+    assert report["pending_deletions"] == [] and report["expiry_failed"] is False and report["ok"] is True
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_expiry_intent_deletion_and_resolution_are_durable_before_collection(tmp_path, monkeypatch, refuse):
+    root, old = expiry_history(tmp_path)
+    directory = manifest_path(root, old).parent
+    events, paths = [], {}
+    real_open, real_sync, real_replace, real_unlink = os.open, os.fsync, os.replace, os.unlink
+
+    def opening(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        paths[fd] = Path(path)
+        return fd
+
+    def syncing(fd):
+        real_sync(fd)
+        kind = "directory" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        events.append(("sync", kind, paths[fd]))
+
+    def replacing(source, target):
+        value = json.loads(Path(source).read_bytes()) if Path(target).suffix == ".json" else None
+        real_replace(source, target)
+        events.append(("rename", Path(source), Path(target), value))
+
+    def unlink(path, *args, **kwargs):
+        path = Path(path)
+        if path.parent == directory:
+            if refuse and path.name == "stdout.gz":
+                events.append(("refused", path))
+                raise PermissionError("injected")
+            real_unlink(path, *args, **kwargs)
+            events.append(("unlink", path))
+            return
+        return real_unlink(path, *args, **kwargs)
+
+    class ObservedDocker(Docker):
+        def __call__(self, args, **kwargs):
+            events.append(("docker", args[1]))
+            return super().__call__(args, **kwargs)
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "fsync", syncing)
+    monkeypatch.setattr(os, "replace", replacing)
+    monkeypatch.setattr(os, "unlink", unlink)
+    result = A.cycle(root, runner=ObservedDocker(), now=NOW)
+    assert result["collection_code"] == 0 and result["expiry_failed"] is refuse
+
+    def durable_json(target, key, value):
+        rename = next(i for i, e in enumerate(events)
+                      if e[0] == "rename" and e[2] == target and e[3].get(key) == value)
+        file_sync = next(i for i, e in enumerate(events) if e == ("sync", "file", events[rename][1]))
+        dir_sync = next(i for i, e in enumerate(events)
+                        if i > rename and e == ("sync", "directory", target.parent))
+        assert file_sync < rename < dir_sync
+        return file_sync, dir_sync
+
+    audit = root / "deletions" / (old["run_id"] + ".json")
+    _, intent_sync = durable_json(audit, "status", "pending")
+    first_unlink = next(i for i, e in enumerate(events) if e[0] == "unlink")
+    assert intent_sync < first_unlink
+    state_file_sync, state_dir_sync = durable_json(root / A.EXPIRY_STATE, "expiry_failed", refuse)
+    if refuse:
+        refused = next(i for i, e in enumerate(events) if e[0] == "refused")
+        assert first_unlink < refused < state_file_sync
+        assert not any(e[0] == "rename" and e[2] == audit and e[3]["status"] == "deleted" for e in events)
+    else:
+        last_unlink = max(i for i, e in enumerate(events) if e[0] == "unlink")
+        payload_dir_sync = next(i for i, e in enumerate(events) if e == ("sync", "directory", directory))
+        removal_sync = next(i for i, e in enumerate(events) if e == ("sync", "directory", root / "runs"))
+        deleted_file_sync, deleted_dir_sync = durable_json(audit, "status", "deleted")
+        assert last_unlink < payload_dir_sync < removal_sync < deleted_file_sync < deleted_dir_sync < state_file_sync
+    assert state_dir_sync < next(i for i, e in enumerate(events) if e == ("docker", "inspect"))
+
+
+@pytest.mark.parametrize("damage", ["until", "streams", "stream", "first", "scheduled_slot", "unarchived_tail"])
+def test_malformed_run_fields_are_normalized_at_read_boundary_and_check_continues(tmp_path, damage):
+    root, old = expiry_history(tmp_path)
+    path = manifest_path(root, old)
+    value = json.loads(path.read_bytes())
+    if damage == "stream":
+        value["streams"]["stdout"] = None
+    elif damage == "first":
+        value["streams"]["stdout"]["first"] = {}
+    else:
+        value[damage] = {}
+    path.write_text(json.dumps(value))
+    with pytest.raises(A.ArchiveError):
+        A.runs(root)
+    result = A.cycle(root, runner=Docker(), now=NOW)
+    assert result["expiry_failed"] is True and result["collection_code"] == 0
+    report = A.check(root, first_slot=NOW, now=NOW + timedelta(minutes=11))
+    assert report["invalid_runs"] == [old["run_id"]] and report["last_success"] == A._iso(NOW)
+    assert report["missed_slots"] == [] and report["ok"] is False
+
+
+@pytest.mark.parametrize("replacement", [None, {}, {"interval": []}])
+def test_malformed_failure_history_stays_strict_on_container_replacement(tmp_path, replacement):
+    root, _ = expiry_history(tmp_path)
+    assert A.collect(root, runner=Docker(fail="exit"), now=NOW - timedelta(hours=1)) == 2
+    [failed] = A.failures(root)
+    failed["replacement"] = replacement
+    (root / "failures" / (failed["run_id"] + ".json")).write_text(json.dumps(failed))
+    with pytest.raises(A.ArchiveError):
+        A.failures(root)
+    assert A.cycle(root, runner=Docker(), now=NOW)["exit_code"] == 5
+    before = A.cursor(root)
+
+    class ChangedDocker(Docker):
+        def __call__(self, args, **kwargs):
+            result = super().__call__(args, **kwargs)
+            if args[1] == "inspect":
+                value = json.loads(result.stdout)
+                value["Id"] = "e" * 64
+                result.stdout = json.dumps(value).encode()
+            return result
+
+    docker = ChangedDocker()
+    result = A.cycle(root, runner=docker, now=NOW + timedelta(hours=1))
+    assert result["exit_code"] == 2 and result["expiry_failed"] is True
+    assert [c[1] for c in docker.calls] == ["inspect"] and A.cursor(root) == before
+
+
+def test_cycle_lock_contention_never_attempts_expiry_or_collection(tmp_path):
+    root, old = expiry_history(tmp_path)
+    docker = Docker()
+    with A.locked(root):
+        with pytest.raises(A.ArchiveError):
+            A.cycle(root, runner=docker, now=NOW)
+        assert A.main(["cycle", "--root", str(root)]) == 3
+    assert docker.calls == [] and manifest_path(root, old).exists()
+    assert not (root / A.EXPIRY_STATE).exists()
+
+
+@pytest.mark.parametrize("expiry_fails", [True, False])
+def test_manual_expire_cli_reports_unavailable_failure_and_resolution_history(
+        tmp_path, monkeypatch, capsys, expiry_fails):
+    root, old = expiry_history(tmp_path)
+    path = manifest_path(root, old)
+    original = path.read_bytes()
+    path.write_bytes(b"not json")
+    if not expiry_fails:
+        with pytest.raises(A.ArchiveError):
+            A.expire(root, now=NOW)
+        path.write_bytes(original)
+    before = A.cursor(root)
+    real_json, real_expire = A._atomic_json, A.expire
+    attempts = []
+
+    def unavailable(path, value):
+        if path.name == A.EXPIRY_STATE:
+            attempts.append(value["expiry_failed"])
+            raise OSError(SECRET.decode())
+        return real_json(path, value)
+
+    monkeypatch.setattr(A, "_atomic_json", unavailable)
+    monkeypatch.setattr(A, "expire", lambda root, **kwargs: real_expire(root, now=NOW, **kwargs))
+    assert A.main(["expire", "--root", str(root)]) == 2
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert attempts == [expiry_fails]
+    assert result["expiry_history_failed"] is True and result["expiry_failed"] is True
+    assert captured.err == ("ARCHIVE_EXPIRY_HISTORY_UNAVAILABLE\n"
+                            + ("ARCHIVE_OPERATION_FAILED\n" if expiry_fails else ""))
+    assert A.cursor(root) == before
+
+
+def test_retry_finishes_pending_audit_when_the_run_directory_is_already_gone(tmp_path, monkeypatch):
+    root, old = expiry_history(tmp_path)
+    directory = manifest_path(root, old).parent
+    real_json = A._atomic_json
+    refused = []
+
+    def unavailable(path, value):
+        if path.parent == root / "deletions" and value["status"] == "deleted":
+            refused.append(path)
+            raise OSError("deleted audit unavailable")
+        return real_json(path, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(A, "_atomic_json", unavailable)
+        result = A.cycle(root, runner=Docker(), now=NOW)
+    assert refused and result["expiry_failed"] is True and result["collection_code"] == 0
+    assert not directory.exists()
+    assert A.check(root, first_slot=NOW, now=NOW)["pending_deletions"] == [old["run_id"]]
+    result = A.expire(root, now=NOW)
+    assert result["deleted"] == [old["run_id"]] and result["expiry_failed"] is False
+    report = A.check(root, first_slot=NOW, now=NOW)
+    assert report["pending_deletions"] == [] and report["ok"] is True
+
+
+def test_unreadable_expiry_state_cannot_make_check_healthy(tmp_path):
+    root = tmp_path / "archive"
+    assert A.cycle(root, runner=Docker(), now=NOW)["exit_code"] == 0
+    (root / A.EXPIRY_STATE).write_bytes(b"not json")
+    report = A.check(root, first_slot=NOW, now=NOW + timedelta(minutes=11))
+    assert report["expiry_failed"] is True and report["ok"] is False
+    assert report["invalid_runs"] == [] and report["missed_slots"] == [] and report["stale"] is False
+    assert A.expire(root, now=NOW)["expiry_failed"] is False
+    assert A.check(root, first_slot=NOW, now=NOW + timedelta(minutes=11))["ok"] is True

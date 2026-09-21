@@ -4,7 +4,8 @@ B v1 은 **Docker 에 도달한 stdout/stderr** 를 보존한다. Tier C 자식(
 그 실행의 양성 증거는 포함하지 않는다.
 
 구현은 [scripts/docker_log_archive.py](scripts/docker_log_archive.py), 시험은
-[계약 v2](tests/test_docker_log_archive_contract.py)와 [구현 측 시험](tests/test_docker_log_archive.py)이다.
+[계약 v2](tests/test_docker_log_archive_contract.py),
+[만료 격리 계약 E](tests/test_docker_log_archive_cycle_contract.py), [구현 측 시험](tests/test_docker_log_archive.py)이다.
 Python **3.12.3 호스트**를 대상으로 표준 라이브러리만 사용하며 앱·DB를 import하지 않는다.
 이번 작업은 로컬 구현·시험이며 서버 설치·크론 변경을 실행하지 않았다.
 
@@ -79,7 +80,19 @@ alias가 관측 보존소를 가리키면 정규화 후 거부한다. 경로를 
 자신의 알려진 파일만 지우며 루트나 run 안에 운영자가 둔 다른 파일은 남긴다.
 실패 이력과 그 이력에 연결된 부분 파일도 14일 초과 시 정리한다.
 삭제는 `deletions/<run_id>.json`에 `pending` 의도를 내구 저장한 뒤 수행하고 `deleted`로 갱신한다.
-삭제 중 중단되어 `pending`이 남으면 운영자가 파일 잔존 여부를 확인한다. 삭제 감사 기록은 자동 만료하지 않는다.
+삭제 중 중단되어 `pending`이 남으면 `check.pending_deletions`에 표시한다. 다음 만료는 그 내구 의도를
+사용해 알려진 잔존 파일의 삭제를 재시도한다. manifest나 run 디렉터리가 이미 없어도 완료 감사 기록까지
+마쳐야 `deleted`로 전환한다. 운영자는 계속 남는 `pending`의 파일 잔존 여부와 권한을 확인한다.
+삭제 감사 기록은 자동 만료하지 않는다.
+
+만료의 예상된 읽기·검증·삭제 거부는 `expiry-state.json`에 `expiry_failed=true`로 내구 저장한다.
+수동 `expire`와 `cycle` 모두 이 상태를 갱신하며, **실제 만료 전체가 완료된 뒤에만** false로 원자 교체한다.
+정상 dry-run과 수집 성공은 미해결 상태를 해제하지 않는다. 삭제 의도 내구 저장 → 알려진 파일 삭제·디렉터리
+fsync → 삭제 완료 기록 내구 저장 → 실패 이력 정리 완료 → 만료 미해결 해제 순서를 지킨다.
+만료 실패 기록 또는 성공 후 해제 기록을 저장할 수 없으면 고정 stderr
+`ARCHIVE_EXPIRY_HISTORY_UNAVAILABLE`와 JSON `expiry_history_failed=true`, `expiry_failed=true`로 알린다.
+`cycle`은 이때도 가드·수집을 계속한다. 이력 장치까지 실패하면 해당 상태의 내구 보존은 보장할 수 없으므로
+이번 JSON과 stderr도 확인해야 한다. 수동 `expire` CLI의 만료·이력 저장 실패는 종료 2이며 JSON으로도 표시한다.
 
 ```bash
 /usr/bin/python3 /home/ubuntu/fxi-host-tools/docker_log_archive.py expire --dry-run
@@ -91,7 +104,15 @@ alias가 관측 보존소를 가리키면 정규화 후 거부한다. 경로를 
 래퍼는 별도의 Git 밖 셸 파일을 만들지 않고 **동일 스크립트의 `cycle` 명령**으로 관리한다.
 수집·만료·용량 가드를 함께 시험하고 호스트마다 로직이 달라지는 일을 피하기 위한 결정이다.
 잠금 아래 **만료를 먼저 실행**하므로 용량 가드·용량 측정 오류로 수집을 막아도 정리는 수행된다.
-만료 자체가 실패하면 신규 수집도 중단한다.
+오래된 기록의 형식 오류나 삭제 거부 등 **만료에 한정된 실패는 격리**하고 가드·신규 수집을 계속한다.
+기록 형식 오류는 읽기·검증 경계에서 `ArchiveError`로 정규화하며, 만료 단계는 `ArchiveError`·`OSError`만
+격리한다. `RuntimeError` 같은 프로그래밍 오류는 만료 실패로 삼키지 않는다.
+커서와 근거 run은 계속 엄격히 검증하고, ID 교체 때 미보존 꼬리를 복구하는 실패 이력 검증도 유지한다.
+루트 안전성·잠금 검사는 만료 격리 전의 공통 경계다.
+
+`cycle` JSON은 `expiry`(만료 결과, 실패 시 null), `expiry_failed`, `expiry_history_failed`,
+`collection_code`, `guard`, `exit_code`를 포함한다. 이력 저장까지 완료해야 `expiry_failed=false`이며,
+수집 실패·가드가 함께 발생해도 만료 실패 표시는 남는다. 종료 코드 우선순위는 **2 > 4 > 5 > 0**이다.
 
 기본 가드는 보존소 4 GiB, 파일시스템 여유 5 GiB다. 원문·실패·진행 중·남의 파일을 포함한
 전체 파일 크기(논리 크기와 할당 블록 중 큰 값)에, 한 회 최대 원문 256 MiB의 **3배+16 MiB**를
@@ -105,15 +126,21 @@ alias가 관측 보존소를 가리키면 정규화 후 거부한다. 경로를 
 | CLI 종료 코드 | 의미 |
 | --- | --- |
 | 0 | 수집·검증·요청 작업 성공 |
-| 1 | `check`에서 누락 슬롯·오래된 성공·손상 발견 |
+| 1 | `check`에서 누락 슬롯·오래된 성공·손상·미완료 삭제·만료 미해결 발견 |
 | 2 | Docker·저장·측정·검증·경로 오류 |
 | 3 | 잠금 경쟁 |
-| 4 | `cycle` 용량 가드로 신규 수집 중단(만료는 수행) |
+| 4 | `cycle` 용량 가드로 신규 수집 중단(만료는 먼저 시도) |
+| 5 | `cycle` 수집 성공, 만료 실패 또는 만료 이력 저장 실패 |
 
-**점검 담당과 주기는 아직 정하지 않았다**(자동 알림 없음 — 사용자 결정 사항). 권장: 매일 1회와 배포 직후 다음을 실행해
-마지막 성공과 누락 슬롯을 확인한다.
+**점검 담당과 주기는 아직 정하지 않았다**(자동 알림 없음 — 사용자 결정 사항). 권장: **6시간마다**와 배포 직후
+다음을 실행해 마지막 성공·누락 슬롯·만료 미해결을 확인한다. Docker의 약 18~20시간 보존창에서는
+매일 1회 점검만으로 수집 중단을 로그 회전 전에 발견하기 부족하다.
 설치 시 첫 정기 실행 예정 시각을 정확히 기록하고 아래 `--first-slot`에 넣는다(예시는 예시일 뿐이다).
 `check`는 복원 해시가 맞는 성공만 인정한다. 수동 collect는 정기 슬롯을 채우지 않는다.
+각 run을 독립적으로 읽고 검증하므로 JSON 오류·필드 누락·손상 run은 `invalid_runs`에 run ID로 나열하고
+나머지 run으로 `last_success`와 슬롯을 판정한다. `pending_deletions`는 완료되지 않은 삭제의 run ID 목록,
+`expiry_failed`는 내구 저장된 만료 미해결 상태다(상태 기록을 읽을 수 없어도 true).
+이들 목록이 비어 있지 않거나 `expiry_failed=true`이면 `ok=false`, 종료 1이다.
 
 ```bash
 /usr/bin/python3 /home/ubuntu/fxi-host-tools/docker_log_archive.py check \
@@ -124,7 +151,7 @@ alias가 관측 보존소를 가리키면 정규화 후 거부한다. 경로를 
 슬롯 판정 창은 `[now−10분−24시간, now−10분]`이고 그 뒤의 슬롯은 `pending_slots`다.
 마지막 성공이 70분보다 오래됐으면 `stale`이다. 실패·가드·크론 미실행은 해당 정기 성공이
 없으므로 누락으로 잡힌다. `coverage`의 unknown/gaps/tail도 함께 확인한다.
-**자동 알림은 없다.** 실행되지 않은 크론은 자신을 점검할 수 없으며, 하루 점검을 건너뛰면
+**자동 알림은 없다.** 실행되지 않은 크론은 자신을 점검할 수 없으며, 점검이 24시간 이상 밀리면
 24시간 창 밖의 누락은 별도 이력 조사가 필요하다. 크론 출력 파일도 운영 점검 때 크기를 확인한다.
 
 ## 설치·해제 절차 (승인된 호스트 작업에서 실행)
@@ -194,10 +221,28 @@ alias가 관측 보존소를 가리키면 정규화 후 거부한다. 경로를 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 /Users/jay/.cache/fxi-venv-lock/bin/python -m pytest \
   --noconftest -p no:cacheprovider -p no:asyncio \
-  tests/test_docker_log_archive_contract.py tests/test_docker_log_archive.py -q
-shasum -a 256 tests/test_docker_log_archive_contract.py
+  tests/test_docker_log_archive_contract.py tests/test_docker_log_archive_cycle_contract.py \
+  tests/test_docker_log_archive.py -q
+PYTHONDONTWRITEBYTECODE=1 /Users/jay/.cache/fxi-py312/bin/python -m pytest \
+  --noconftest -p no:cacheprovider -p no:asyncio \
+  tests/test_docker_log_archive_contract.py tests/test_docker_log_archive_cycle_contract.py \
+  tests/test_docker_log_archive.py -q
+shasum -a 256 tests/test_docker_log_archive_contract.py tests/test_docker_log_archive_cycle_contract.py
 ```
 
-계약 파일의 고정 해시는 `e21f851214d5b38594f8b6be437ec4a6104f0f23b353e3eea23621b1fa3247e6`이다.
-지정 잠금 환경(Python **3.13.5**)과 별도 로컬 **Python 3.12.14** 환경에서 두 시험 파일 81건이 모두 통과했다(2026-09-21).
+읽기 전용 계약의 고정 SHA-256:
+
+- v2(34건): `e21f851214d5b38594f8b6be437ec4a6104f0f23b353e3eea23621b1fa3247e6`
+- E(24건): `a5934c62b3435004281f1b1cf52bb1ee91e7fc2bb7d6f35053cfe85a577484d1`
+
+구현 측 시험은 수집 내구 순서·해시 외에 만료 실패/해제 기록 저장 거부, 프로그래밍 예외 전파,
+root 권한에도 유효한 `os.unlink` 삭제 거부 주입, pending 재시도, 만료 상태 기록 내구 순서를 검증한다.
+
+2026-09-21 로컬 검증 결과(두 계약 해시 불변):
+
+| 환경 | v2 계약 | E 계약 | 구현 측 | 합계 |
+| --- | --- | --- | --- | --- |
+| 잠금 환경 Python 3.13.5 | 34 통과 | 24 통과 | 73 통과 | 131 통과 |
+| 별도 Python 3.12.14 | 34 통과 | 24 통과 | 73 통과 | 131 통과 |
+
 호스트의 **3.12.3** 실행은 설치 때 확인한다(패치 버전 차이는 대신 증명하지 않는다).

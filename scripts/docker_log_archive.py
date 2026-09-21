@@ -31,6 +31,7 @@ import zlib
 UTC = timezone.utc
 POLICY = {"policy": "fxi-docker-log-archive", "version": 1, "retention_days": 14}
 MARKER = ".archive-policy.json"
+EXPIRY_STATE = "expiry-state.json"
 STREAMS = ("stdout", "stderr")
 TIMEOUT = 120
 MAX_CAPTURE_BYTES = 256 * 1024 * 1024  # both raw streams together
@@ -49,6 +50,12 @@ class _Busy(ArchiveError):
     pass
 
 
+class _ExpiryFailed(ArchiveError):
+    def __init__(self, report):
+        super().__init__("expiry failed")
+        self.report = report
+
+
 def _now(value=None):
     value = value if value is not None else datetime.now(UTC)
     if value.tzinfo is None:
@@ -63,7 +70,7 @@ def _iso(value):
 def _date(value):
     try:
         return _now(datetime.fromisoformat(value.replace("Z", "+00:00")))
-    except (AttributeError, TypeError, ValueError):
+    except (AttributeError, TypeError, ValueError, OverflowError):
         raise ArchiveError("invalid timestamp") from None
 
 
@@ -166,9 +173,8 @@ def _require(root):
     return root
 
 
-def _records(root, kind):
+def _record_paths(root, kind):
     root = _require(root)
-    result = []
     directory = root / kind
     if directory.is_symlink():
         raise ArchiveError("symlink metadata directory")
@@ -176,19 +182,84 @@ def _records(root, kind):
         if kind == "runs":
             if not RUN_ID.fullmatch(entry.name):
                 continue
-            if entry.is_symlink():
-                raise ArchiveError("symlink run")
             path = entry / "manifest.json"
-            if not path.exists():
+            if not entry.is_symlink() and not path.exists():
                 continue  # unpublished/incomplete run
         else:
             if not RUN_ID.fullmatch(entry.stem) or entry.suffix != ".json":
                 continue
             path = entry
-        value = _json(path)
-        if value.get("policy") != POLICY["policy"] or value.get("run_id") != entry.stem:
+        yield entry.stem, path
+
+
+def _validate_record(value, kind, run_id):
+    """Normalize malformed persisted fields here, not in cycle's isolation."""
+    try:
+        if value["policy"] != POLICY["policy"] or _valid_id(value["run_id"]) != run_id:
             raise ArchiveError("invalid record identity")
-        result.append(value)
+        until = _date(value["until"])
+        if kind == "runs":
+            since = _date(value["since"])
+            if since > until or _date(value["started_at"]) > until:
+                raise ArchiveError("invalid run window")
+            if not isinstance(value["container_id"], str) or not CID.fullmatch(value["container_id"]):
+                raise ArchiveError("invalid container id")
+            for flag in ("container_changed", "restarted"):
+                if type(value[flag]) is not bool:
+                    raise ArchiveError("invalid run flag")
+            for stream in STREAMS:
+                metadata = value["streams"][stream]
+                for key in ("raw_sha256", "gz_sha256"):
+                    if not isinstance(metadata[key], str) or not CID.fullmatch(metadata[key]):
+                        raise ArchiveError("invalid stream hash")
+                for key in ("raw_bytes", "gz_bytes"):
+                    if type(metadata[key]) is not int or metadata[key] < 0:
+                        raise ArchiveError("invalid stream size")
+                first, last = metadata["first"], metadata["last"]
+                if (first is None) != (last is None):
+                    raise ArchiveError("invalid stream window")
+                if first is not None and not since <= _date(first) <= _date(last) <= until:
+                    raise ArchiveError("invalid stream window")
+            tail = value["unarchived_tail"]
+            if tail is not None:
+                _validate_interval(tail)
+            slot = value.get("scheduled_slot")
+            if slot is not None:
+                parsed = _date(slot)
+                if parsed.minute != 41 or parsed.second or parsed.microsecond:
+                    raise ArchiveError("invalid scheduled slot")
+        elif kind == "failures":
+            if not isinstance(value["stage"], str) or not value["stage"]:
+                raise ArchiveError("invalid failure stage")
+            if "replacement" in value:
+                replacement = value["replacement"]
+                _valid_id(replacement["previous_run_id"])
+                cid = replacement["new_container_id"]
+                if not isinstance(cid, str) or not CID.fullmatch(cid):
+                    raise ArchiveError("invalid replacement id")
+                _validate_interval(replacement["interval"])
+        elif kind == "deletions":
+            _date(value["deleted_at"])
+            if value["status"] not in ("pending", "deleted"):
+                raise ArchiveError("invalid deletion status")
+    except (KeyError, TypeError, ValueError, IndexError):
+        raise ArchiveError("invalid record fields") from None
+    return value
+
+
+def _validate_interval(value):
+    if not isinstance(value, list) or len(value) != 2 or _date(value[0]) > _date(value[1]):
+        raise ArchiveError("invalid interval")
+
+
+def _read_record(path, kind, run_id):
+    if kind == "runs" and path.parent.is_symlink():
+        raise ArchiveError("symlink run")
+    return _validate_record(_json(path), kind, run_id)
+
+
+def _records(root, kind):
+    result = [_read_record(path, kind, run_id) for run_id, path in _record_paths(root, kind)]
     return sorted(result, key=lambda r: (_date(r["until"]), r["run_id"]))
 
 
@@ -214,7 +285,8 @@ def _checked_cursor(root):
     if previous is None:
         return None
     try:
-        run = _json(root / "runs" / _valid_id(previous["run_id"]) / "manifest.json")
+        run_id = _valid_id(previous["run_id"])
+        run = _read_record(root / "runs" / run_id / "manifest.json", "runs", run_id)
         if any(previous.get(k) != run.get(k)
                for k in ("run_id", "until", "container_id", "started_at")):
             raise ArchiveError("cursor does not match manifest")
@@ -420,6 +492,7 @@ def _valid_id(value):
 def _verify(root, run, *, materialize):
     result = []
     try:
+        _validate_record(run, "runs", _valid_id(run["run_id"]))
         directory = root / "runs" / _valid_id(run["run_id"])
         if (root / "runs").is_symlink() or directory.is_symlink():
             raise ArchiveError("symlink run")
@@ -454,9 +527,7 @@ def restore(root, run_id):
     run_id = _valid_id(run_id)
     if (root / "runs").is_symlink() or (root / "runs" / run_id).is_symlink():
         raise ArchiveError("symlink run")
-    manifest = _json(root / "runs" / run_id / "manifest.json")
-    if manifest.get("run_id") != run_id or manifest.get("policy") != POLICY["policy"]:
-        raise ArchiveError("invalid manifest identity")
+    manifest = _read_record(root / "runs" / run_id / "manifest.json", "runs", run_id)
     return _verify(root, manifest, materialize=True)
 
 
@@ -505,6 +576,9 @@ def coverage(root):
 
 def _remove_run(root, run):
     directory = root / "runs" / _valid_id(run["run_id"])
+    if not directory.exists():
+        _fsync_dir(directory.parent)
+        return  # retry an intent whose directory removal already completed
     # Never recursive-delete a run: an operator's extra file must survive too.
     for name in ("manifest.json", "stdout.gz", "stderr.gz"):
         (directory / name).unlink(missing_ok=True)
@@ -519,6 +593,18 @@ def _expire_locked(root, now, dry_run):
     current = _checked_cursor(root)
     candidates = [r for r in runs(root) if _date(r["until"]) < cutoff
                   and (not current or r["run_id"] != current["run_id"])]
+    # A prior deletion may have removed the manifest before a payload unlink
+    # failed. Its durable intent is still authoritative for retrying those files.
+    candidate_ids = {r["run_id"] for r in candidates}
+    for record in deletions(root):
+        if record["status"] != "pending" or record["run_id"] in candidate_ids:
+            continue
+        if (_date(record["until"]) >= cutoff
+                or (current and record["run_id"] == current["run_id"])
+                or (root / "runs" / record["run_id"] / "manifest.json").exists()):
+            raise ArchiveError("inconsistent pending deletion")
+        candidates.append(record)
+    failed = failures(root)
     result = {"candidates": [r["run_id"] for r in candidates], "deleted": []}
     if dry_run:
         return result
@@ -532,7 +618,7 @@ def _expire_locked(root, now, dry_run):
         record["status"] = "deleted"
         _atomic_json(path, record)
         result["deleted"].append(run["run_id"])
-    for failure in failures(root):
+    for failure in failed:
         if _date(failure["until"]) < cutoff:
             # Remove only known partial payloads tied to a recorded failure.
             run_id = failure["run_id"]
@@ -549,10 +635,50 @@ def _expire_locked(root, now, dry_run):
     return result
 
 
+def _record_expiry(root, now, failed):
+    try:
+        _atomic_json(root / EXPIRY_STATE, {"policy": POLICY["policy"],
+                                         "until": _iso(now), "expiry_failed": failed})
+        return True
+    except (OSError, ArchiveError):
+        # Retention history cannot be guaranteed on a failing device; keep
+        # collection available and expose the loss through stderr AND JSON.
+        print("ARCHIVE_EXPIRY_HISTORY_UNAVAILABLE", file=sys.stderr)
+        return False
+
+
+def _expiry_unresolved(root):
+    path = root / EXPIRY_STATE
+    if not path.exists():
+        return False
+    value = _json(path)
+    if value.get("policy") != POLICY["policy"] or type(value.get("expiry_failed")) is not bool:
+        raise ArchiveError("invalid expiry state")
+    _date(value.get("until"))
+    return value["expiry_failed"]
+
+
+def _attempt_expiry(root, now, dry_run=False):
+    try:
+        expired = _expire_locked(root, now, dry_run)
+    except (ArchiveError, OSError):
+        saved = _record_expiry(root, now, True)
+        return {"expiry": None, "expiry_failed": True, "expiry_history_failed": not saved}
+    # Both failure recording and successful resolution are best effort. In
+    # particular, an unavailable resolution write must not abort collection.
+    saved = True if dry_run else _record_expiry(root, now, False)
+    return {"expiry": expired, "expiry_failed": _expiry_unresolved(root) if dry_run else not saved,
+            "expiry_history_failed": not saved}
+
+
 def expire(root, *, now=None, dry_run=False):
     root = _require(_root(root, mutate=True))
     with locked(root):
-        return _expire_locked(root, _now(now), dry_run)
+        result = _attempt_expiry(root, _now(now), dry_run)
+        if result["expiry"] is None:
+            raise _ExpiryFailed(result)
+        return {**result["expiry"], "expiry_failed": result["expiry_failed"],
+                "expiry_history_failed": result["expiry_history_failed"]}
 
 
 def _usage(root):
@@ -576,24 +702,31 @@ def check(root, *, first_slot, now=None, grace=timedelta(minutes=10)):
     while slot <= now:
         (expected if slot <= cutoff else pending).append(_iso(slot))
         slot += timedelta(hours=1)
-    records = runs(root)
+    root = _require(root)
     successful = set()
-    invalid = []
-    for run in records:
+    invalid, valid = [], []
+    for run_id, path in _record_paths(root, "runs"):
         try:
-            _verify(_require(root), run, materialize=False)
+            run = _read_record(path, "runs", run_id)
+            _verify(root, run, materialize=False)
         except ArchiveError:
-            invalid.append(run["run_id"])
+            invalid.append(run_id)
             continue
+        valid.append(run)
         if run.get("scheduled_slot"):
             successful.add(run["scheduled_slot"])
-    valid = [r for r in records if r["run_id"] not in invalid]
+    pending_deletions = [r["run_id"] for r in deletions(root) if r["status"] == "pending"]
+    try:
+        expiry_failed = _expiry_unresolved(root)
+    except ArchiveError:
+        expiry_failed = True  # unreadable state cannot certify a resolution
     last = max((_date(r["until"]) for r in valid), default=None)
     missed = [s for s in expected if s not in successful]
     stale = last is None or now - last > timedelta(hours=1) + grace
     return {"last_success": _iso(last) if last else None, "stale": stale,
-            "missed_slots": missed, "pending_slots": pending, "invalid_runs": invalid,
-            "ok": not (stale or missed or invalid)}
+            "missed_slots": missed, "pending_slots": pending, "invalid_runs": sorted(invalid),
+            "pending_deletions": pending_deletions, "expiry_failed": expiry_failed,
+            "ok": not (stale or missed or invalid or pending_deletions or expiry_failed)}
 
 
 def cycle(root, *, runner=_run_docker, container="exchange-rate-app", now=None,
@@ -603,22 +736,23 @@ def cycle(root, *, runner=_run_docker, container="exchange-rate-app", now=None,
     if max_archive_bytes <= 0 or min_free_bytes < 0:
         raise ArchiveError("invalid capacity guard")
     with locked(root) as root:
-        expired = _expire_locked(root, now, False)
+        result = _attempt_expiry(root, now)
         # A measurement failure aborts collection, after expiry has still run.
         try:
             used, free = _usage(root), shutil.disk_usage(root).free
         except OSError:
-            return {"expiry": expired, "collection_code": 2, "guard": "measurement_failed"}
+            return {**result, "collection_code": 2, "guard": "measurement_failed", "exit_code": 2}
         guard = ("archive_limit" if used + PEAK_RESERVE_BYTES > max_archive_bytes else
                  "free_space" if free - PEAK_RESERVE_BYTES < min_free_bytes else None)
         if guard:
-            return {"expiry": expired, "collection_code": None, "guard": guard,
+            return {**result, "collection_code": None, "guard": guard, "exit_code": 4,
                     "used_bytes": used, "free_bytes": free, "reserve_bytes": PEAK_RESERVE_BYTES}
         slot = now.replace(minute=41, second=0, microsecond=0)
         if slot > now:
             slot -= timedelta(hours=1)
         code = _collect_locked(root, runner=runner, container=container, now=now, scheduled_slot=_iso(slot))
-        return {"expiry": expired, "collection_code": code, "guard": None}
+        return {**result, "collection_code": code, "guard": None,
+                "exit_code": 2 if code else 5 if result["expiry_failed"] else 0}
 
 
 def pre_switch(root, *, runner=_run_docker, container="exchange-rate-app", now=None):
@@ -665,7 +799,7 @@ def main(argv=None):
         if args.command == "cycle":
             result = cycle(args.root, container=args.container, max_archive_bytes=args.max_archive_bytes,
                            min_free_bytes=args.min_free_bytes)
-            code = result["collection_code"] if result["collection_code"] is not None else 4
+            code = result["exit_code"]
         elif args.command == "pre-switch":
             result = pre_switch(args.root, container=args.container)
             code = result["collection_code"]
@@ -682,9 +816,13 @@ def main(argv=None):
         else:
             result = (expire(args.root, dry_run=args.dry_run) if args.command == "expire" else
                       coverage(args.root) if args.command == "coverage" else runs(args.root))
-            code = 0
+            code = 2 if args.command == "expire" and result["expiry_history_failed"] else 0
         print(json.dumps(result, sort_keys=True))
         return code
+    except _ExpiryFailed as error:
+        print(json.dumps(error.report, sort_keys=True))
+        print("ARCHIVE_OPERATION_FAILED", file=sys.stderr)
+        return 2
     except _Busy:
         print("ARCHIVE_BUSY", file=sys.stderr)
         return 3
