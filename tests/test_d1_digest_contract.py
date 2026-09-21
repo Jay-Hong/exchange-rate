@@ -50,12 +50,18 @@ IMPLEMENTATION = (
     "tools/fixture_capture/d1_findings.py",
     "tools/fixture_capture/d1_replace.py",
     "tools/fixture_capture/d1_digest.py",
+    # Slice 5b-2: the admission layer and everything it imports (the detector no longer reaches the registry, 5b-1).
+    "tools/fixture_capture/queries.py",
+    "tools/fixture_capture/limits.py",
+    "tools/fixture_capture/detector.py",
+    "tools/fixture_capture/d1_approval.py",
+    "tools/fixture_capture/admission.py",
 )
 ALL_FILES = (SPEC, *AMENDMENTS, *IMPLEMENTATION)
 V1_SHA256 = "47d090a63997116d8df9af80b3a04a3e99a5a62c487aaba34236d1897e273635"
 # Entry points chosen by this contract, not derived from the implementation's own manifest: removing an entry
 # module from IMPLEMENTATION_FILES must still be caught.
-ENTRY_MODULES = ("d1_findings", "d1_replace", "d1_digest")
+ENTRY_MODULES = ("d1_findings", "d1_replace", "d1_digest", "admission")
 _DIAGNOSTIC = re.compile(r"[A-Za-z0-9_.:\[\] -]*")
 
 
@@ -152,16 +158,17 @@ def _closure(package):
     return {f"tools/fixture_capture/{name}.py" for name in seen}
 
 
-def test_every_module_the_entry_points_and_the_package_init_import_is_in_the_manifest():
+def test_the_manifest_is_exactly_the_import_closure():
+    # Equality, not a subset (slice 5b-2): a file left in the manifest after nothing imports it is also a mistake.
     closure = _closure(REPO / "tools" / "fixture_capture")
     assert "tools/fixture_capture/__init__.py" in closure
-    assert closure <= set(IMPLEMENTATION), sorted(closure - set(IMPLEMENTATION))
+    assert closure == set(IMPLEMENTATION), (sorted(closure - set(IMPLEMENTATION)), sorted(set(IMPLEMENTATION) - closure))
 
 
 def test_the_closure_follows_what_the_package_init_imports(tmp_path):
     package = tmp_path / "tools" / "fixture_capture"
     package.mkdir(parents=True)
-    for name in ("__init__", *ENTRY_MODULES, "errors", "d1_policy", "d1_observe"):
+    for name in (Path(rel).stem for rel in IMPLEMENTATION):
         (package / f"{name}.py").write_bytes((REPO / "tools" / "fixture_capture" / f"{name}.py").read_bytes())
     init = package / "__init__.py"
     init.write_bytes(init.read_bytes() + b"from .extra_policy import RULES\n")

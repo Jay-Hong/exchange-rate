@@ -33,6 +33,11 @@ IMPLEMENTATION_FILES = (
     "tools/fixture_capture/d1_findings.py",
     "tools/fixture_capture/d1_replace.py",
     "tools/fixture_capture/d1_digest.py",
+    "tools/fixture_capture/queries.py",
+    "tools/fixture_capture/limits.py",
+    "tools/fixture_capture/detector.py",
+    "tools/fixture_capture/d1_approval.py",
+    "tools/fixture_capture/admission.py",
 )
 
 _CHECKOUT = Path(__file__).resolve().parents[2]
