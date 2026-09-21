@@ -6,6 +6,10 @@
 보고 계약은 [SOURCE_HEALTH_PLAN §7.10](SOURCE_HEALTH_PLAN.md#710-investing-슬라이스-1-보고-전용-구현),
 발행 구현은 [investing_report.py](app/crawlers/investing_report.py)다.
 
+상시 Docker 원문 보관은 [B v1 로그 보존](LOG_RETENTION.md)의 별도 `~/logs/docker-archive`가 맡고
+14일 초과분을 만료한다(2026-09-21 현재 **미설치**). 이 관측 보존소의 무삭제·집계 계약은 그대로다. B 설치 뒤에는
+컨테이너 switch 직전에 B의 `pre-switch` 수집·복원·ID 재확인을 마치고, 관측 기간에 필요한 추출은 이 문서 절차로 별도 수행한다.
+
 ## 실행
 
 아래 추출 명령은 Docker를 읽을 수 있는 **승인된 실행 호스트**에서 사용한다.
