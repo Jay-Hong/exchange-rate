@@ -15,7 +15,7 @@ from uuid import UUID
 from bs4 import NavigableString, Tag
 
 from .errors import CaptureError
-from .registry import query_key
+from .queries import query_key
 
 
 # This table is deliberately exhaustive. No metadata-wide exemption exists.

@@ -5,7 +5,7 @@ from functools import wraps
 from bs4 import Tag
 
 from .errors import CaptureError
-from .registry import query_key
+from .queries import query_key
 
 
 def element_path(element):

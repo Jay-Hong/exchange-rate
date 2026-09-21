@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 
 from .errors import CaptureError
+from .queries import query_key  # re-exported: registry.query_key is queries.query_key
 from .runtime import load_sources
 
 
@@ -52,18 +53,6 @@ def selector_tokens(selector):
         if pos == len(selector):
             raise CaptureError("selector_syntax", "registry")
     return frozenset(ids), frozenset(classes)
-
-
-def query_key(method, args, kwargs):
-    """Exact public call shape: list order, method and recursive are significant."""
-    def freeze(value):
-        if type(value) is list:
-            return ("list", tuple(freeze(v) for v in value))
-        if type(value) in (str, bool, int, type(None)):
-            return (type(value).__name__, value)
-        raise CaptureError("query_arguments", "registry")
-    return method, tuple(freeze(v) for v in args), tuple(
-        (k, freeze(v)) for k, v in sorted(kwargs.items()))
 
 
 @dataclass(frozen=True)
