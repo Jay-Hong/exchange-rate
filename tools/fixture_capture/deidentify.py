@@ -6,10 +6,14 @@ from urllib.parse import parse_qsl, urlparse
 
 from bs4 import Comment, Doctype, ProcessingInstruction, Tag
 
+from .d1_policy import is_empty_unsupported
 from .errors import CaptureError
 
 EMPTY_BODY_TAGS = frozenset(("script", "style", "noscript", "template"))
 REMOVE_OUTSIDE = EMPTY_BODY_TAGS | frozenset(("meta", "link", "input"))
+# Kept refusable on purpose: D1 §2.3 rejects every ruby structure, empty ones too,
+# so removing an empty one here would quietly convert a refusal into a pass.
+RUBY = frozenset(("ruby", "rb", "rt", "rtc", "rp"))
 _CODE = re.compile(r"[A-Za-z]{3}\Z", re.ASCII)
 _FLAG = re.compile(r"flag_([a-z]{3})(_|\.)", re.IGNORECASE)
 
@@ -69,6 +73,12 @@ def deidentify(soup, registry):
         protected = _boundary(fixture, registry)
         # Validate attributes even on elements about to be removed.
         elements = [node for node in fixture.descendants if isinstance(node, Tag)]
+        # Decided BEFORE any cleanup: cleanup strips attributes and removes
+        # comment/meta/link/input children, after which an element that carried any
+        # of those is indistinguishable from one that was always empty (measured on
+        # 6 shapes, 4 of them end up empty). Asking later would widen this silently.
+        empty_unsupported = [element for element in elements
+                             if is_empty_unsupported(element) and element.name not in RUBY]
         for element in elements:
             _attributes(element, registry)
         for node in list(fixture.descendants):
@@ -79,6 +89,12 @@ def deidentify(soup, registry):
             if element.name in EMPTY_BODY_TAGS:
                 element.clear()
             if element.name in REMOVE_OUTSIDE and id(element) not in protected:
+                element.decompose()
+        # Same boundary rule as every other removal. Only the elements listed before
+        # cleanup qualify, so nothing that merely became empty above is touched and
+        # no parent is removed for having lost its children.
+        for element in empty_unsupported:
+            if id(element) not in protected:
                 element.decompose()
         return fixture
     except CaptureError:
