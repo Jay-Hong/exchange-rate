@@ -4,8 +4,8 @@ The policy spec is `design/c1b2/d1_detection_policy_v1.md`
 (policy_spec_sha256 47d090a63997116d8df9af80b3a04a3e99a5a62c487aaba34236d1897e273635).
 
 Only §2 lives here: which tag names may appear, which text kinds may appear, and
-which structures are refused outright. Producing detections is §3-§6 and is not
-implemented yet.
+which structures are refused outright. Producing detections is §3-§5
+(`d1_observe`) and §6 (`d1_findings`).
 
 Refusal is the mechanism for anything this policy cannot read. A structure we do
 not support is rejected, never guessed at and never silently skipped: `get_text()`

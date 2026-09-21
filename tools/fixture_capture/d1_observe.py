@@ -7,7 +7,8 @@ Nothing here reports what it found. An observation carries a token from a closed
 list and a position; the text that produced it never leaves this module, because a
 page can put a person's name anywhere a diagnostic might echo.
 
-Selecting among observations is §6 and is not implemented yet.
+Selecting among observations — merge, longest match, numbering — is §6, in
+`d1_findings`.
 """
 
 import re
