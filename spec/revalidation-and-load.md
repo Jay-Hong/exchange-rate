@@ -3,10 +3,10 @@
 - 책임: jitter · single-flight · bounded wait
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `0df9b514da33212a24350bc756a32b0fc5907b8d`
+- server 기준 commit: `f7d2bcad03301259beb80b7c3d2e000ceabd6428`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `3326ea318fe0cbeb0094e64bcabf64a02f6f30272e83f667c74b075f0b5b0324`
+- manifest SHA: `6c0a9799839105398e78fd53b87312726fea5a19e4d7679dd48ff4061ff79eeb`
 - baseline SHA: `40977d20c51a8cf027520e771f8b8e80aeed1d973b32ca4cc4427fa991b268b9`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
