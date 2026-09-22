@@ -275,7 +275,7 @@ def _no_real_browser():
             "시험이 실제 브라우저를 띄우려 했다. 드라이버 컨텍스트를 명시적으로 주입하라.")
 
     # ⛔ 헬퍼 이름만 막으면 **별칭이 통과한다**. hana·woori 는 `from ... import
-    #    create_selenium_driver` 로 자기 모듈에 이름을 박아 두어(hana.py:28 / woori.py:32),
+    #    create_selenium_driver` 로 자기 모듈에 이름을 박아 두어(두 모듈 상단 import),
     #    utils 를 패치해도 그 참조는 원본을 가리킨다(실측: 패치 뒤 두 모듈의 참조 모두 mock
     #    아님). 원본이 지나는 유일한 브라우저 경계는 utils.py 의 `webdriver.Chrome(...)` 이다.
     #    그래서 **반드시 통과해야 하는 경계** — 드라이버 설치와 Chrome 생성 — 를 함께 막는다.
@@ -284,7 +284,7 @@ def _no_real_browser():
     #    함수로 들어가는 경로는 밟지 않는다. 그래서 이 두 항목은 지금 어떤 시험으로도
     #    판정되지 않는다 — Chrome 항목을 빼도 전체 스위트가 통과한다(실측). 새 시험이 별칭
     #    경로로 들어올 때를 위한 선제 경계이지, 지금 회귀가 잠겨 있다는 뜻이 아니다.
-    # ⚠️ 이 가드가 닿는 범위는 **pytest 프로세스 안**이다. hana.py:136 처럼 별도 파이썬
+    # ⚠️ 이 가드가 닿는 범위는 **pytest 프로세스 안**이다. hana 의 `_run_selenium_subprocess_fallback` 처럼 별도 파이썬
     #    프로세스를 띄우는 경로에는 이 patch 가 전달되지 않는다.
     # ⛔ 생성만 막으면 부족하다. `cleanup_zombie_chrome_processes()` 는 **이미 떠 있는**
     #    Chrome 을 psutil 로 훑어 죽인다 — 시험이 그 경로에 닿아 개발자 기계의 브라우저

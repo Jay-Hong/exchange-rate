@@ -419,7 +419,7 @@
 - iframe 전환 없으면 Selector 찾기 실패
 - Selenium 폴백은 subprocess로 격리 실행 (45초 타임아웃)
 
-**상세 코드:** `app/crawlers/hana.py:54-132` (subprocess fallback 포함)
+**상세 코드:** `app/crawlers/hana.py` 의 `crawl_and_save_hana_bank_exchange_rates`·`_run_selenium_subprocess_fallback` (subprocess fallback 포함)
 **최근 리팩토링:**
 - 2026-09-01: IN 모드만 20초(`:05/:25/:45`) → 10초
   (`:02/:12/:22/:32/:42/:52`)로 상향. BREAK1/BREAK2/OUT은 불변
@@ -624,7 +624,7 @@ unchanged로 확정하지 않으며 기존 MIBANK writer도 후속 원자 배포
 - MIBANK는 영업일 자정 직전 환율 제공 → 자정/주말에는 부정확
 - Selenium 폴백은 subprocess로 격리 실행 (45초 타임아웃)
 
-**상세 코드:** `app/crawlers/woori.py:59-148` (subprocess fallback 포함), `woori.py:212-282` (crawl_woori_past_date_rates 함수)
+**상세 코드:** `app/crawlers/woori.py` 의 `crawl_and_save_woori_bank_exchange_rates`·`_run_selenium_subprocess_fallback` (subprocess fallback 포함), `crawl_woori_past_date_rates` 함수
 **최근 리팩토링:**
 - 2026-09-01: IN 모드만 60초(`:53`) → 30초(`:14/:44`)로 상향. BREAK1의
   `:53` 및 05:04:53 종료, BREAK2/OUT 제외는 불변
