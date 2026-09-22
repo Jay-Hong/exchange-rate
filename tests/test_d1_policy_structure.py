@@ -1,4 +1,4 @@
-"""D1 §2 — what this policy refuses to read, and the one thing it removes instead.
+"""D1 §2 — refusals, with empty U cleanup under amendment 2 §A4.
 
 The removal is judged before cleanup on purpose; several tests here exist only to
 pin that ordering, because judging afterwards passes elements nobody inspected.

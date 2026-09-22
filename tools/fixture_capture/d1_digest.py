@@ -3,6 +3,8 @@
 Specification: tools/fixture_capture/d1_spec/d1_detection_policy_v1.txt §7.3.
 Amendment: tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment1.txt
 §A2–A3 separates the runtime record from the policy digest.
+Amendment: tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment2.txt
+§A4 defines which reviewed empty unsupported elements cleanup may remove.
 
 이 모듈은 라이브러리이며 아무 경로도 부르지 않는다(배선은 슬라이스 5)
 """
@@ -24,6 +26,7 @@ from .errors import CaptureError
 SPEC_PATH = "tools/fixture_capture/d1_spec/d1_detection_policy_v1.txt"
 AMENDMENT_PATHS = (
     "tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment1.txt",
+    "tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment2.txt",
 )
 IMPLEMENTATION_FILES = (
     "tools/fixture_capture/__init__.py",

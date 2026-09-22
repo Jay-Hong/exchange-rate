@@ -41,7 +41,9 @@ from tools.fixture_capture.errors import CaptureError
 
 REPO = Path(__file__).resolve().parents[1]
 SPEC = "tools/fixture_capture/d1_spec/d1_detection_policy_v1.txt"
-AMENDMENTS = ("tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment1.txt",)
+AMENDMENTS = ("tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment1.txt",
+              # Slice 5c-3a-B: amendment 2 §A4, the reviewed empty unsupported elements cleanup may remove.
+              "tools/fixture_capture/d1_spec/d1_detection_policy_v1_amendment2.txt")
 IMPLEMENTATION = (
     "tools/fixture_capture/__init__.py",
     "tools/fixture_capture/errors.py",
