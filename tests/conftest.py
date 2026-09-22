@@ -331,3 +331,11 @@ def _default_legacy_write_mode():
     except Exception:
         pass
     yield
+
+
+# C1d: register one fresh report collector per pytest session. Existing Firebase,
+# database and browser isolation above remains in force.
+def pytest_configure(config):
+    from tests.bank_capture_hold import HoldSession  # Lazy: no app import in bootstrap.
+
+    config.pluginmanager.register(HoldSession(), "bank_capture_holds")
