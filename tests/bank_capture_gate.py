@@ -6,7 +6,7 @@ from tools.fixture_capture import admission
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "bank_capture"
 REVIEWS_ROOT = Path(__file__).parent / "fixture_reviews" / "bank_capture"
-ADMITTED_ROUTES = ("bs_mibank", "citi_mibank")
+ADMITTED_ROUTES = ("bs_official", "citi_primary", "citi_secondary", "bs_mibank", "citi_mibank")
 
 
 def admitted_evidence(route, *, root=None, reviews_root=None, admitted=None):
