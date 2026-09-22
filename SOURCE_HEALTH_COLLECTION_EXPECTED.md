@@ -8,7 +8,8 @@
   실행기 로거의 **첫 필터**로 고정해 스레드 로컬 문맥으로 결속한다. 본문 §4.2 의 A(실행기 확장)는 완전한 제출 연결이 필요할 때의 후속 선택지.
 - **O2(설정 효력)**: `commit_ack_observed_at`(`db.commit()` 반환 바로 다음 줄) 채택. known/unknown 구간은 부록 A §4.
 - **O3(완결성·보존)**: Tier 1 = 원시 사건 + 현재 관측 요약만(부재는 전부 `insufficient_evidence`, `stall_suspected` 는 진단). 본문 §7.2 완결 증명·§9.3 ledger 는 Tier 2.
-- **선행 수정**: 큐형 래퍼가 worker 스레드에서 asyncio 큐를 조작하는 결함(부록 A §7) — 래퍼를 `async def` 로 바꾸는 수정·회귀 검증이 큐 계측보다 먼저.
+- **선행 수정**: 큐형 래퍼가 worker 스레드에서 asyncio 큐를 조작하는 결함(부록 A §7) — 래퍼를 `async def` 로 바꾸는 수정·회귀 검증이 큐 계측보다 먼저. **반영 `0df9b51`(2026-09-22)** — 이로써 본문 §11.3 1번 중 **큐형 래퍼의 동기·worker 스레드 요구만** 대체된다. 요청형 래퍼의 동기·worker 스레드 실행, 두 래퍼의 인자 없는 호출, 나머지 동작 보존 요구는 그대로다.
+- **S2·S3 구현(2026-09-23)**: `app/collection_policy.py`(독립 정책 선언·revision 의미 지문·모드 원본 해시 확인선), `app/collection_slots.py`(순수 슬롯 후보 생성·설정 분류). 계약 시험 `tests/test_collection_policy_contract.py`·`tests/test_collection_slots_contract.py`(Claude 작성·해시 고정, 구현은 Codex). **운영 경로 무접촉** — 어디서도 호출하지 않는다. scheduled_off 레코드·집계·revision 발효 구간은 S4.
 
 **인용 읽는 법**: 본문·부록의 `*.verdict.txt:줄`, `handoff_*.txt`, `collection_expected_r*.md`, `switch_jobs_table_*.txt`, `/private/tmp/…whl` 은 리포 밖 설계 검토
 기록(작성 시점 해시 명시)이며 출처 표시다. 리포 안 근거는 `app/…:줄`(master `77f8dd4` 기준).
