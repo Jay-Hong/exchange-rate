@@ -39,8 +39,8 @@ def assert_refusal(error, rule, location):
 
 
 @pytest.mark.parametrize("rule", ["parse_timeout", "total_timeout"])
-@pytest.mark.parametrize("parse_number", [1, 2, 3, 4],
-                         ids=["original", "stored", "replay", "metadata"])
+@pytest.mark.parametrize("parse_number", [1, 2, 3, 4, 5],
+                         ids=["original", "normalization", "stored", "replay", "metadata"])
 def test_deadlines_at_each_parse_become_safe_capture_errors(
         registry, monkeypatch, rule, parse_number):
     expired = DeadlineExpired(rule)
@@ -142,7 +142,7 @@ def test_the_final_storage_check_validates_its_own_parse(registry, monkeypatch, 
     def parse(text, parser):
         nonlocal calls
         calls += 1
-        if calls == 4:
+        if calls == 5:
             if corruption == "parser-error":
                 raise ValueError("PRIVATE_VALUE")
             if corruption == "invalid-root":
@@ -156,4 +156,4 @@ def test_the_final_storage_check_validates_its_own_parse(registry, monkeypatch, 
         capture_module.capture_route("citi_primary", registry=registry, get=get)
     assert_refusal(caught.value, rule, "fixture" if corruption != "placeholder"
                    else caught.value.location)
-    assert calls == 4
+    assert calls == 5

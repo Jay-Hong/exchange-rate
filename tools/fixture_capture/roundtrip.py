@@ -116,6 +116,9 @@ def roundtrip(text, route, registry, deadline, parse_budget=None):
     original = record_extraction(soup, route, registry)
     deadline.remaining()
     fixture = deidentify(soup, registry)
+    # Reparse to merge adjacent text left by cleanup before binding replacement
+    # paths, so those paths match the tree parsed from the stored bytes.
+    fixture = parse_html(fixture.encode("utf-8").decode("utf-8"), deadline, parse_budget)
     replacements = d1_replace.replace_names(fixture, route.name, original)
     serialized = fixture.encode("utf-8")
     if len(serialized) > HTML_LIMIT:

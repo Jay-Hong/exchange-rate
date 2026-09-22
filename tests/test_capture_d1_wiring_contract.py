@@ -2,13 +2,20 @@
 
 Written before the implementation (Claude) from the slice-5 design agreement with Codex (2026-09-21, r1–r2) and
 `d1_detection_policy_v1.txt` §7.1–§7.2 (+ amendment 1). The implementer reads this file and does not edit it.
+Amended 2026-09-22 (slice 5c-3a-A, design agreement with Codex on the 5c-3 re-capture failure): real citi pages were
+refused with `d1_replacement_correspondence` because the replacement recorded contents-index paths in the tree right
+after deidentify, while the stored bytes reparse to a different tree — text nodes left adjacent by a removed element or
+comment merge on reparse (`<ul>a<script></script>b<li>…` → `<ul>ab<li>…`). The fix normalizes the sanitized tree by
+serialization and a budgeted reparse BEFORE the replacement, so every recorded path is a path of the stored bytes.
+Exact path binding (4A, §7.2) is unchanged; no policy, 4A API or digest change.
 
-Pinned wiring (order agreed in design r1):
-  roundtrip: parse ① → record → deidentify → `replace_names(fixture, route.name, original)` → encode → size check →
-             `verify_stored(serialized, replacements, parse=<budgeted>)` ② → reparse ③ → replay equality
-             → returns `(serialized, reparsed, original, replacements)`
+Pinned wiring (order agreed in design r1, normalization added in 5c-3a-A):
+  roundtrip: parse ① → record → deidentify → encode → normalize reparse ② → `replace_names(normalized, route.name,
+             original)` → encode → size check → `verify_stored(serialized, replacements, parse=<budgeted>)` ③ →
+             reparse ④ → replay equality → returns `(serialized, reparsed, original, replacements)`
   capture_route: owns one `[PARSE_SECONDS]` budget, passes it to `roundtrip(..., parse_budget=)`, and after
-             `validate_metadata` runs `verify_stored(fixture, replacements, metadata=meta, parse=<budgeted>)` ④.
+             `validate_metadata` runs `verify_stored(fixture, replacements, metadata=meta, parse=<budgeted>)` ⑤.
+- Every parse ①–⑤ is `parse_html` with the one shared budget.
 - `roundtrip(..., parse_budget=None)` creates its own budget only when none is given, and consumes the given list in place.
 - `verify_stored(..., *, parse=None)`: None keeps 4A behaviour; a given `parse(text)` is used for the reparse; an ordinary
   exception from it is `d1_fixture_parse`; a `DeadlineExpired` passes through untouched.
@@ -109,6 +116,39 @@ def test_the_replacement_runs_on_the_sanitized_page(registry):
     assert b"<!--" not in serialized and PLACED.encode() in serialized and len(replacements) == 1
 
 
+def merged_disclosure(name="홍길동"):
+    # Two text nodes around a removed script, directly before the reviewed li in its ul: sanitization leaves "a" and
+    # "b" adjacent, and html.parser merges them when the stored bytes are parsed again (Codex reproduction, 5c-3).
+    return disclosure(name).replace("<ul><li>대표자", "<ul>a<script></script>b<li>대표자")
+
+
+def with_merged_disclosure(route):
+    html = page(route, name=None) if route == "citi_primary" else official_html("citi_secondary", name=None)
+    assert html.count("</body>") == 1
+    return html.replace("</body>", merged_disclosure() + "</body>")
+
+
+@pytest.mark.parametrize("route", CITI_ROUTES)
+def test_text_merged_by_the_reparse_does_not_move_the_replacement(registry, route):
+    html = with_merged_disclosure(route)
+    serialized, reparsed, _, replacements = roundtrip(html, registry.routes[route], registry, Deadline())
+    text = serialized.decode("utf-8")
+    assert "<script" not in text and "ab<li>" in text and PLACED in text and REVIEWED_NAME not in text
+    [item] = replacements
+    # The recorded path is a path of the stored bytes: resolving it in a fresh parse reaches the placeholder text.
+    node = BeautifulSoup(text, "html.parser")
+    for index in item.path:
+        node = node.contents[index]
+    assert str(node) == PLACED
+    d1_replace.verify_stored(serialized, replacements)                   # 4A default reparse agrees
+
+
+@pytest.mark.parametrize("route", CITI_ROUTES)
+def test_text_merged_by_the_reparse_passes_the_whole_capture(registry, route):
+    artifact = capture(route, registry, with_merged_disclosure(route))
+    assert PLACED.encode() in artifact.fixture and REVIEWED_NAME.encode() not in artifact.fixture
+
+
 def test_the_name_left_in_the_extraction_record_is_refused(registry):
     html = citi_html(labels=("USD " + REVIEWED_NAME, "CNY", "EUR", "JPY"))
     refused(lambda: roundtrip(html, registry.routes["citi_primary"], registry, Deadline()),
@@ -191,24 +231,41 @@ def test_a_deadline_passes_through_as_the_same_object(registry, rule):
     assert caught.value is expired
 
 
-def test_the_stored_bytes_check_really_verifies_the_second_parse(registry, monkeypatch):
-    # ② reparses the stored bytes. Corrupt only what that parse sees: a plain reparse, or a check moved after the
-    # replay (③ does not read the footer), would still succeed.
+def test_the_stored_bytes_check_really_verifies_the_third_parse(registry, monkeypatch):
+    # ③ reparses the stored bytes. Corrupt only what that parse sees: a plain reparse, or a check moved after the
+    # replay (④ does not read the footer), would still succeed.
     real, calls = roundtrip_module.BeautifulSoup, []
 
     def parse(text, parser):
         calls.append(len(text))
-        if len(calls) == 2:
+        if len(calls) == 3:
             text = text.replace("[성명삭제]", "[삭제]")
         return real(text, parser)
 
     monkeypatch.setattr(roundtrip_module, "BeautifulSoup", parse)
     refused(lambda: roundtrip(citi_html(), registry.routes["citi_primary"], registry, Deadline()),
             "d1_replacement_correspondence")
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
-# ── one parse budget across all four parses ──────────────────────────────────
+def test_the_replacement_runs_on_the_normalized_parse(registry, monkeypatch):
+    # ② is the normalization: the reviewed name is still in its input and must be gone from everything after it. If the
+    # replacement ran on the un-normalized tree, corrupting ② so the disclosure disappears would not stop the capture.
+    real, calls = roundtrip_module.BeautifulSoup, []
+
+    def parse(text, parser):
+        calls.append("홍길동" in text)
+        if len(calls) == 2:
+            text = text.replace("<li>대표자 홍길동</li>", "<li>대표자 </li>")
+        return real(text, parser)
+
+    monkeypatch.setattr(roundtrip_module, "BeautifulSoup", parse)
+    refused(lambda: roundtrip(citi_html(), registry.routes["citi_primary"], registry, Deadline()))
+    assert calls[:2] == [True, True] and len(calls) == 2
+
+
+# ── one parse budget across all five parses ──────────────────────────────────
+# Every route: a budget or a normalization wired for some routes only must not pass (Codex, 5c-3a-A lock r1).
 
 class _Clock:
     """Each parse through roundtrip's BeautifulSoup costs `cost` seconds on roundtrip's own clock."""
@@ -226,51 +283,67 @@ class _Clock:
         monkeypatch.setattr(roundtrip_module, "BeautifulSoup", parse)
 
 
-def test_roundtrip_consumes_the_budget_it_is_given_in_place(registry, monkeypatch):
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_roundtrip_consumes_the_budget_it_is_given_in_place(registry, monkeypatch, route):
     clock = _Clock(monkeypatch, 1.0)
     budget = [PARSE_SECONDS]
-    roundtrip(citi_html(), registry.routes["citi_primary"], registry, Deadline(), parse_budget=budget)
-    assert clock.calls == 3                                       # ① original, ② stored-bytes check, ③ replay
-    assert budget[0] == pytest.approx(PARSE_SECONDS - 3.0)
+    roundtrip(page(route), registry.routes[route], registry, Deadline(), parse_budget=budget)
+    assert clock.calls == 4                          # ① original, ② normalization, ③ stored-bytes check, ④ replay
+    assert budget[0] == pytest.approx(PARSE_SECONDS - 4.0)
 
 
-def test_a_given_budget_is_spent_from_its_current_value(registry, monkeypatch):
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_a_given_budget_is_spent_from_its_current_value(registry, monkeypatch, route):
     # 1.5 s left and 1.0 s per parse: ① leaves 0.5, ② leaves -0.5, ③ cannot start. Refilling the list would pass.
     clock = _Clock(monkeypatch, 1.0)
     with pytest.raises(DeadlineExpired, match="parse_timeout"):
-        roundtrip(citi_html(), registry.routes["citi_primary"], registry, Deadline(), parse_budget=[1.5])
+        roundtrip(page(route), registry.routes[route], registry, Deadline(), parse_budget=[1.5])
     assert clock.calls == 2
 
 
-def test_an_exhausted_budget_parses_nothing(registry, monkeypatch):
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_an_exhausted_budget_parses_nothing(registry, monkeypatch, route):
     clock = _Clock(monkeypatch, 1.0)
     with pytest.raises(DeadlineExpired, match="parse_timeout"):
-        roundtrip(citi_html(), registry.routes["citi_primary"], registry, Deadline(), parse_budget=[0.0])
+        roundtrip(page(route), registry.routes[route], registry, Deadline(), parse_budget=[0.0])
     assert clock.calls == 0
 
 
-def test_the_stored_bytes_check_inside_roundtrip_spends_the_shared_budget(registry, monkeypatch):
-    # 5.1 s each: ① leaves 4.9, ② (verify_stored) leaves -0.2, so ③ cannot start. A verify_stored that
-    # parsed outside the budget would let ③ and ④ run and the capture succeed.
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_the_normalization_spends_the_shared_budget(registry, monkeypatch, route):
+    # 5.1 s each: ① leaves 4.9, ② (normalization) leaves -0.2, so ③ cannot start. A normalization that parsed outside
+    # the budget would let ③ run too.
     clock = _Clock(monkeypatch, 5.1)
-    refused(lambda: capture("citi_primary", registry), "parse_timeout")
+    refused(lambda: capture(route, registry), "parse_timeout")
     assert clock.calls == 2
 
 
-def test_the_final_check_in_capture_spends_the_same_budget(registry, monkeypatch):
-    # 3.4 s each: ① 6.6, ② 3.2, ③ -0.2, so ④ (the final verify_stored) cannot start.
-    clock = _Clock(monkeypatch, 3.4)
-    refused(lambda: capture("citi_primary", registry), "parse_timeout")
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_the_stored_bytes_check_inside_roundtrip_spends_the_shared_budget(registry, monkeypatch, route):
+    # 4.0 s each: ① 6.0, ② 2.0, ③ (verify_stored) -2.0, so ④ cannot start. A verify_stored that parsed outside the
+    # budget would let ④ run.
+    clock = _Clock(monkeypatch, 4.0)
+    refused(lambda: capture(route, registry), "parse_timeout")
     assert clock.calls == 3
 
 
-def test_within_budget_all_four_parses_run(registry, monkeypatch):
-    clock = _Clock(monkeypatch, 2.0)
-    capture("citi_primary", registry)
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_the_final_check_in_capture_spends_the_same_budget(registry, monkeypatch, route):
+    # 3.0 s each: ① 7.0, ② 4.0, ③ 1.0, ④ -2.0, so ⑤ (the final verify_stored) cannot start.
+    clock = _Clock(monkeypatch, 3.0)
+    refused(lambda: capture(route, registry), "parse_timeout")
     assert clock.calls == 4
 
 
-def test_the_capture_budget_is_the_parse_budget_constant(registry, monkeypatch):
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_within_budget_all_five_parses_run(registry, monkeypatch, route):
+    clock = _Clock(monkeypatch, 1.9)
+    capture(route, registry)
+    assert clock.calls == 5
+
+
+@pytest.mark.parametrize("route", ALL_ROUTES)
+def test_the_capture_budget_is_the_parse_budget_constant(registry, monkeypatch, route):
     seen = []
     original = capture_module.roundtrip
 
@@ -281,5 +354,5 @@ def test_the_capture_budget_is_the_parse_budget_constant(registry, monkeypatch):
         return original(*args, **kwargs)
 
     monkeypatch.setattr(capture_module, "roundtrip", spy)
-    capture("citi_primary", registry)
+    capture(route, registry)
     assert seen == [[PARSE_SECONDS]]
