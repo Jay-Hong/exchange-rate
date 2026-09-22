@@ -217,20 +217,42 @@ class CrawlerManager:
             - start_scheduler() 내부에서 1회 호출
             - 서버 재시작 시 DB 상태 복원
         """
+        # Lazy import: observation belongs to configuration loading, not scheduler import.
+        from app import collection_config_observer
+
+        baseline_id = None
+        baseline_ok = False
+        try:
+            baseline_id = collection_config_observer.observer.baseline_begin()
+        except BaseException:
+            collection_config_observer.observation_failed("baseline_begin")
         try:
             configs = crud.get_all_crawler_configs(db)
 
             for config in configs:
                 self.config_cache[config["crawler_name"]] = config["enabled"]
+                observed_crawler = None
+                try:
+                    observed_crawler = config["crawler_name"]
+                    collection_config_observer.observer.baseline_row(
+                        observed_crawler, config["enabled"], baseline_id=baseline_id)
+                except BaseException:
+                    collection_config_observer.observation_failed("baseline_row", crawler=observed_crawler)
 
             logger.info(
                 "✅ CrawlerManager 캐시 로드 완료",
                 extra={"count": len(configs)}
             )
+            baseline_ok = True
         except Exception as e:
             logger.error("❌ CrawlerManager 캐시 로드 실패", exc_info=True)
             # 폴백: 모든 크롤러 활성화
             self.config_cache = {}
+        finally:
+            try:
+                collection_config_observer.observer.baseline_end(baseline_id=baseline_id, ok=baseline_ok)
+            except BaseException:
+                collection_config_observer.observation_failed("baseline_end")
 
     def is_enabled(self, crawler_name: str) -> bool:
         """
@@ -282,6 +304,13 @@ class CrawlerManager:
 
         # 2. In-memory 캐시 업데이트
         self.config_cache[crawler_name] = enabled
+        # Lazy import: this hook is only needed after an actual cache write.
+        from app import collection_config_observer
+
+        try:
+            collection_config_observer.observer.cache_applied(crawler_name, enabled, datetime.now(dt_timezone.utc))
+        except BaseException:
+            collection_config_observer.observation_failed("cache_applied", crawler=crawler_name)
 
         # 3. switch_jobs() 재실행 (현재 모드 유지)
         # 정기 전환과 `_mode_switch_lock` 으로 직렬화한다 — 진행 중인 전환이 끝나 `current_mode` 가 갱신된 뒤 그 모드로
@@ -1889,6 +1918,14 @@ def _register_usdt_legacy_polling_job(target_scheduler) -> bool:
 
 def start_scheduler():
     global crawler_manager
+
+    # Lazy import: the process epoch starts at scheduler startup, before the DB read.
+    from app import collection_config_observer
+
+    try:
+        collection_config_observer.observer.start_epoch(f"{os.getpid()}:{uuid.uuid4().hex}")
+    except BaseException:
+        collection_config_observer.observation_failed("start_epoch")
 
     # ═════════════════════════════════════════════════════════════
     # CrawlerManager 초기화 (DB 로드) - Phase 1.8

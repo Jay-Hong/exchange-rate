@@ -1755,17 +1755,46 @@ def update_crawler_config(db: Session, crawler_name: str, enabled: bool) -> bool
     Raises:
         ValueError: 존재하지 않는 크롤러 이름
     """
-    config = db.query(models.CrawlerConfig).filter(
-        models.CrawlerConfig.crawler_name == crawler_name
-    ).first()
+    # Lazy import: configuration observation is only needed on this write path.
+    from app import collection_config_observer
 
-    if not config:
-        raise ValueError(f"Invalid crawler name: {crawler_name}")
+    call_id = None
+    try:
+        call_id = collection_config_observer.new_call_id()
+        collection_config_observer.observer.commit_started(crawler_name, enabled, call_id=call_id)
+    except BaseException:
+        collection_config_observer.observation_failed("commit_started", crawler=crawler_name, call_id=call_id)
 
-    config.enabled = enabled
-    config.updated_at = models.get_utc_now()
+    try:
+        config = db.query(models.CrawlerConfig).filter(
+            models.CrawlerConfig.crawler_name == crawler_name
+        ).first()
 
-    db.commit()
+        if not config:
+            raise ValueError(f"Invalid crawler name: {crawler_name}")
+
+        config.enabled = enabled
+        config.updated_at = models.get_utc_now()
+    except BaseException as error:
+        try:
+            collection_config_observer.observer.commit_not_entered(call_id=call_id, error_type=type(error).__name__)
+        except BaseException:
+            collection_config_observer.observation_failed("commit_not_entered", crawler=crawler_name, call_id=call_id)
+        raise
+
+    try:
+        db.commit()
+    except BaseException as error:
+        try:
+            collection_config_observer.observer.commit_result_unknown(call_id=call_id, error_type=type(error).__name__)
+        except BaseException:
+            collection_config_observer.observation_failed("commit_result_unknown", crawler=crawler_name, call_id=call_id)
+        raise
+    else:
+        try:
+            collection_config_observer.observer.commit_ack(call_id=call_id, ack_at=datetime.now(dt_timezone.utc))
+        except BaseException:
+            collection_config_observer.observation_failed("commit_ack", crawler=crawler_name, call_id=call_id)
 
     action = "활성화" if enabled else "비활성화"
     logger.info(
