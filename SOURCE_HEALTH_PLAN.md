@@ -472,6 +472,12 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 - 다음 단계(당시 계획): R1a~R1c 를 한 번에 배포한다(배포 전 실응답으로 이벤트 크기를 다시 재고 압축 형식을 정한다). fixture
   캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정). → R1a~R1c 는 2026-09-21 `f94d04a` 로 배포됐다(커밋 `4fc081b`, DEPLOYMENT
   §8.1b). 그 뒤의 Docker 로그 보존 창 관측과 보관은 [LOG_RETENTION.md](LOG_RETENTION.md) 로 이어졌다.
+- 운영 관측(2026-09-22): bs MIBANK 자연 폴백 2회차(01:07:43Z·01:08:43Z = 10:07·10:08 KST, round `f6decbcb…`·`cc021dd2…`,
+  공식 경로 `ReadTimeout`)에서 R1b 관측·범위 검사·편차 평가(세 통화 0%)·채택(`submitted`)과 R1c atomic writer 결속·세 통화
+  `no_change_needed/equal_to_last_record` 를 확인했다. 수집 판정은 `unknown/v2_evidence_unconfirmed`(수집 축 — R1c 의 "쓰기 결과
+  불확실 → unknown" 분기는 이번에 실행되지 않았다)이고 `final_db=not_checked` 다. MIBANK 값이 직전 DB 값과 같았던 이유(집계
+  지연)는 가설이다. MIBANK 변경값의 commit(같은 writer 호출에서 `staged → committed → performed`)과 citi MIBANK 운영 경로(공식
+  두 경로 실패 뒤 진입)는 미관측으로 남기고 자연 표본을 추가 관측한다.
 
 ### 7.13 hana·woori 보고 — 프로세스를 넘는 증거 전달 계약 (2026-09-19 Claude·Codex 설계 합의, **구현 확정은 R1 운영 관측 뒤**)
 
