@@ -289,7 +289,7 @@
 - 보고 로그 보존·일별 집계: [INVESTING_OBSERVE.md](INVESTING_OBSERVE.md) — Git 밖 원문·실행 이력·커서 보존, v2 참조 기반 집계, 충돌·부분 관측 표시. 운영 실행·cron 설치는 별도 승인이다.
 - 코드: `app/crawlers/investing.py`(계측 경계), `app/crawlers/investing_report.py`(보고 객체). 회귀 시험: `tests/test_investing_report.py` — HTTP·세션·DB 대역 사용.
 - 기존 Investing 로거 → `logs/app.log`의 `message`에 JSON 이벤트: `investing_round_started`(세션 생성 전), `investing_fx_evidence`(FX writer 반환/예외 직후, DXY 저장/폴백 진입 전; 파싱 전패 시 미호출 증거), `investing_round_finished`(세션 생성~close의 최외곽 finally). 로깅 설정은 그대로다.
-- `schema_version=3`, 판정 계약 `validity_contract=investing_range_checked/2`, `round_id`, `attempt_id`(URL 시도 1/2, 회차 이벤트는 null). JSON 공백을 제거하고 `format`으로 아래 세 형식을 구분한다. 이벤트 수·발행 위치는 유지한다. (코드 기준 — 운영 이미지는 이 변경을 배포하기 전까지 schema 2 를 낸다.) 이전 이미지의 이벤트는 `schema_version=2`·계약 필드 없음이며 집계기가 `investing_range_checked/1` 로 명시 매핑한다(D10).
+- `schema_version=3`, 판정 계약 `validity_contract=investing_range_checked/2`, `round_id`, `attempt_id`(URL 시도 1/2, 회차 이벤트는 null). JSON 공백을 제거하고 `format`으로 아래 세 형식을 구분한다. 이벤트 수·발행 위치는 유지한다. (운영 이미지는 2026-09-22 배포 `34ef52c` 부터 schema 3 을 낸다 — 배포 직후 10분 창 60회차 전부 schema 3, 직전 구 이미지 59회차는 전부 schema 2.) 이전 이미지의 이벤트는 `schema_version=2`·계약 필드 없음이며 집계기가 `investing_range_checked/1` 로 명시 매핑한다(D10).
   - `lifecycle`: 시작 이벤트는 식별자와 형식만. 의미는 **세션 생성 전·수집 미시도**이며 성공 증거가 아니다.
   - `compact`: **첫 시도에서 모든 통화 valid, 모든 통화 writer 제출·정수 반환 확인, 재시도·계측 오류 없음**일 때 FX 증거와 정상 종료를 각각 한 줄로 기록한다. 종료는 루틴 정상 반환·세션 closed까지 요구한다. `outcome=all_valid`, `fx_attempt_id=1`, `rates`(통화별 정규화 값), `writer_returned_count`, `writing=per_currency_write_unverified`를 보존한다. rates의 각 항목은 `valid/validated`이며 writer 제출 통화도 같은 키 집합이다. 0 반환도 압축 가능하지만 저장 성공·변경 불필요·정책 차단을 뜻하지 않는다. FX 이벤트 시점의 `execution=running`은 이후 DXY 성공을 보장하지 않는다.
   - `detail`: 부분/전면 누락, 쿨다운, 재시도(2차 성공 포함), 예외, 계측 실패는 상세 스냅샷. `attempts`에 시도별 원본 `collection`을 한 번만 담고, 회차 요약 `collection_attempts[pair]`는 선택된 원본의 attempt_id를 참조한다. 계측 오류가 없을 때만 `not_reached`/`unnecessary` 시도의 빈 collection·writer·execution을 생략하고 id/status/reason을 남긴다(생략된 collection은 `not_attempted/not_started`, writer는 미호출, execution은 `not_attempted/not_started`). 계측 오류가 있으면 상태 표식 자체가 유실됐을 수 있어 이 생략도 하지 않는다. `succeeded`는 **루틴 정상 반환**만 뜻하며 유효 관측·저장 성공으로 승격하지 않는다.
@@ -381,7 +381,7 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 
 ---
 
-### 7.12 bs·citi 보고 R1a~R1c — 공식 경로·MIBANK·writer 관측 (2026-09-18 구현, **미배포**)
+### 7.12 bs·citi 보고 R1a~R1c — 공식 경로·MIBANK·writer 관측 (2026-09-18 구현, 2026-09-21 배포 `f94d04a`)
 
 ⛔ 보고 전용. 반환값·폴백 순서·예외 전파(총실패를 로그만 남기고 삼키는 기존 동작 포함, §2.1)·writer 입력·
 재시도·crawler_stats 판단은 바꾸지 않는다. 캡처·집계·경보는 범위 밖이다.
@@ -464,12 +464,14 @@ promote 직전 10분 표본은 종료 60건 전부 `status=normal`·`outcome=all
 - 로그량(합성 측정, `bank_round_finished` 한 건): 2.4~6.6 KB(라벨 조각 상한까지 채운 경우 최대). bs 는 IN·BREAK1·
   BREAK2·OUT 모두 매분, citi 는 OUT 제외 매분 → 하루 bs ≈ 5~9.5 MB, citi(평일) ≈ 6~8.5 MB. §7.11 실측 Docker 로그
   증가율(약 5.58 MiB/h)에 **10% 안팎**을 더한다 — Docker 로그 보존 창은 그만큼 **줄고**, 원문을 보존하는 Investing
-  관측 아카이브 사용량은 **늘어난다**. 배포 전 대표 이벤트를 실응답으로 다시 재고 압축 형식 여부를 정한다.
+  관측 아카이브 사용량은 **늘어난다**. 배포 전 대표 이벤트를 실응답으로 다시 재고 압축 형식 여부를 정한다(당시 계획 — 배포 뒤 경과는
+  아래 '다음 단계' 항목 끝).
   R1b 합성 측정(공식 실패 + MIBANK 경로 회차 한 건): 필수 3 + 필수 밖 41개 표 5.1 KB. 같은 USD 빈 행을 20·200·1,000개
   넣어도 7.7 KB 로 같다(상한 전 R1b 초안은 1,000개에서 약 359 KB — Codex 측정). MIBANK 는 공식 경로 실패 뒤에만 돈다.
   R1c 합성 측정(실제 writer·SQLite, 회차 한 건): 공식 경로 성공 4.4~4.5 KB, 공식 실패 + MIBANK(43행 표) 6.0 KB.
-- 다음 단계: R1a~R1c 를 한 번에 배포한다(배포 전 실응답으로 이벤트 크기를 다시 재고 압축 형식을 정한다). fixture
-  캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정).
+- 다음 단계(당시 계획): R1a~R1c 를 한 번에 배포한다(배포 전 실응답으로 이벤트 크기를 다시 재고 압축 형식을 정한다). fixture
+  캡처는 별도 슬라이스(비식별 규칙·상한이 열린 결정). → R1a~R1c 는 2026-09-21 `f94d04a` 로 배포됐다(커밋 `4fc081b`, DEPLOYMENT
+  §8.1b). 그 뒤의 Docker 로그 보존 창 관측과 보관은 [LOG_RETENTION.md](LOG_RETENTION.md) 로 이어졌다.
 
 ### 7.13 hana·woori 보고 — 프로세스를 넘는 증거 전달 계약 (2026-09-19 Claude·Codex 설계 합의, **구현 확정은 R1 운영 관측 뒤**)
 

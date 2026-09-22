@@ -98,7 +98,7 @@
 - `requests.get()` + `BeautifulSoup` 사용 (Investing만 `curl_cffi` 사용, TLS 지문 위장)
 - **Selenium 없음** (가장 빠르고 가벼움)
 - 정적 HTML 파싱
-- **부산·씨티 결과 보고(R1a~R1c, 보고 전용·미배포)**: `bank_report.py` 가 회차마다 `bank_round_started`/`bank_round_finished`
+- **부산·씨티 결과 보고(R1a~R1c, 보고 전용 — 2026-09-21 배포 `f94d04a`)**: `bank_report.py` 가 회차마다 `bank_round_started`/`bank_round_finished`
   를 기존 은행 로거로 남긴다. 공식 루틴과 공유 `crawl_mibank_rates`·`crud.insert_bank_rates_into_db` 는 `observer=None`
   인자로 실제 추출에 쓴 요소·값·판별 근거와 writer 가드·통화별 staging·commit 사실만 넘긴다(다른 7개 은행은 관측자를
   넘기지 않아 기록 없음). 범위 검사·편차·채택·writer 호출은 호출 지점에서 기록한다. 폴백 순서·총실패를 삼키는 기존

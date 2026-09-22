@@ -575,20 +575,20 @@ Dockerfile 빌드에서 갱신할 버전·캐시·pull 정책을 명시하고 �
 `--build`만 붙인다고 모든 패키지가 갱신되는 것은 아니다. 운영 HTTP를 일부러 실패시켜
 Selenium 표본을 만들지는 않는다.
 
-### 8.1b 현재 운영 기준선 (2026-09-21 — 배포 직전 서버와 반드시 대조)
+### 8.1b 현재 운영 기준선 (2026-09-22 — 배포 직전 서버와 반드시 대조)
 
 ⛔ 이 표는 **참고**다. 권위는 서버에 있고, 다음 배포는 **서버 실측값에서 출발**한다.
 
 | 항목 | 값 |
 | --- | --- |
-| 배포된 코드 | `f94d04a64381677e6f9a63ac516aff5e24c6fb9c` (R1a·R1b·R1c 보고 계측) |
-| 실행 이미지 = `latest` | `sha256:d18b5d680c2adf158bb46cff9781f0e913cb871916eb9dcce0bf382e65c3365b` |
-| 코드 롤백 앵커 | `exchange-rate-fastapi:rollback-1789938923420845859` (= 직전 이미지 `683de70ae4d2…d234c`) |
+| 배포된 코드 | `34ef52c5df2c909c75b45d52f99f25d1c283b662` (Investing D9·D10, C1a 추출 분리, 관리자 토글·정기 전환 직렬화) |
+| 실행 이미지 = `latest` | `sha256:6efc3f973676679d77b35aa3e7d9622f326c78537a0fff7d95f35badf6c3ae4e` |
+| 코드 롤백 앵커 | `exchange-rate-fastapi:rollback-1790025334830310672` (= 직전 이미지 `d18b5d680c2a…3365b`) |
 | IBK 설정 | `IBK_RESULT_PATH_ENABLED=true`, `TELEGRAM_ENABLED=true` (**둘 다 코드 기본값은 `false`**) |
-| 현재 Compose 라벨 | `/home/ubuntu/fxi-release-f94d04a-20260921-01/new.json` |
-| 동결 모델 SHA-256 | `05264d9580a7abd2fbe0fbbfc41f1be69e514444394e1daf226a038164c52e8a` |
-| 같은 실행의 구 모델 SHA-256 | `a3184d2973c9426440d216c6da0f21a0b53331700275dd547029d6f9d6774204` (= 직전 배포의 `new.json`) |
-| 배포 도구 | `/home/ubuntu/fxi-release-f94d04a-v7.py` SHA-256 `fc55b2ab…cfc32` (**전환 1회용**) |
+| 현재 Compose 라벨 | `/home/ubuntu/fxi-release-34ef52c-20260922-01/new.json` |
+| 동결 모델 SHA-256 | `3f38e15b18fefdf1ba6afb6c5e8c5c8f0902c5a3b3335a2ea1b00d210ff3fae6` |
+| 같은 실행의 구 모델 SHA-256 | `05264d9580a7abd2fbe0fbbfc41f1be69e514444394e1daf226a038164c52e8a` (= 직전 배포의 `new.json`) |
+| 배포 도구 | `/home/ubuntu/fxi-release-34ef52c-v8.py` SHA-256 `cc774ef6…17507` (**전환 1회용**) |
 
 ⚠️ **롤백 앵커 태그 이름을 세대와 혼동하지 말 것.** `721a323` 배포 시점에 `rollback-1789082062562934420`
 (구 세대 `453fb87f…`)과 `d80ea73-1789082062562934420`(= `f6738338…`)이 **둘 다 존재**했고,
@@ -607,14 +607,14 @@ python3 /home/ubuntu/activate-ibk-9d4e1c4.py rollback \
         /home/ubuntu/fxi-ibk-activation-9d4e1c4-20260910-01
 ```
 
-이 명령은 **2026-09-10 활성화 실행의 복구 전용**이며, 그 뒤로 코드가 네 번(`d80ea73`,
-`721a323`, `13bc1a3`, `f94d04a`) 바뀌었으므로 **그대로 실행하지 않는다.** 당시 도구의 사전 조건과 현재 상태를
+이 명령은 **2026-09-10 활성화 실행의 복구 전용**이며, 그 뒤로 코드가 다섯 번(`d80ea73`,
+`721a323`, `13bc1a3`, `f94d04a`, `34ef52c`) 바뀌었으므로 **그대로 실행하지 않는다.** 당시 도구의 사전 조건과 현재 상태를
 대조한 뒤에만 쓴다. 되돌리면 legacy의 MIBANK 저장 정책도 함께 복원되고, **이미 저장된 DB
 데이터는 되돌아가지 않는다.**
 
 ⛔ **다음 배포가 알아야 할 것 셋.**
 (1) 현재 컨테이너는 canonical `docker-compose.yml` 이 아니라 위 표의 동결 모델
-(`fxi-release-f94d04a-20260921-01/new.json`)로 만들어져 있다. 배포 도구가 그 상태를
+(`fxi-release-34ef52c-20260922-01/new.json`)로 만들어져 있다. 배포 도구가 그 상태를
 받아들이도록 준비돼 있어야 한다 — 경로 이름이 아니라 **파일 해시·직전 실행 기록·실행
 이미지·전체 모델 동등성**을 대조하는 방식이어야 한다.
 (2) 서버의 동결 모델(`new.json`/`old.json`)과 `dotenv.*` 는 **해석된 비밀값을 포함**하므로
@@ -624,6 +624,7 @@ python3 /home/ubuntu/activate-ibk-9d4e1c4.py rollback \
 `721a323` 배포에서 직전 실행이 활성화 기록에서 배포 기록으로 바뀌어 검증 함수를 새로 써야 했다.
 `13bc1a3` 배포(v6)와 `f94d04a` 배포(v7)에서는 직전 기록(`state.json`·`switch-verify.json`·`operator-promoted.json`)이
 직전 실행기가 검증하던 필드를 모두 가진 **같은 스키마**여서 상수만 바꿨다 — 다음에도 먼저 서버에서 대조한다.
+`34ef52c` 배포(v8)도 같은 스키마였고, v7↔v8 은 전환 상수·머리말 주석·usage 문자열만 다르며 함수 정의는 모두 같다(Codex 의 AST 대조).
 ⚠️ v6 에 남아 있던 낡은 문구 두 가지("구 이미지에 추출기가 없다", "cron 5건" — 주석과 출력 문자열
 양쪽)는 v7 에서 정정했다. v6↔v7 은 27줄 추가·27줄 삭제이고 전환 상수·머리말 주석·그 두 문구·usage
 문자열뿐이라 **제어 흐름과 조건은 그대로다**.
