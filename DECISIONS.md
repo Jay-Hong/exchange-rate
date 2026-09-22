@@ -6227,13 +6227,13 @@ topic의 optional group(`data.usd_krw_futures`)으로 전달되며 독립 topic 
 - **문제**: 비구독=매시간 스냅샷 / 구독=실시간 WS 제품 방향인데, 최신 rate/graph endpoint 대부분 무인증(`app/main.py:923-2653` auth 0건) → 페이월이 UI에만 존재.
 - **결정**: D1 hourly=Firebase 인증만(KRX 항상 제외) / D2 최신 realtime 표면=premium(KRX는 +entitlement, ADR-038 `krx_visible`) / D4 신규 앱 legacy fallback 금지 / D5 무료 그래프=real hourly.
 - **접근 강제**: 무인증 최신-데이터 endpoint 전수(11종) 식별 → **Stage A**(신규 표면 인증, 출시 시) + **Stage B**(legacy REST/WS 종료, 양 플랫폼 <1% + 유예).
-- **양 플랫폼**: iOS reference → Android 이식(Android는 완전 legacy). Stage B는 iOS·Android 양쪽 기준([REALTIME_ARCHITECTURE_PLAN.md:479](REALTIME_ARCHITECTURE_PLAN.md#L479) 계약 승계).
+- **양 플랫폼**: iOS reference → Android 이식(Android는 완전 legacy). Stage B는 iOS·Android 양쪽 기준([REALTIME_ARCHITECTURE_PLAN.md:483](REALTIME_ARCHITECTURE_PLAN.md#L483) 계약 승계).
 - **WS 인증 계약(testable)**: subscribe payload 토큰 → `subscription_ack`(accepted/rejected) / `subscription_error`(invalid_token) / bounded-lease revoke.
 - **롤아웃**: dormant→flip(C6 규율). **첫 슬라이스 = client-version 관측 계측**(iOS·Android `X-Client-*` + nginx access log, enforcement/동작변경 없음) — 2026-07-17 구현.
 
 ### 미결 (제품 결정, Final 전)
 
-- **S4** legacy 유예 기간: 기존 6개월([REALTIME_ARCHITECTURE_PLAN.md:483](REALTIME_ARCHITECTURE_PLAN.md#L483)) 유지 vs 단축(권고 <1%+30일). 명시적 supersede 필요.
+- **S4** legacy 유예 기간: 기존 6개월([REALTIME_ARCHITECTURE_PLAN.md:487](REALTIME_ARCHITECTURE_PLAN.md#L487)) 유지 vs 단축(권고 <1%+30일). 명시적 supersede 필요.
   ⚠️ S4는 *legacy 종료 시점* 결정이라 **Stage B 게이트** — WS 인증(1C) 구현의 블로커는 아니다.
 - **S5** KRX revoke 반영 지연 — **RESOLVED = bounded-lease v1, 15분**(2026-07-25). 즉시 제거(UID registry + Redis 제어
   이벤트)는 별도 후속. 서버 lease **상한** 15분 / 클라 재인증 ~12분+jitter / 만료 시 topic 제거 +
@@ -6533,10 +6533,10 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `e09bf1d0b711d7b755b26975d4e5e6a17643b02d`
+- server 기준 commit: `0df9b514da33212a24350bc756a32b0fc5907b8d`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `5d4bde1027c209aa4ede8bd593bfc6c152199d9d5f231c3f74059b4c37602bc0`
+- manifest SHA: `3326ea318fe0cbeb0094e64bcabf64a02f6f30272e83f667c74b075f0b5b0324`
 - baseline SHA: `40977d20c51a8cf027520e771f8b8e80aeed1d973b32ca4cc4427fa991b268b9`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
@@ -6735,7 +6735,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1915-1921` · `app/main.py:980-1003`). 따라서 현재 경로에는
+  (`app/scheduler.py:1918-1924` · `app/main.py:980-1003`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.
