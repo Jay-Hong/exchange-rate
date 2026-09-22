@@ -595,7 +595,7 @@ def is_bank_in_queue(bank_name: str) -> bool:
 
     Notes:
         - PriorityQueue.queue는 내부 list이므로 순회 가능
-        - Python list iteration은 thread-safe
+        - 큐를 소유한 이벤트 루프 스레드에서만 부른다(호출자 `enqueue_selenium_job` 은 코루틴 래퍼에서 실행)
         - O(n) 복잡도지만 n≤25이므로 무시 가능 (~0.00001초)
     """
     global selenium_queue
@@ -733,9 +733,12 @@ def make_selenium_job_wrapper(bank_name: str):
         - subprocess 격리: job_func 불필요, bank_name만 전달
         - __name__, __qualname__ 설정으로 APScheduler가 각 job을 구별
         - for loop 안에서 직접 wrapper 정의 시 모든 wrapper가 같은 이름을 가짐
-        - enqueue는 동기 non-blocking이므로 즉시 반환 (event loop blocking 방지)
+        - ⛔ **코루틴이어야 한다.** AsyncIOExecutor 는 동기 함수를 기본 스레드 풀로 보내는데,
+          `selenium_queue` 는 asyncio 큐라 스레드 안전하지 않다(put_nowait·내부 읽기). 코루틴이면
+          큐를 소유한 루프 스레드에서 실행된다. enqueue 는 큐 공간을 기다리지 않는다(put_nowait) — 다만 동기 로깅 비용은 루프에 남는다.
+          (SOURCE_HEALTH_COLLECTION_EXPECTED.md 부록 A §7, tests/test_selenium_enqueue_thread_boundary.py)
     """
-    def wrapper():
+    async def wrapper():
         enqueue_selenium_job(bank_name)
 
     # APScheduler가 함수를 구별할 수 있도록 고유 이름 설정

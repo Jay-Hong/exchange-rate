@@ -252,7 +252,9 @@
 > **collection_expected 설계 합의(2026-09-22 Claude·Codex)** → [SOURCE_HEALTH_COLLECTION_EXPECTED.md](SOURCE_HEALTH_COLLECTION_EXPECTED.md).
 > 기대 슬롯은 정책 표·모드 시계·설정 효력(`commit_ack_observed_at`)으로 먼저 계산하고, 실행은 `(job_id, scheduled_run_time)` 로 결속한다.
 > Tier 1 = 원시 사건 + 현재 관측 요약(부재는 전부 `insufficient_evidence`, `stall_suspected` 는 진단)이며 확정 부재 판정(Tier 2)은 후속.
-> 선행: 큐형 래퍼의 스레드 경계 수정(asyncio 큐를 worker 스레드에서 조작) → 큐 수락 계측.
+> 선행: 큐형 래퍼의 스레드 경계 수정(asyncio 큐를 worker 스레드에서 조작) → 큐 수락 계측. **수정 반영(2026-09-22)** — `make_selenium_job_wrapper`
+> 가 코루틴을 돌려줘 APScheduler 가 루프 스레드에서 적재한다(적재 판정 불변, `tests/test_selenium_enqueue_thread_boundary.py`). 설계 문서 부록 A §7 의 "현행 동기
+> 래퍼" 서술은 master `77f8dd4` 기준이다. 운영 반영은 배포 뒤.
 
 ### 7.7 이관 순서
 
