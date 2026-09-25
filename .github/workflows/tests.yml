@@ -19,7 +19,7 @@ concurrency:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 10  # hang 시 기본 6h timeout 방지 (무료 한도 보호)
+    timeout-minutes: 20  # hang 시 기본 6h timeout 방지 (무료 한도 보호). 2026-09-22 성공 5회 6분39초~9분22초, c798cd1 은 10분 06초에 취소
     # 실 Redis service — P1b A3-2 atomic Lua(EVAL/cjson/raw-CAS) env-gated 테스트가 CI에서
     #   authoritative 실행되도록. **host 포트 6390에 매핑**(컨테이너 6379) — app Redis 기본
     #   REDIS_URL(localhost:6379/0)은 6390 service에 안 닿아 비어 있음 → 기존 테스트 영향 0
