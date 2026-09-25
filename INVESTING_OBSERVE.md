@@ -7,7 +7,7 @@
 발행 구현은 [investing_report.py](app/crawlers/investing_report.py)다.
 
 상시 Docker 원문 보관은 [B v1 로그 보존](LOG_RETENTION.md)의 별도 `~/logs/docker-archive`가 맡고
-14일 초과분을 만료한다(2026-09-21 현재 **미설치**). 이 관측 보존소의 무삭제·집계 계약은 그대로다. B 설치 뒤에는
+14일 초과분을 만료한다(2026-09-23 설치 — [설치 기록](LOG_RETENTION.md#설치-기록)). 이 관측 보존소의 무삭제·집계 계약은 그대로다. B 설치 뒤에는
 컨테이너 switch 직전에 B의 `pre-switch` 수집·복원·ID 재확인을 마치고, 관측 기간에 필요한 추출은 이 문서 절차로 별도 수행한다.
 
 ## 실행

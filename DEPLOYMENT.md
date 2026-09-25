@@ -419,7 +419,7 @@ scp -i ~/your-key.pem ubuntu@<EC2-PUBLIC-IP>:~/exchange-rate/volumes/logs/app/ap
 > 📌 **이 절이 배포 절차의 기준 문서다.** `CLAUDE.md`·`DOCKER.md` 의 배포 언급은 여기를
 > 가리키며, 충돌하면 이 절이 우선한다.
 
-**B v1 보관기가 호스트에 설치된 뒤부터**(설치 여부는 [LOG_RETENTION.md](LOG_RETENTION.md) 설치 기록으로 확인 — 2026-09-21 현재 미설치),
+**B v1 보관기가 호스트에 설치된 뒤부터**(설치 여부는 [LOG_RETENTION.md](LOG_RETENTION.md#설치-기록) 설치 기록으로 확인 — 2026-09-23 설치),
 컨테이너 switch 명령 바로 직전에 [Docker 로그 보존 절차](LOG_RETENTION.md#switch-직전과-복원-검증)의
 `pre-switch`를 실행해 옛 ID 수집·복원·ID 재확인을 마치고 종료 0·`ready=true`를 확인한다.
 실패하면 교체를 멈춘다. B의 14일 보존소와 Investing 관측 증거 보존소는 별개이며, 관측 기간의
