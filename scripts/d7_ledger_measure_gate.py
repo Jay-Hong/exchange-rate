@@ -250,7 +250,7 @@ def owned_graph(root):
     seen, unknown, pending = set(), set(), [root]
     total = 0
     lock_type = type(threading.RLock())
-    scalar = (str, int, float, bool, bytes, type(None), lock_type)
+    scalar = (str, int, float, bool, bytes, bytearray, type(None), lock_type)
     while pending:
         obj = pending.pop()
         marker = id(obj)

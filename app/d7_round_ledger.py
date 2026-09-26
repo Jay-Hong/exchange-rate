@@ -127,10 +127,156 @@ def _diag(codes=(), level=None, global_=False):
 
 
 def _merge_diag(dst, src):
+    if isinstance(dst, _DiagView):
+        dst.merge(src)
+        return
     dst["codes"] = sorted(set(dst["codes"]) | set(src["codes"]))
     for key in ("baseline_invalidated", "coverage_error", "cumulative_evidence_uncertain"):
         dst[key] |= src[key]
     dst["uncertain_pairs"] = [p for p in PAIRS if p in dst["uncertain_pairs"] or p in src["uncertain_pairs"]]
+
+
+# This registry is part of the resident diagnostic format. New producer codes
+# must be added here explicitly; encode_diag never discards an unknown code.
+DIAG_CODES = tuple(sorted("""
+admission_stopped after_conflict_redelivery aggregation_capacity before_aggregation_start
+canonical_bytes_limit conflicting_finish contract_mixed cyclic_input depth_limit
+dict_keys_limit duplicate_finish duplicate_init_failure duplicate_invocation
+duplicate_wrapper_exit envelope_string_limit ever_overdue ever_unavailable
+evidence_malformed finish_after_exit finish_mono_before_start finish_mono_in_future
+finish_wall_before_start finish_wall_in_future foreign_epoch identity_conflict
+identity_unverified init_failure_conflict input_limit_exceeded input_shape_error
+integer_bits_limit invalid_argument invalid_unicode key_bytes_limit
+late_finish_accepted list_length_limit next_entry nodes_limit non_string_key orphan_finish
+orphan_init_failure orphan_start orphan_wrapper_exit post_close_conflict
+post_close_duplicate post_close_finish reason_other reason_oversize
+reason_unrecorded receipt_mono_regressed receipt_wall_regressed registration_conflict
+registration_error relinked_same report_init_failed report_malformed
+report_unavailable start_mono_in_future start_unrecorded start_wall_in_future
+string_bytes_limit telemetry_error time_integrity_error total_keys_limit
+total_list_items_limit total_string_bytes_limit unexpected_keys unregistered_contract
+unsupported_source wrapper_exit_conflict wrapper_exited
+""".split()))
+_DIAG_INDEX = {code: index for index, code in enumerate(DIAG_CODES)}
+_DIAG_FLAGS = ("baseline_invalidated", "coverage_error", "cumulative_evidence_uncertain")
+_DIAG_WIDTH = (len(DIAG_CODES) + len(_DIAG_FLAGS) + len(PAIRS) + 7) // 8
+
+
+def encode_diag(diag_dict):
+    encoded = 0
+    for code in diag_dict["codes"]:
+        try:
+            encoded |= 1 << _DIAG_INDEX[code]
+        except KeyError:
+            raise ValueError(f"unregistered diagnostic code: {code}") from None
+    for offset, key in enumerate(_DIAG_FLAGS, len(DIAG_CODES)):
+        if diag_dict[key]:
+            encoded |= 1 << offset
+    for offset, pair in enumerate(PAIRS, len(DIAG_CODES) + len(_DIAG_FLAGS)):
+        if pair in diag_dict["uncertain_pairs"]:
+            encoded |= 1 << offset
+    return encoded
+
+
+def decode_diag(encoded):
+    return {
+        "codes": [code for index, code in enumerate(DIAG_CODES) if encoded & (1 << index)],
+        "baseline_invalidated": bool(encoded & (1 << len(DIAG_CODES))),
+        "coverage_error": bool(encoded & (1 << (len(DIAG_CODES) + 1))),
+        "uncertain_pairs": [pair for index, pair in enumerate(PAIRS)
+                            if encoded & (1 << (len(DIAG_CODES) + len(_DIAG_FLAGS) + index))],
+        "cumulative_evidence_uncertain": bool(encoded & (1 << (len(DIAG_CODES) + 2))),
+    }
+
+
+def merge_encoded_diag(a, b):
+    return a | b
+
+
+class _DiagView:
+    """Transient compatibility view; the Record owns only fixed-width bytes."""
+
+    __slots__ = ("_bits",)
+
+    def __init__(self, bits):
+        self._bits = bits
+
+    def merge(self, diag):
+        encoded = encode_diag(diag)
+        for index in range(_DIAG_WIDTH):
+            self._bits[index] |= (encoded >> (8 * index)) & 255
+
+    def __getitem__(self, key):
+        return decode_diag(int.from_bytes(self._bits, "little"))[key]
+
+
+_RECORD_FIELDS = (
+    "epoch", "invocation_id", "source", "seq", "started_wall", "started_mono",
+    "job_id", "serial_job", "expected_report_schema", "expected_validity_contract",
+    "round_id", "linked_report_schema", "linked_validity_contract", "connection",
+    "lifecycle", "unavailable_reason", "init_failed_wall", "init_failed_mono",
+    "exit_evidence", "exit_evidence_wall", "exit_evidence_mono",
+    "overdue_first_observed_at", "overdue_first_observed_mono",
+    "first_finished_wall", "first_finished_mono", "first_digest", "bucket_start",
+    "bucket_end", "close_at", "closed", "inclusion", "diagnostics", "detail",
+)
+_RECORD_FIELD_SET = frozenset(_RECORD_FIELDS)
+
+
+class _Record:
+    """Fixed-slot resident state with dict-like access for the existing indexes."""
+
+    __slots__ = tuple(key for key in _RECORD_FIELDS if key != "diagnostics") + ("_diag_bits",)
+
+    def __init__(self, fields):
+        for key in _RECORD_FIELDS:
+            if key != "diagnostics":
+                setattr(self, key, fields[key])
+        self._diag_bits = bytearray(_DIAG_WIDTH)
+        _DiagView(self._diag_bits).merge(fields["diagnostics"])
+
+    def __getitem__(self, key):
+        if key == "diagnostics":
+            return _DiagView(self._diag_bits)
+        if key not in _RECORD_FIELD_SET:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __setitem__(self, key, value):
+        if key == "diagnostics":
+            self._diag_bits[:] = encode_diag(value).to_bytes(_DIAG_WIDTH, "little")
+        elif key in _RECORD_FIELD_SET:
+            setattr(self, key, value)
+        else:
+            raise KeyError(key)
+
+    def __iter__(self):
+        return iter(_RECORD_FIELDS)
+
+    def __len__(self):
+        return len(_RECORD_FIELDS)
+
+    def keys(self):
+        return _RECORD_FIELDS
+
+    def to_dict(self):
+        return {key: decode_diag(int.from_bytes(self._diag_bits, "little")) if key == "diagnostics"
+                else copy.deepcopy(getattr(self, key)) for key in _RECORD_FIELDS}
+
+    def __eq__(self, other):
+        if isinstance(other, _Record):
+            return all(self[key] == other[key] for key in _RECORD_FIELDS if key != "diagnostics") \
+                and self._diag_bits == other._diag_bits
+        if isinstance(other, dict):
+            return self.to_dict() == other
+        return NotImplemented
+
+    def __deepcopy__(self, memo):
+        clone = type(self).__new__(type(self))
+        memo[id(self)] = clone
+        for key in self.__slots__:
+            setattr(clone, key, copy.deepcopy(getattr(self, key), memo))
+        return clone
 
 
 def _strict_bytes(value, ceiling):
@@ -503,7 +649,7 @@ class RoundLedger:
         if diag is not None and diag["cumulative_evidence_uncertain"]:
             self._cumulative_evidence_uncertain = True
         return {"classification": classification,
-                "records": [copy.deepcopy(rec) for rec in sorted(records, key=lambda rec: rec["seq"])],
+                "records": [rec.to_dict() for rec in sorted(records, key=lambda rec: rec["seq"])],
                 "changes": copy.deepcopy(sorted(changes, key=lambda ch: self._records[ch["invocation_id"]]["seq"])),
                 "diagnostics": copy.deepcopy(diag if diag is not None else _diag()),
                 "health": copy.deepcopy(self._health)}
@@ -730,7 +876,8 @@ class RoundLedger:
             rec["lifecycle"] = "overdue"
             rec["overdue_first_observed_at"] = wall
             rec["overdue_first_observed_mono"] = mono
-            _merge_diag(rec["diagnostics"], _diag(("ever_overdue",)))
+            bit = _DIAG_INDEX["ever_overdue"]
+            rec._diag_bits[bit // 8] |= 1 << (bit % 8)
 
     def _evidence_time_reject(self, rec):
         self._health["clock_error"] = True
@@ -885,7 +1032,7 @@ class RoundLedger:
                 return self._reject("admission_stopped", ("admission_stopped", "aggregation_capacity"), "G", source)
             schema, contract = REGISTRY[source]
             previous_seq = self._previous_job.get((source, job_id)) if serial_job else None
-            rec = {"epoch": self.epoch, "invocation_id": invocation_id, "source": source,
+            rec = _Record({"epoch": self.epoch, "invocation_id": invocation_id, "source": source,
                    "seq": len(self._seq) + 1, "started_wall": started_wall, "started_mono": started_mono,
                    "job_id": job_id, "serial_job": serial_job,
                    "expected_report_schema": schema, "expected_validity_contract": contract,
@@ -896,7 +1043,7 @@ class RoundLedger:
                    "overdue_first_observed_at": None, "overdue_first_observed_mono": None,
                    "first_finished_wall": None, "first_finished_mono": None, "first_digest": None,
                    "bucket_start": None, "bucket_end": None, "close_at": None, "closed": False,
-                   "inclusion": "none", "diagnostics": _diag(), "detail": None}
+                   "inclusion": "none", "diagnostics": _diag(), "detail": None})
             self._records[invocation_id] = rec
             self._seq.append(invocation_id)
             self._cohort_index[source].add((started_wall, rec["seq"]))
@@ -1068,6 +1215,12 @@ class RoundLedger:
             damaged = len(self._seq) != len(self._records)
             total = ever_overdue = ever_unavailable = late_finish_accepted = 0
             if not damaged:
+                overdue_byte, overdue_bit = divmod(_DIAG_INDEX["ever_overdue"], 8)
+                unavailable_byte, unavailable_bit = divmod(_DIAG_INDEX["ever_unavailable"], 8)
+                late_byte, late_bit = divmod(_DIAG_INDEX["late_finish_accepted"], 8)
+                overdue_mask = 1 << overdue_bit
+                unavailable_mask = 1 << unavailable_bit
+                late_mask = 1 << late_bit
                 for _, seq in self._cohort_index[source].range((cohort_start, 0), (cohort_end, 0)):
                     invocation_id = self._seq[seq - 1]
                     if invocation_id not in self._records:
@@ -1075,9 +1228,10 @@ class RoundLedger:
                         break
                     rec = self._records[invocation_id]
                     total += 1
-                    ever_overdue += "ever_overdue" in rec["diagnostics"]["codes"]
-                    ever_unavailable += "ever_unavailable" in rec["diagnostics"]["codes"]
-                    late_finish_accepted += "late_finish_accepted" in rec["diagnostics"]["codes"]
+                    diag_bits = rec._diag_bits
+                    ever_overdue += bool(diag_bits[overdue_byte] & overdue_mask)
+                    ever_unavailable += bool(diag_bits[unavailable_byte] & unavailable_mask)
+                    late_finish_accepted += bool(diag_bits[late_byte] & late_mask)
                     if rec["connection"] not in connection or rec["lifecycle"] not in lifecycle:
                         damaged = True
                         break
@@ -1306,7 +1460,8 @@ class RoundLedger:
                 raise TypeError("invocation_id must be exact str")
             if _strict_bytes(invocation_id, 128) is not None:
                 raise ValueError("invalid invocation_id")
-            return copy.deepcopy(self._records.get(invocation_id))
+            rec = self._records.get(invocation_id)
+            return rec.to_dict() if rec is not None else None
 
     def _query_result(self, classification, entries, next_seq, diag):
         return {"classification": classification, "as_of": self._health["last_received_at"],
