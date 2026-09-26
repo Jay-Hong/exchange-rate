@@ -250,13 +250,25 @@ def owned_graph(root):
             continue
         seen.add(marker)
         total += sys.getsizeof(obj)
-        if isinstance(obj, RoundLedger):
-            pending.append(obj.__dict__)
-        elif type(obj) is dict:
+        if type(obj) is dict:
             for key, value in obj.items():
                 pending.extend((key, value))
         elif type(obj) in (list, tuple, set, frozenset):
             pending.extend(obj)
+        elif type(obj).__module__ == RoundLedger.__module__:
+            if hasattr(obj, "__dict__"):
+                pending.append(vars(obj))
+            for cls in type(obj).__mro__:
+                slots = cls.__dict__.get("__slots__", ())
+                if isinstance(slots, str):
+                    slots = (slots,)
+                for name in slots:
+                    if name in ("__dict__", "__weakref__"):
+                        continue
+                    if name.startswith("__") and not name.endswith("__"):
+                        name = f"_{cls.__name__.lstrip('_')}{name}"
+                    if hasattr(obj, name):
+                        pending.append(getattr(obj, name))
         elif not isinstance(obj, scalar):
             unknown.add(f"{type(obj).__module__}.{type(obj).__qualname__}")
     return {"bytes": total, "objects": len(seen), "unknown_types": sorted(unknown),

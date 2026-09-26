@@ -142,3 +142,36 @@ def test_one_shot_derives_status_only_through_scenario_status(gate):
         else:
             assert (isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
                     and value.func.id == "scenario_status"), ast.dump(value)
+
+
+# ───────── G5 소유 그래프: ledger 모듈의 보조 객체는 속까지 센다 ─────────
+
+def _helper_class(name, module, slots=False):
+    if slots:
+        cls = type(name, (), {"__slots__": ("items",)})
+    else:
+        cls = type(name, (), {})
+    cls.__module__ = module
+    return cls
+
+
+@pytest.mark.parametrize("slots", [False, True])
+def test_owned_graph_walks_ledger_module_helpers(gate, slots):
+    ledger = gate.new_ledger(4)
+    base = gate.owned_graph(ledger)
+    assert base["unknown_types"] == []
+    helper = _helper_class("_ProbeIndex", "app.d7_round_ledger", slots)()
+    payload = list(range(10_000, 12_000))
+    helper.items = payload
+    ledger._probe_index = helper
+    measured = gate.owned_graph(ledger)
+    assert measured["unknown_types"] == []
+    assert measured["bytes"] - base["bytes"] >= sys.getsizeof(payload) + sum(sys.getsizeof(v) for v in payload)
+
+
+def test_owned_graph_flags_foreign_objects(gate):
+    ledger = gate.new_ledger(4)
+    foreign = _helper_class("Foreign", "somewhere.else")()
+    foreign.items = [1, 2, 3]
+    ledger._foreign = foreign
+    assert gate.owned_graph(ledger)["unknown_types"] == ["somewhere.else.Foreign"]

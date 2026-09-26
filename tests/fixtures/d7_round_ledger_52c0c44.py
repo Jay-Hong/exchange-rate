@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import copy
-import bisect
 import hashlib
-import heapq
 import json
 import threading
 
@@ -41,79 +39,6 @@ _FIELDS = {
 }
 _PATHS = frozenset(("official_primary", "official_secondary", "mibank"))
 _JSON = json.JSONEncoder(sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-
-
-class _MinimumBySeq:
-    """A min segment tree. Leaves are seq numbers; empty leaves have no deadline."""
-
-    def __init__(self, capacity):
-        size = 1 << (capacity - 1).bit_length()
-        self.size = size
-        self.data = [None] * (2 * size)
-
-    def set(self, seq, deadline):
-        pos = self.size + seq - 1
-        data = self.data
-        data[pos] = deadline
-        pos //= 2
-        while pos:
-            left, right = data[2 * pos], data[2 * pos + 1]
-            value = right if left is None else left if right is None else min(left, right)
-            if data[pos] == value:
-                break
-            data[pos] = value
-            pos //= 2
-
-    def due(self, deadline):
-        """Yield due seqs in registration order without materializing candidates."""
-        data, size = self.data, self.size
-
-        def walk(pos):
-            value = data[pos]
-            if value is None or value > deadline:
-                return
-            if pos >= size:
-                yield pos - size + 1
-            else:
-                yield from walk(2 * pos)
-                yield from walk(2 * pos + 1)
-
-        yield from walk(1)
-
-
-class _SortedBlocks:
-    """Sorted (wall, seq) keys with bounded insertion shifts and range lookup."""
-
-    def __init__(self):
-        self.blocks = []
-        self.maxes = []
-
-    def add(self, key):
-        if not self.blocks:
-            self.blocks.append([key])
-            self.maxes.append(key)
-            return
-        index = bisect.bisect_left(self.maxes, key)
-        if index == len(self.blocks):
-            index -= 1
-        block = self.blocks[index]
-        bisect.insort(block, key)
-        if len(block) > 256:
-            self.blocks[index:index + 1] = [block[:128], block[128:]]
-            self.maxes[index:index + 1] = [self.blocks[index][-1], self.blocks[index + 1][-1]]
-        else:
-            self.maxes[index] = block[-1]
-
-    def range(self, lower, upper):
-        index = bisect.bisect_left(self.maxes, lower)
-        while index < len(self.blocks):
-            block = self.blocks[index]
-            start = bisect.bisect_left(block, lower)
-            stop = bisect.bisect_left(block, upper)
-            yield from block[start:stop]
-            if stop < len(block):
-                break
-            index += 1
 
 
 def _diag(codes=(), level=None, global_=False):
@@ -444,13 +369,6 @@ class RoundLedger:
         self._records = {}
         self._seq = []
         self._owners = {}
-        self._owned_ids = set()
-        self._close_index = _MinimumBySeq(defaults["max_records"])
-        self._overdue_index = _MinimumBySeq(defaults["max_records"])
-        self._previous_job = {}
-        self._cohort_index = {source: _SortedBlocks() for source in _SOURCES}
-        self._open_seq = []
-        self._recent_buckets = {}
         self._health = {
             "registered_records": 0, "retained_details": 0, "admission_stopped": False,
             "admission_stopped_at": None, "untracked_invocations": 0,
@@ -465,28 +383,6 @@ class RoundLedger:
             self._health["counter_saturated"] = True
         else:
             self._health[key] += 1
-
-    def _drop_overdue(self, rec):
-        self._overdue_index.set(rec["seq"], None)
-
-    def _add_open(self, rec):
-        seq = rec["seq"]
-        bisect.insort(self._open_seq, seq)
-        bucket = self._recent_buckets.setdefault(rec["bucket_start"], [])
-        bisect.insort(bucket, seq)
-
-    def _drop_open(self, rec):
-        seq = rec["seq"]
-        index = bisect.bisect_left(self._open_seq, seq)
-        if index < len(self._open_seq) and self._open_seq[index] == seq:
-            self._open_seq.pop(index)
-        bucket = self._recent_buckets.get(rec["bucket_start"])
-        if bucket is not None:
-            index = bisect.bisect_left(bucket, seq)
-            if index < len(bucket) and bucket[index] == seq:
-                bucket.pop(index)
-            if not bucket:
-                del self._recent_buckets[rec["bucket_start"]]
 
     def _observe(self, diag, source=None, global_=False):
         if not diag["coverage_error"]:
@@ -672,18 +568,13 @@ class RoundLedger:
         """Prepare a close candidate, then publish it with the receipt pair."""
         target_end = ((wall - 70 * _MINUTE) // _MINUTE) * _MINUTE
         previous_end = self._cumulative_end if self._cumulative_end is not None else self._first_bucket_start
+        closing = []
         rows = rounds = None
         first = last = None
         if target_end > previous_end:
-            def included_records():
-                for seq in self._close_index.due(target_end):
-                    invocation_id = self._seq[seq - 1]
-                    if invocation_id in self._records:
-                        rec = self._records[invocation_id]
-                        if rec["inclusion"] == "open_included":
-                            yield rec
-
-            included = included_records()
+            closing = [rec for rec in self._records.values()
+                       if rec["bucket_end"] is not None and not rec["closed"] and rec["bucket_end"] <= target_end]
+            included = [rec for rec in closing if rec["inclusion"] == "open_included"]
             rows, rounds, first, last = self._count_records(included)
             if self._merge_failure_bucket is not None and previous_end < self._merge_failure_bucket <= target_end:
                 self._merge_failure_bucket = None
@@ -698,15 +589,9 @@ class RoundLedger:
                 self._cumulative_first = first if self._cumulative_first is None else min(self._cumulative_first, first)
                 self._cumulative_last = last if self._cumulative_last is None else max(self._cumulative_last, last)
             self._cumulative_end = target_end
-            for seq in self._close_index.due(target_end):
-                self._close_index.set(seq, None)
-                invocation_id = self._seq[seq - 1]
-                if invocation_id not in self._records:
-                    continue
-                rec = self._records[invocation_id]
+            for rec in closing:
                 rec["closed"] = True
                 if rec["inclusion"] == "open_included":
-                    self._drop_open(rec)
                     rec["inclusion"] = "frozen_included"
                 elif rec["inclusion"] == "open_excluded":
                     rec["inclusion"] = "frozen_excluded"
@@ -715,12 +600,7 @@ class RoundLedger:
                     self._health["retained_details"] -= 1
         self._health["last_received_at"] = wall
         self._health["last_received_mono"] = mono
-        for seq in self._overdue_index.due(mono):
-            self._overdue_index.set(seq, None)
-            invocation_id = self._seq[seq - 1]
-            if invocation_id not in self._records:
-                continue
-            rec = self._records[invocation_id]
+        for rec in self._records.values():
             self._mark_overdue(rec, wall, mono)
 
     @staticmethod
@@ -761,7 +641,7 @@ class RoundLedger:
 
     def _check_identity(self, invocation_id, rec=None, candidate=None):
         if rec is None:
-            if invocation_id in self._owned_ids:
+            if any(owner == invocation_id for owner in self._owners.values()):
                 return self._unverified()
         elif rec["connection"] == "started":
             if self._owners.get((rec["source"], rec["round_id"])) != invocation_id:
@@ -792,9 +672,7 @@ class RoundLedger:
     def _isolate(self, rec, reason, changes, terminal=None):
         if rec["inclusion"] == "open_included":
             changes.append(self._change(rec, "remove"))
-            self._drop_open(rec)
             rec["inclusion"] = "open_excluded"
-        self._drop_overdue(rec)
         if terminal == "mixed":
             rec["lifecycle"] = "contract_mixed"
             rec["unavailable_reason"] = None
@@ -884,7 +762,6 @@ class RoundLedger:
                 self._bump("untracked_invocations")
                 return self._reject("admission_stopped", ("admission_stopped", "aggregation_capacity"), "G", source)
             schema, contract = REGISTRY[source]
-            previous_seq = self._previous_job.get((source, job_id)) if serial_job else None
             rec = {"epoch": self.epoch, "invocation_id": invocation_id, "source": source,
                    "seq": len(self._seq) + 1, "started_wall": started_wall, "started_mono": started_mono,
                    "job_id": job_id, "serial_job": serial_job,
@@ -899,16 +776,13 @@ class RoundLedger:
                    "inclusion": "none", "diagnostics": _diag(), "detail": None}
             self._records[invocation_id] = rec
             self._seq.append(invocation_id)
-            self._cohort_index[source].add((started_wall, rec["seq"]))
-            if job_id is not None:
-                self._previous_job[(source, job_id)] = rec["seq"]
             self._bump("registered_records")
             self._mark_overdue(rec, received_at, received_mono)
-            if rec["lifecycle"] in ("awaiting_report", "in_flight"):
-                self._overdue_index.set(rec["seq"], started_mono + _OVERDUE)
             if not serial_job:
                 return self._result("registered", (rec,))
-            previous = self._records[self._seq[previous_seq - 1]] if previous_seq is not None else None
+            previous = next((self._records[old_id] for old_id in reversed(self._seq[:-1])
+                             if old_id in self._records and self._records[old_id]["source"] == source
+                             and self._records[old_id]["job_id"] == job_id), None)
             if previous is None or not previous["serial_job"]:
                 return self._result("registered", (rec,))
             earlier = (started_wall < previous["started_wall"] or started_mono < previous["started_mono"])
@@ -929,7 +803,6 @@ class RoundLedger:
                 codes = ["next_entry"]
                 if previous["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
                     previous["lifecycle"] = "report_unavailable"
-                    self._drop_overdue(previous)
                     previous["unavailable_reason"] = "next_entry"
                     codes.extend(("ever_unavailable", "report_unavailable"))
                 diag = _diag(codes, "G")
@@ -972,7 +845,6 @@ class RoundLedger:
             event_codes = ["report_init_failed"]
             if rec["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
                 rec["lifecycle"] = "report_unavailable"
-                self._drop_overdue(rec)
                 rec["unavailable_reason"] = "report_init_failed"
                 event_codes.extend(("ever_unavailable", "report_unavailable"))
             return self._record_evidence_event("report_init_failed", rec, event_codes, "G")
@@ -1014,7 +886,6 @@ class RoundLedger:
             level = None
             if rec["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
                 rec["lifecycle"] = "report_unavailable"
-                self._drop_overdue(rec)
                 rec["unavailable_reason"] = "wrapper_exited"
                 event_codes.extend(("ever_unavailable", "report_unavailable"))
                 level = "G"
@@ -1065,24 +936,22 @@ class RoundLedger:
             connection = {name: 0 for name in ("started", "init_failed", "unbound")}
             lifecycle = {name: 0 for name in ("awaiting_report", "in_flight", "overdue",
                                              "report_unavailable", "finalized", "conflicting", "contract_mixed")}
-            damaged = len(self._seq) != len(self._records)
-            total = ever_overdue = ever_unavailable = late_finish_accepted = 0
-            if not damaged:
-                for _, seq in self._cohort_index[source].range((cohort_start, 0), (cohort_end, 0)):
-                    invocation_id = self._seq[seq - 1]
-                    if invocation_id not in self._records:
-                        damaged = True
-                        break
-                    rec = self._records[invocation_id]
-                    total += 1
-                    ever_overdue += "ever_overdue" in rec["diagnostics"]["codes"]
-                    ever_unavailable += "ever_unavailable" in rec["diagnostics"]["codes"]
-                    late_finish_accepted += "late_finish_accepted" in rec["diagnostics"]["codes"]
-                    if rec["connection"] not in connection or rec["lifecycle"] not in lifecycle:
-                        damaged = True
-                        break
-                    connection[rec["connection"]] += 1
-                    lifecycle[rec["lifecycle"]] += 1
+            selected = []
+            damaged = False
+            for invocation_id in self._seq:
+                rec = self._records.get(invocation_id)
+                if rec is None:
+                    damaged = True
+                    break
+                if rec["source"] != source or not cohort_start <= rec["started_wall"] < cohort_end:
+                    continue
+                selected.append(rec)
+                if rec["connection"] not in connection or rec["lifecycle"] not in lifecycle:
+                    damaged = True
+                    break
+                connection[rec["connection"]] += 1
+                lifecycle[rec["lifecycle"]] += 1
+            total = len(selected)
             if damaged or sum(connection.values()) != total or sum(lifecycle.values()) != total:
                 self._health["index_error"] = True
                 diag = _diag(("identity_unverified",), "B", True)
@@ -1094,9 +963,10 @@ class RoundLedger:
                 "expected_report_schema": REGISTRY[source][0], "validity_contract": REGISTRY[source][1],
                 "cohort_start": cohort_start, "cohort_end": cohort_end,
                 "registered_invocations": total, "connection_counts": connection, "lifecycle_counts": lifecycle,
-                "ever_overdue": ever_overdue,
-                "ever_unavailable": ever_unavailable,
-                "late_finish_accepted": late_finish_accepted,
+                "ever_overdue": sum("ever_overdue" in rec["diagnostics"]["codes"] for rec in selected),
+                "ever_unavailable": sum("ever_unavailable" in rec["diagnostics"]["codes"] for rec in selected),
+                "late_finish_accepted": sum("late_finish_accepted" in rec["diagnostics"]["codes"]
+                                            for rec in selected),
                 "equations_hold": {"connection": True, "lifecycle": True},
                 "diagnostics": _diag(), "health": copy.deepcopy(self._health),
             }
@@ -1151,7 +1021,6 @@ class RoundLedger:
             rec["linked_validity_contract"] = validity_contract
             rec["connection"] = "started"
             self._owners[(rec["source"], round_id)] = invocation_id
-            self._owned_ids.add(invocation_id)
             if rec["lifecycle"] == "awaiting_report":
                 rec["lifecycle"] = "in_flight"
             return self._finish_record("linked", (rec,), [], _diag())
@@ -1267,7 +1136,6 @@ class RoundLedger:
             rec["first_finished_wall"] = finished_wall
             rec["first_finished_mono"] = finished_mono
             rec["first_digest"] = candidate
-            self._drop_overdue(rec)
             rec["bucket_start"] = bucket
             rec["bucket_end"] = bucket + _MINUTE
             rec["close_at"] = bucket + _MINUTE + _CLOSE_DELAY
@@ -1280,7 +1148,6 @@ class RoundLedger:
                 if prior_unavailable:
                     codes.append("late_finish_accepted")
                 return self._finish_record("post_close_finish", (rec,), [], _diag(codes, "G"))
-            self._close_index.set(rec["seq"], rec["bucket_end"])
             detail, detail_codes = _detail_and_codes(rec["source"], report_schema, validity_contract,
                                                      selected_summary, telemetry_error_present)
             size, _ = _encoded_size_and_hash(detail, self._limits["max_detail_bytes"])
@@ -1294,7 +1161,6 @@ class RoundLedger:
             rec["lifecycle"] = "finalized"
             rec["unavailable_reason"] = None
             rec["inclusion"] = "open_included"
-            self._add_open(rec)
             codes = set(detail_codes)
             if prior_unavailable:
                 codes.add("late_finish_accepted")
@@ -1331,22 +1197,16 @@ class RoundLedger:
             if codes:
                 return self._clock_reject(codes, query=True)
             self._advance_and_close(as_of, as_of_mono)
-            if len(self._seq) != len(self._records):
-                self._health["index_error"] = True
-                diag = _diag(("identity_unverified",), "B", True)
-                self._observe(diag, global_=True)
-                return self._query_result("post_close_unverified", (), None, diag)
             entries = []
-            start = bisect.bisect_right(self._open_seq, after_seq)
-            stop = min(start + limit, len(self._open_seq))
-            for index in range(start, stop):
-                seq = self._open_seq[index]
-                invocation_id = self._seq[seq - 1]
-                if invocation_id not in self._records:
+            more = False
+            for seq in range(after_seq + 1, len(self._seq) + 1):
+                rec = self._records[self._seq[seq - 1]]
+                if rec["inclusion"] != "open_included":
                     continue
-                rec = self._records[invocation_id]
+                if len(entries) == limit:
+                    more = True
+                    break
                 entries.append({"seq": seq, "invocation_id": rec["invocation_id"], "detail": rec["detail"]})
-            more = stop < len(self._open_seq)
             return self._query_result("snapshot", entries, entries[-1]["seq"] if more else None, _diag())
 
     def aggregation_snapshot(self, *, as_of: int, as_of_mono: int) -> dict:
@@ -1363,17 +1223,10 @@ class RoundLedger:
             if codes:
                 return self._clock_reject(codes, aggregation=True)
             self._advance_and_close(as_of, as_of_mono)
-            if len(self._seq) != len(self._records):
-                self._health["index_error"] = True
-                diag = _diag(("identity_unverified",), "B", True)
-                self._observe(diag, global_=True)
-                return self._aggregation_reject("post_close_unverified", diag)
             window_end = as_of // _MINUTE * _MINUTE
             window_start = window_end - 60 * _MINUTE
-            streams = (self._recent_buckets[bucket] for bucket in range(window_start, window_end, _MINUTE)
-                       if bucket in self._recent_buckets)
-            recent = (self._records[self._seq[seq - 1]] for seq in heapq.merge(*streams)
-                      if self._seq[seq - 1] in self._records)
+            recent = [rec for rec in self._records.values() if rec["inclusion"] == "open_included"
+                      and window_start <= rec["bucket_start"] and rec["bucket_end"] <= window_end]
             rows, rounds, first, last = self._count_records(recent)
             return {
                 "classification": "snapshot", "as_of": as_of, "as_of_mono": as_of_mono,
@@ -1422,15 +1275,5 @@ class RoundLedger:
                 raise ValueError("fault precondition failed")
             if fault == "missing_record":
                 del self._records[invocation_id]
-                key = (rec["source"], rec["job_id"])
-                if rec["job_id"] is not None and self._previous_job.get(key) == rec["seq"]:
-                    self._previous_job.pop(key)
-                    for old_id in reversed(self._seq[:rec["seq"] - 1]):
-                        if old_id in self._records:
-                            old_rec = self._records[old_id]
-                            if (old_rec["source"], old_rec["job_id"]) == key:
-                                self._previous_job[key] = old_rec["seq"]
-                                break
             else:
                 del self._owners[(rec["source"], rec["round_id"])]
-                self._owned_ids.discard(invocation_id)
