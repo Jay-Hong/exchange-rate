@@ -789,6 +789,7 @@ def partial_acceptance(rows, *, adapter_status, mode):
 def _empty_row(name, status="UNVERIFIED"):
     return {"name": name, "status": status, "visit_gate": "UNVERIFIED",
             "temporary_gate": "UNVERIFIED", "time_gate": "UNVERIFIED", "sample_plan": "N/A",
+            "temporary_breakdown": None,
             "samples": {"gc_disabled": 0, "gc_enabled": 0},
             "sample_checks": {"checked": 0, "failures": []}, "D_observed": [None, None],
             "K_observed": [None, None], "sample_exception": None, "prepare_seconds": 0.0,
@@ -938,9 +939,14 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                 else:
                     call_seconds += wall() - call_started
                 if phase == "temporary":
-                    _, peak = tracemalloc.get_traced_memory()
+                    after_bytes, peak = tracemalloc.get_traced_memory()
                     peak_delta = peak - before_bytes
                     tracemalloc.stop()
+                    row["temporary_breakdown"] = {
+                        "peak_delta": peak_delta,
+                        "current_after_delta": after_bytes - before_bytes,
+                        "peak_over_current_after": peak - after_bytes,
+                    }
                 if phase == "visit":
                     visits = ledger._records.visits
                     if cohort_range_audit:
@@ -1316,6 +1322,19 @@ def _tail_register_provider(limit, samples, warmup, *, reverse=False):
     return provide
 
 
+def _finish_reprepared_provider(limit, total, summary=SUMMARY):
+    """Keep finish calls sequential while resetting before the detail cap is reached."""
+    detail_cap = min(DETAIL_CAP, limit)
+    ledger = None
+    def provide(index):
+        nonlocal ledger
+        target = index % detail_cap
+        if ledger is None or target == 0:
+            ledger = fill(limit, linked=min(total, detail_cap))
+        return ledger, "finish", finish_args(target, summary=summary), rid(target)
+    return provide
+
+
 def _scenario_specs(limit, samples, warmup):
     total = 2 + warmup + 2 * samples
     close_n = min(DETAIL_CAP, limit)
@@ -1338,13 +1357,13 @@ def _scenario_specs(limit, samples, warmup):
     add("cohort_empty", _repeat_provider(lambda: fill(limit), "cohort_snapshot",
         dict(source=SOURCE, cohort_start=T + 1, cohort_end=T + 2, as_of=T + 2,
              as_of_mono=T + 2)), "repeat")
-    add("finish_accept", _repeat_provider(lambda: fill(limit, linked=total), "finish",
-        lambda i: finish_args(i)), "sequential", "finalized")
+    add("finish_accept", _finish_reprepared_provider(limit, total),
+        "sequential_reprepared", "finalized")
     add("link_round_duplicate", _repeat_provider(lambda: fill(limit, linked=1), "link_round",
         link_args(0)), "repeat", "relinked_same")
     near, over = large_summary(3900), large_summary(4097)
-    add("finish_near_valid_limit", _repeat_provider(lambda: fill(limit, linked=total), "finish",
-        lambda i: finish_args(i, summary=near)), "sequential", "finalized")
+    add("finish_near_valid_limit", _finish_reprepared_provider(limit, total, near),
+        "sequential_reprepared", "finalized")
     add("finish_over_input_limit", _repeat_provider(lambda: fill(limit, linked=total), "finish",
         lambda i: finish_args(i, summary=over)), "sequential", "input_limit_exceeded")
     add("finish_duplicate", _repeat_provider(lambda: fill(limit, finalized=1), "finish",

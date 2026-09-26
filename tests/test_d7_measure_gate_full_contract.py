@@ -698,3 +698,54 @@ def test_recent_outside_one_inside_detail_count_is_checked(gate, monkeypatch):
     row = rows["recent_outside_open_one_inside"]
     assert row["status"] == "FAIL"
     assert any("detail" in f["reason"] for f in row["sample_checks"]["failures"]), row["sample_checks"]
+
+
+# ───────── full 1회차(87f93a0) 결과 반영 — finish 재준비 · 임시량 분해 (Codex 재승인 대상) ─────────
+
+def test_finish_rows_reprepare_before_detail_cap(gate):
+    """full 1회차에서 finish 두 행은 2,048 상세 한도를 넘는 종료 54건이 격리돼 실패했다. 한도 전에 재준비해야 한다."""
+    small_cap = dict(limit=128, samples=70, warmup=1)            # 2 + 1 + 140 = 143 > 상세 한도 128
+    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(),
+                           rows=["finish_accept", "finish_near_valid_limit"], **small_cap)
+    rows = rows_by_name(report)
+    for name in ("finish_accept", "finish_near_valid_limit"):
+        row = rows[name]
+        assert row["sample_plan"] == "sequential_reprepared", (name, row["sample_plan"])
+        assert row["sample_checks"]["failures"] == [], (name, row["sample_checks"]["failures"][:3])
+        assert row["sample_checks"]["checked"] == 2 + 1 + 2 * 70
+
+
+class _Persist(list):
+    pass
+
+
+def test_temporary_breakdown_separates_persistent_growth(gate, monkeypatch):
+    """임시량 FAIL 행은 호출 뒤 남은 증가분과 순수 임시분을 나눠 보고한다(판정식은 그대로 peak-current_before)."""
+    base = gate.RoundLedger
+
+    class Keeps(base):
+        def aggregation_snapshot(self, **kw):
+            self.__dict__.setdefault("_probe_keep", _Persist()).append(bytearray(400_000))
+            return super().aggregation_snapshot(**kw)
+
+    rows = _run_rows(gate, monkeypatch, Keeps, ["aggregation_empty"])
+    row = rows["aggregation_empty"]
+    assert row["temporary_gate"] == "FAIL"
+    b = row["temporary_breakdown"]
+    assert b["peak_delta"] >= 400_000 and b["current_after_delta"] >= 400_000
+
+
+def test_temporary_breakdown_marks_transient_peak(gate, monkeypatch):
+    base = gate.RoundLedger
+
+    class Spikes(base):
+        def aggregation_snapshot(self, **kw):
+            scratch = bytearray(400_000)
+            del scratch
+            return super().aggregation_snapshot(**kw)
+
+    rows = _run_rows(gate, monkeypatch, Spikes, ["aggregation_empty"])
+    row = rows["aggregation_empty"]
+    assert row["temporary_gate"] == "FAIL"
+    b = row["temporary_breakdown"]
+    assert b["peak_delta"] >= 400_000 and b["current_after_delta"] < 100_000
