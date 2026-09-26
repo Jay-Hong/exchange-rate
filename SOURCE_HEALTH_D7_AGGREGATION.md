@@ -36,7 +36,7 @@ Tier 1에서 단일 in-process 집계기에 다음 연결부를 추가하도록 
 
 ### 1.2 cohort와 두 보존식
 
-`C = {등록된 reporting 호출 | source=s, epoch=e, a ≤ invoked_at < b}`를 고정하고, 조회시각 `as_of`에서 같은 C의 상태만 센다. 종료가 b를 넘더라도 시작 cohort를 옮기지 않는다. 등록 때 예상 계약을 고정하므로 초기화 실패도 소스·계약 경계에 귀속할 수 있다.
+`C = {등록된 reporting 호출 | source=s, epoch=e, a ≤ invoked_at < b}`를 고정하고, 조회시각 `as_of`에서 같은 C의 상태만 센다. 종료가 b를 넘더라도 시작 cohort를 옮기지 않는다. 등록 때 예상 계약을 고정하므로 초기화 실패도 소스·계약 경계에 귀속할 수 있다. **(5a-4 개정, 2026-09-26)** 아래 임의 반열린 범위의 현재 상태 보존식은 `a ≥ cohort_exact_from`인 정확 조회 기간에만 성립한다. `cohort_exact_from`은 퇴출된 시작시각의 상한 다음 tick으로 단조 전진하며, 더 오래된 범위는 부분 분모 대신 `cohort_expired`/coverage 기간 불완전으로 반환한다.
 
 연결 분류는 정확히 하나다: `started`(시작 연결 성공), `init_failed`(초기화 실패 확인), `unbound`(둘 다 확인 못함). `started`는 종료 여부와 별개이며 한 번 연결된 호출은 후속 충돌에도 started에 남는다. init_failed 뒤 모순된 시작이 오면 초기 분류는 보존하고 식별 충돌로 격리한다.
 
@@ -48,6 +48,8 @@ registered_invocations(C) = awaiting_report(C) + in_flight(C) + overdue(C)
 ```
 
 첫 식은 연결 분류, 둘째 식은 **현재 상태의 상호 배타적 분할**이다. 진단 누적 `ever_overdue`, `ever_unavailable`, `late_finish_accepted`, 계측 오류 등은 두 식에 더하지 않는다. `init_failed` 호출의 현재 상태는 `report_unavailable`이다. 초기화 실패를 별도 현재 상태로 중복 가산하지 않는다. 지원 없는 소스는 두 식에 포함하지 않고 `unsupported_invocations`로 구분한다.
+
+**(5a-4 개정, 2026-09-26)** 정확 조회 기간 밖에는 과거 임의 범위의 현재 lifecycle을 복원하지 않는다. 대신 epoch 전체 성공 접수에 대해 `N_total = N_frozen + N_live`를 보존하고, reporting 소스·계약별 connection 및 lifecycle 각 분류의 epoch 합계도 각각 `frozen + live`로 센다. live Record를 tombstone으로 바꿀 때 해당 호출을 frozen totals로 한 번 이전하므로 live와 frozen에 중복 가산하지 않는다. tombstone 만료 뒤에도 이 고정 폭 totals는 epoch 생애 동안 남으며 재시작 뒤 복구는 보장하지 않는다. cohort 시작시각 분모와 §6의 결과 종료시각 분모는 혼합하지 않는다.
 
 구 통계 증분은 `legacy_success_delta/legacy_fail_delta`로 별도 출력할 수 있지만, cohort 구성·누락 수 계산·허용오차의 근거로 쓰지 않는다. reset이나 종료시각 차이까지 있어 직접 등가 비교할 수 없다.
 
@@ -126,7 +128,7 @@ registered_invocations(C) = awaiting_report(C) + in_flight(C) + overdue(C)
 - 시작 계약과 종료 계약의 불일치 또는 회차 내부 계약 혼합: contract_mixed. 열린 기여를 전부 제외하고 양쪽 계약 어느 쪽에도 넣지 않는다. 기존 오프라인 집계기의 혼합 제외 원칙과 같다(`scripts/investing_observe_aggregate.py:319-322`).
 - 종료 이후 추가 **개별 증거**: `late_evidence` 진단만. 기존 스냅샷을 보강해 비율에 넣지 않는다. 이 증거를 반영한 새로운 종료 payload가 전달되면 상충 종료 규칙을 적용한다.
 
-**닫힌 버킷에는 수정하지 않는다.** 닫힌 뒤의 동일 재전달은 `post_close_duplicate`, 상충 종료는 `post_close_conflict`, 이전 종료가 없던 늦은 첫 종료는 `post_close_finish`로 구분한다. post_close_duplicate는 duplicate_finish의 하위 진단이므로 둘을 회차 수처럼 합산하지 않는다. 충돌이면 현재 생명주기는 conflicting으로 이동하고 현재 파생값도 무효화하되, 닫힌 누적 수치는 **닫힐 때의 판정**으로 남긴다. 출력에 `frozen_at_close`, `post_close_*`, `cumulative_evidence_uncertain=true`를 붙인다. 현재 상태 보존식과 과거 닫힘 당시의 수치가 다른 시점이라는 사실을 명시한다. 불변 수치가 무조건 진실이라는 보장은 하지 않는다.
+**닫힌 버킷에는 수정하지 않는다. (5a-4 개정, 2026-09-26)** 닫힌 뒤 tombstone 보유 기간의 동일 재전달은 `post_close_duplicate`, 상충 종료는 `post_close_conflict`, 첫 종료가 없는 live 호출의 늦은 첫 종료는 `post_close_finish`로 구분한다. post_close_duplicate는 duplicate_finish의 하위 진단이므로 둘을 회차 수처럼 합산하지 않는다. 충돌이 live Record의 cohort 동결 전이라면 현재 생명주기를 conflicting으로 옮기고 현재 파생값을 무효화한다. tombstone 전환 뒤에는 frozen cohort lifecycle을 옮기지 않고 별도 사후 진단·소스 등록 통화의 불확실성만 늘린다. 어느 경우에도 닫힌 누적 수치는 **닫힐 때의 판정**으로 남긴다. `frozen_at_close`와 `post_close_*`를 출력하고, 상충·늦은 첫 종료로 증거가 달라지면 `cumulative_evidence_uncertain=true`와 첫 사건·발견 시각·사유를 보존한다. tombstone 만료 뒤에는 §7의 `expired_identity_unverified` 경계를 따른다. 불변 수치가 무조건 진실이라는 보장은 하지 않는다.
 
 파생 상태 반례 유지: `A valid → B missing → C valid → D missing → C 충돌`이 모두 열린 같은 창이면 비율 기여는 `V=1,M=2`, 현재 last_valid·누락 수는 baseline unknown이다. `last_valid=C`, 횟수 1을 남기지 않는다. 하나·우리 확장 때는 부모가 자식 프레임을 수락한 뒤 최종화한다는 경계를 유지한다(구현 예정 계약 `SOURCE_HEALTH_PLAN.md:482-503`).
 
@@ -136,7 +138,7 @@ registered_invocations(C) = awaiting_report(C) + in_flight(C) + overdue(C)
 
 초기 보존값 W=60분, 추가 여유 G=10분으로 정한다. 버킷의 `end=e_k`, 논리 닫힘 시각 `close_at=e_k+W+G`다. 따라서 상세 기여 기록의 수명은 종료 후 70~71분이고, 열려 있는 최근 창의 충돌을 수정할 수 있다. **닫힘·상세 기록 만료 시각은 동일한 close_at**이다. 실제 timer 정리가 늦어도 입력마다 먼저 만료 여부를 검사해 닫힌 규칙을 적용한다. 닫힘과 동시인 입력은 `received_at ≥ close_at`이므로 post-close다. 원자적 닫힘이 실패하면 기록을 버리거나 watermark를 앞당기지 않는다.
 
-닫을 때 버킷을 한 번만 확정 누적에 더한 뒤 `closed=true`와 연속 닫힘 watermark를 원자적으로 갱신한다. 재호출은 무효 연산이다. 회차 상세 스냅샷/기여는 이때 해제하지만 **§7의 최소 식별 기록은 해제하지 않는다.** 아직 종료가 없는 호출은 start 버킷이 오래됐다는 이유로 삭제하지 않는다. 작은 lifecycle 기록을 epoch까지 보존한다.
+닫을 때 버킷을 한 번만 확정 누적에 더한 뒤 `closed=true`와 연속 닫힘 watermark를 원자적으로 갱신한다. 재호출은 무효 연산이다. **(5a-4 개정, 2026-09-26)** 회차 상세 스냅샷/기여는 닫힘에 해제하고, 닫힘이 성공한 완전 Record는 §7의 기간 동안 tombstone으로 바꾼다. 작은 lifecycle 기록을 epoch까지 개별 보존하지 않는다. 첫 종료가 없는 호출은 start 버킷이 오래됐다는 이유만으로 삭제하지 않고 §7의 두 시계 4시간 만료까지 live로 보유한다. 퇴출 때 동결한 cohort totals와 닫힌 결과 누적은 epoch 생애 동안 유지하며, 사후 진단·불확실성은 동결된 lifecycle과 분리한다. 닫힘 merge 실패 시 상세·수신시각·watermark·퇴출을 게시하지 않는다.
 
 ```text
 cumulative_end(T) = epoch 시작 이후 연속해 닫힌 1분 버킷들의 마지막 end
@@ -151,24 +153,36 @@ epoch 시작 분은 `aggregation_started_at` 이후만 관측한 부분 버킷�
 
 **판정 예 3.** A=`10:00 valid`, B=`10:30 missing`은 각각 `[10:00,10:01)`, `[10:30,10:31)`에 속한다. close_at은 11:11, 11:41이다. 11:41 출력의 cumulative_end=10:31이고 두 기여는 `V=1,M=1`, 50%다. `[10:00,11:00)`과 `[10:01,11:01)` 최근 창을 각각 출력했어도 누적에 더하지 않아 B가 두 번 세어지지 않는다. 정확히 10:01 종료는 첫 버킷이 아닌 다음 버킷이다.
 
-## 7. 식별 보존과 유한 메모리 — r3 결함 4
+## 7. 식별 보존과 유한 메모리 — r3 결함 4 (5a-4 개정, 2026-09-26)
 
-**선택: process_epoch 동안 최소 식별 기록을 유지한다.** 상세 만료 후에도 invocation_id·source·round_id(있으면)·최초 finished_at(없으면 null)·첫 digest(없으면 null)·연결 분류·현재 lifecycle 상태·귀속 버킷·닫힘 여부·필수 진단 비트를 남긴다. 따라서 처음 종료가 없던 호출과 기존 종료의 재전달을 구분할 수 있다. epoch는 실제 프로세스 생애이며, 용량을 확보하려고 epoch 이름만 바꾸거나 ID를 먼저 버리지 않는다. 재시작 후 다른 epoch 입력은 `foreign_epoch`로 제외하고 새 호출로 재등록하지 않는다. 재시작 사이 중복 제거·누적 복구는 보장하지 않는다.
+**식별 보존·지연 경계.** epoch 동안 모든 invocation ID·round ID를 무기한 보존하지 않는다. 결과 1분 버킷은 §6처럼 `close_at=bucket_end+70분`에 원자적으로 닫아 한 번 누적한다. 첫 종료 digest가 있는 호출의 완전 Record는 귀속 버킷의 닫힘·상세 해제가 성공하고 `retire_at=max(close_at, 최초 종료 수신시각)`에 이르면 tombstone으로 바꾼다. tombstone은 최초 digest·finished_at·invocation/round 소유권·동결 분류와 필요한 진단만 보존하며 원시 상세·새 결과 기여는 보유하지 않는다. wall과 monotonic 각각의 퇴출 기점부터 120분이 지나야 prune한다. `close_at ≤ received_at < tomb_expires`의 tombstone 보유 구간에서만 동일 재전달을 `post_close_duplicate`, 다른 digest·최초 시각을 `post_close_conflict`로 정확 판정한다. 두 시계 중 하나라도 기한 전이면 tombstone을 보유하고, 둘 다 기한 이상이면 선행 prune한다. 기한과 같은 수신시각은 기한 밖이다. 보유 tombstone의 소유권 충돌은 격리한다.
 
-접수 순서는 **epoch → 등록된 invocation 연결 → `(source,round_id)` 색인 → 최초 시각/digest → 버킷**이다. payload의 새로운 finished_at을 보고 먼저 새 버킷에 넣지 않는다. 등록 없는 오래된 ID나 임의 finish는 §1의 orphan으로 제외한다. 현 epoch의 기존 round_id를 다른 새 invocation에 붙이려는 시작도 식별 충돌이다. 식별 레코드 자체가 소실된 비정상 상태는 정확한 duplicate/conflict 판정을 중단하고 `post_close_unverified` 및 coverage 오류로 표시하며 기여를 추가하지 않는다. 정상 경로에서는 epoch 내 최소 레코드 만료가 없다.
+첫 digest가 없는 호출은 overdue 15분·래퍼 종료·다음 직렬 job 진입·초기화 실패만으로 만료하지 않는다. 등록 시작 wall과 monotonic에서 **모두 4시간** 경과하면 `report_unavailable/retention_expired`로 한 번 동결하고 tombstone을 다시 두 시계 120분 보존한다. 뒤늦은 시작·종료·wrapper는 보유 tombstone에서 각각 `expired_start`/`expired_finish`/`expired_wrapper`로 제외하며 결과 V/M/U에 넣지 않는다. 실제 crawler 실행·반환·재시도에는 영향을 주지 않는다. tombstone까지 사라진 신원의 link/finish/wrapper는 접수 이력이나 동일성·충돌을 추정하지 않고 `expired_identity_unverified`로 제외한다. 확인된 소스의 등록 통화 전체 coverage와 세 통화 파생값을 불확실로, 소스를 확인할 수 없으면 전 소스/global을 불확실로 표시한다. 닫힌 누적에 관계될 수 있으면 `cumulative_evidence_uncertain=true`로 표시하되 과거 수치는 고치지 않는다. 등록 연결이 없다는 사실만으로 과거 접수 여부를 판단하지 않는다.
 
-| Tier 1 저장 제한 | 초기 수치와 도달 시 규칙 |
+새 호출 등록은 `0≤received_wall−started_wall≤1분`과 `0≤received_mono−started_mono≤1분`을 동시에 만족해야 한다. 더 오래된 시작은 `late_start_excluded`로 식별·cohort에 무삽입하고 해당 소스 coverage를 불확실로 한다. 이미 접수한 호출의 후속 증거에는 이 신선도 검사를 다시 적용하지 않는다. 재앵커 뒤라도 `started_wall<cohort_exact_from`인 신규 등록은 동결 cohort를 다시 열 수 없어 `clock_unverified`/coverage 불확실로 제외한다.
+
+접수 순서는 **epoch → 등록된 invocation 연결 → `(source,round_id)` 소유권 → 최초 시각/digest → 버킷**이다. payload의 새 finished_at만 보고 새 버킷에 먼저 넣지 않는다. 동일 epoch의 기존 round ID를 다른 invocation에 붙이는 시도는 live·tombstone 보유 중 모두 식별 충돌로 격리한다. 소유권 자료가 손상되면 정상 퇴출과 구분하여 `missing_owner`/`missing_record`·`post_close_unverified` 및 coverage 오류로 기여를 막는다. 재시작 후 다른 epoch 입력은 `foreign_epoch`로 제외하고 재등록하지 않는다. 재시작 사이 중복 제거·누적 복구는 보장하지 않는다.
+
+**시계·원자성.** 마지막 성공 수신 쌍에 비해 monotonic이 역행하면 `time_integrity_error`로 새 epoch가 필요하다. wall 역행 또는 wall/mono 경과 차이가 60초를 넘으면 `clock_unverified`로 격리하고 coverage를 불확실로 두며 그 입력과 닫힘·퇴출·watermark를 게시하지 않는다. 격리 중 wall·mono가 모두 증가하고 인접 증분 차이가 1초 이내인 탐침을 첫 이상 쌍부터 연속 **3개 이상**, 첫 후보부터 monotonic **10초 이상** 모으면 마지막 쌍으로 재앵커하고 다음 입력부터 재개한다. 같은 시각 탐침은 세지 않으며 후보 조건이 깨지면 연속열을 다시 시작한다. 재앵커 뒤에도 결과 버킷 닫힘, 무종료 4시간 만료, tombstone 120분 prune은 각자의 wall·mono 하한을 모두 지난 뒤 순서대로 catch-up한다. 한쪽 기한만 지난 옛 버킷 입력과 wall 역행으로 겹친 과거 버킷은 제외·불확실로 둔다. 격리 중 입력을 소급 접수하지 않는다. 닫힘 merge 실패에는 수신 쌍·watermark·퇴출을 게시하지 않고 동일 시각 재시도를 허용한다.
+
+**생산자 가정과 조회.** 새 ticket은 도입하지 않고 기존 래퍼 invocation ID와 UUID4 보고 `round_id` 생성·전달을 유지한다. 동일 epoch에서 invocation ID 및 `(source,round_id)`는 호출마다 유일하고 재사용되지 않으며 원 호출의 `started_wall/mono`는 고정이라고 가정한다. tombstone 기한 뒤 옛 호출의 재등록은 고정 시작시각의 신선도 위반으로 `late_start_excluded`다. 생산자가 만료된 round ID를 신선한 새 호출에 재사용하면 검출 불가한 잘못된 신규 집계가 가능하므로 생성 경로와 ID 유일성을 구현 수락 전에 검증한다. 공개 `seq`는 성공 등록의 누적 번호로 슬롯을 재사용해도 재사용·wrap하지 않으며, 기존 `invocation_seq`도 wrap하지 않는다. `contributions_open(after_seq)`는 삭제된 seq를 건너뛰는 exclusive cursor다. `record(invocation_id)`의 33키 사본은 live에서만 반환하고 tombstone 뒤 `None`은 미접수·거절·퇴출을 구분하지 못한다. `record_charge()`도 퇴출 뒤 `None`이다. 두 `None` 모두 새 접수·중복 판단 근거로 쓰지 않는다.
+
+**cohort·누적 동결.** live Record를 tombstone으로 바꿀 때 connection 하나·lifecycle 하나와 진단을 해당 source/계약의 고정 폭 frozen totals로 한 번 이전한다. 이후 tombstone 재전달·충돌은 별도 사후 진단과 불확실성만 늘리고 동결 cohort 분모·상태를 고치지 않는다. `cohort_snapshot(source,[a,b),as_of)`는 `a≥cohort_exact_from`인 정확 기간만 제공하며 오래된 범위는 `cohort_expired`다. 정상 시계·신선한 등록 아래 최근 60분 cohort를 보장하도록 시험한다. epoch 전체 frozen+live totals 및 `cohort_exact_from`·`frozen_through`·`as_of`는 log-only 출력에 제공한다. 결과 누적은 `cumulative_end`까지 닫힌 버킷의 당시 수치로 고정하고, tombstone 퇴출이나 사후 충돌로 빼거나 재합산하지 않는다. 오래된 기간별 재집계가 필요하면 보존 로그 원자료를 사용한다.
+
+| 5a-4 저장 제한 | 수치와 도달 시 규칙 |
 |---|---|
-| 최소 식별/호출 레코드 | **최대 131,072개/epoch**. 초기화 실패·미종료 호출도 한 슬롯을 쓴다. payload 없는 호출을 무료로 누적시키지 않는다. |
+| 상주 식별/호출 | **동시 `N_res=N_live+N_tomb≤131,072`**. epoch 누적 성공 접수 `N_total`의 상한이 아니다. 초기화 실패·만료 전 미종료·payload 없는 호출도 live 슬롯을 쓴다. 누적 성공 수는 별도 고정 폭 계수다. |
 | 열린 상세 기여 | **최대 2,048회차**, 정규화 저장분 **회차당 4 KiB 이하**. 원시 DOM·스냅샷 전체·오류 문자열/모든 충돌 변형을 저장하지 않는다. 제한 초과 보고는 `report_unavailable/aggregation_capacity`와 전체 통화 불확실성으로 남긴다. |
-| 메모리 예산 | **집계기가 소유하는 상주 자료 전체 64 MiB 상한**(ID 색인·레코드·버킷·counters 포함), 직렬 처리하는 정규화 임시 자료 **256 KiB 상한**. Python 런타임/allocator의 RSS를 포함한 프로세스 전체 상한이라는 뜻은 아니다. 구현에서 객체·색인 비용 포함 계측과 상한 도달 시험이 필요하다. |
-| 한도 도달 | 저장 전 예산 검사. 슬롯 또는 64 MiB를 넘기기 전에 `admission_stopped`를 고정하고 해당 epoch의 **새 호출 집계 접수를 중단**한다. 크롤러는 계속 실행한다. 기존 식별 기록은 유지한다. 고정 크기 용량 진단·`untracked_invocations` 계수·중단 시각을 남기고 전체 coverage/통화 파생값을 불확실로 표시한다. 메모리가 줄어도 이 epoch의 신규 접수를 자동 재개하지 않는다. |
+| 메모리 예산 | **집계기 소유 상주 자료 전체 64 MiB 상한**(live/tombstone, A–G·소유권·seq 색인, 버킷·counters, 삭제 뒤 컨테이너 capacity, 재구성 중 이중 backing 포함), 직렬 정규화 임시 자료 **256 KiB 상한**. Python 런타임/allocator의 RSS를 포함한 프로세스 전체 상한은 아니다. `E=F_4+Q_4+D+Σ_live(A_i+R_i)+Σ_tomb(T_j+R^T_j)≤62,914,560`과 GC 뒤 소유 identity 그래프 `G≤E`를 구조적으로 입증한다. |
+| 한도 도달 | 자격 있는 prune/교체를 먼저 성공시킨 뒤 `N_res+1` 및 byte를 저장 전에 함께 선검사한다. 자격 없는 첫 슬롯·byte 거절은 `admission_stopped`로 원자적 latch하고 해당 epoch의 **새 호출 집계 접수를 중단**한다. 퇴출로 자리가 생겨도 재개하지 않는다. 크롤러는 계속 실행한다. 고정 크기 용량 진단·`untracked_invocations` 계수·중단 시각을 남기고 전체 coverage/통화 파생값을 불확실로 표시한다. |
 
-기존 등록 호출의 상태 전이와 post-close 판정은 남겨 둔 슬롯으로 계속 처리한다. 상세 저장에 실패하면 통계를 부분 반영하지 않고 공백으로 남긴다. 새 접수 중단 뒤 식별 없는 종료는 모두 제외한다. 이미 중단된 구간을 정상 분모에서 빠진 성공처럼 표시하지 않는다. 원문 무한 reason/key 유입으로 한도를 우회하지 않도록 소스·계약·통화·경로·reason은 등록 enum과 고정 `other` 진단으로 제한한다. 미등록 계약은 자동 버킷 생성 없이 오류 처리하고, 등록표/규칙 변경은 새 검증 경계다. 프로세스 재시작을 이 설계가 자동 실행하지 않는다.
+기존 등록 호출의 필수 상태 전이·퇴출을 신규 접수 byte 거절로 숨기지 않는다. tombstone 최대 요금과 교체 중 공간은 등록 때 예약하거나 `E_after≤E_before`를 증명한다. `Q_4(N_res,C)`에는 삭제 뒤 capacity/high-water와 재구성 중 구·신 backing을 계상하고, 고정 backing 또는 용량 선검사·예약을 둔 재구성으로 epoch 누적 접수가 늘어도 유한 상한을 증명한다. 무한 expiry heap·누적 `_seq` append·삭제 뒤 영구 high-water는 허용하지 않는다. 종료된 tombstone의 invocation/round owner·역방향·cohort·seq 위치 등 성장 항목은 같은 잠금에서 제거한다. 직전 성공 등록 job의 종료 증거·시각·seq는 bounded 요약으로만 남긴다. 상세 저장에 실패하면 통계를 부분 반영하지 않고 공백으로 남긴다. 새 접수 중단 뒤 식별 없는 종료는 모두 제외한다. 이미 중단된 구간을 정상 분모에서 빠진 성공처럼 표시하지 않는다. 원문 무한 reason/key 유입으로 한도를 우회하지 않도록 소스·계약·통화·경로·reason은 등록 enum과 고정 `other` 진단으로 제한한다. 미등록 계약은 자동 버킷 생성 없이 오류 처리하고, 등록표/규칙 변경은 새 검증 경계다. 프로세스 재시작을 이 설계가 자동 실행하지 않는다.
 
-**회차 수 근거와 예산 산정.** 현재 코드의 IN/BREAK1/BREAK2에서 Investing은 분당 6회(`app/scheduler.py:781`, `app/scheduler.py:931`, `app/scheduler.py:1078`), bs·citi는 각 분당 1회(`app/scheduler.py:846-857`, `app/scheduler.py:1003-1014`, `app/scheduler.py:1125-1136`)다. 전일 최대 빈도가 유지된다고 보수적으로 잡으면 **8,640+1,440+1,440=11,520회/일**, 71분 약 **568회**다. OUT의 Investing 1분 주기(`app/scheduler.py:1243`) 등을 반영한 실제량은 더 작을 수 있다. 수동 호출·비정상 폭주·모드 전환 추가 호출은 이 추정에 포함하지 않으며 한도 검사가 담당한다. 131,072슬롯은 이 가정에서 약 11.38일분, 2,048상세 슬롯은 568회의 약 3.6배다. 최소 레코드와 색인을 합쳐 256 B/호출로 구현할 수 있다는 **예산 가정**은 32 MiB, 상세 최대는 8 MiB이며 나머지 24 MiB를 버킷·객체 오버헤드 등에 둔다. 256 B는 실측이 아니므로 확인 필요이며, 구현이 더 크면 64 MiB 한도에서 더 일찍 중단한다. 메모리 상한을 맞추려고 ID를 조기 퇴출하지 않는다.
+**회차 수 근거와 예산 산정. (5a-4 개정, 2026-09-26)** 현재 코드의 IN/BREAK1/BREAK2에서 Investing은 분당 6회(`app/scheduler.py:781`, `app/scheduler.py:931`, `app/scheduler.py:1078`), bs·citi는 각 분당 1회(`app/scheduler.py:846-857`, `app/scheduler.py:1003-1014`, `app/scheduler.py:1125-1136`)다. 전일 최대 빈도가 유지된다고 보수적으로 잡으면 **8,640+1,440+1,440=11,520회/일**, 71분 약 **568회**, 7일 **80,640회**다. OUT의 Investing 1분 주기(`app/scheduler.py:1243`) 등을 반영한 실제량은 더 작을 수 있다. 수동 호출·비정상 폭주·모드 전환 추가 호출은 이 추정에 포함하지 않으며 한도 검사가 담당한다. 2,048상세 슬롯은 568회의 약 3.6배다. 기존의 최소 레코드·색인 **256 B/호출**은 실측 아닌 예산 가정이었다. 5a-3b 필드별 선불 기준 짧은 ID 등록만의 실측은 **25,361건**(`7edade1`)이며, 퇴출 없이 약 **2.2일분**이다. 따라서 5a-4 퇴출은 5b 배선의 선행 조건이다. 새 live/tombstone 요금·컨테이너 상한과 실제 긴 ID·상세 혼합은 별도로 계측한다.
 
-**판정 예 4.** H1=`A valid,B missing,C valid`, H2=`A missing,B valid,C valid`의 누적은 둘 다 V=2,M=1이다. 상세 만료 뒤 A valid 재전달은 남은 A digest로 H1에서는 post_close_duplicate, H2에서는 post_close_conflict다. A의 finished_at을 현재 시각으로 바꿔도 먼저 같은 ID를 찾아 post_close_conflict로 판정하며 새 valid를 더하지 않는다. 131,072개 한도 뒤에는 신규 집계 접수가 중단되므로 오래된 A를 퇴출하고 새 회차로 받는 경로가 없다.
+**판정 예 4. (5a-4 개정, 2026-09-26)** H1=`A valid,B missing,C valid`, H2=`A missing,B valid,C valid`의 닫힌 누적은 둘 다 V=2,M=1이다. A의 tombstone 보유 중 A valid 재전달은 H1에서 `post_close_duplicate`, H2에서 `post_close_conflict`다. A의 finished_at을 현재 시각으로 바꿔도 소유권·최초 digest를 먼저 검사해 `post_close_conflict`로 판정하며 새 valid를 더하지 않는다. tombstone 만료 뒤 같은 ID의 후속 증거는 `expired_identity_unverified`이고 과거 누적 수치는 그대로 두며 coverage/누적 증거를 불확실로 표시한다. 이미 latch된 `admission_stopped`는 퇴출 뒤에도 재개하지 않는다.
+
+**수락 게이트.** 11,520회/일 가정의 7일 **80,640건과 다음 회차 최소 80,641건**을 기본 한도에서 모두 등록하고, 시간 경계별 `N_live/N_tomb/N_res`·capacity·E/G·coverage·cohort horizon·cursor가 안정적인지를 별도 장기 churn fixture로 증명한다. 퇴출 자격이 생기지 않는 압력 fixture에서는 첫 slot/byte 거절의 무삽입·latch 뒤 비재개를 독립 검증한다. 닫힘/만료 경계, 시계 재앵커, 생산자 ID 유일성, frozen+live 보존식, 5a-2/5a-3 공통 수락 구간 차등, 부록 C 기본 full 1회를 구현 수락 전에 잠근다. 이 문안만으로 5b log-only 배선을 승인하지 않는다.
 
 ## 8. 첫 구현의 크기와 독립 검증
 
@@ -210,6 +224,14 @@ shadow 결과 검토에는 주간 모드 전환·재시작·보고 유실·중�
 3. **§6:** 이동 창 합산을 금지하고 겹치지 않는 1분 버킷·최초 종료시각 귀속·close_at·상세 만료·정확히 한 번 누적·cumulative_end를 고정했다.
 4. **§5·7:** 상세 만료와 최소 ID 보존을 분리했다. epoch 내 ID/digest 유지, 시각 변경 재진입 차단, post-close 확정성 한계, 131,072호출/2,048상세/64 MiB 예산과 포화 정책을 정했다.
 5. **§4:** report_init_failed를 포함한 보고 공백을 등록 통화 전체의 불확실성으로 전파하고 수집 missing으로 바꾸지 않도록 했다.
+
+**5a-4 개정 대조 (2026-09-26):** 위 다섯 항목은 r4 당시의 변경 이력이며, 다음은 이번 정본 개정이다.
+
+- **§1 (5a-4 개정, 2026-09-26):** 임의 시작 cohort의 현재 상태 두 보존식은 `cohort_exact_from` 이후에 한정하고, 오래된 범위는 `cohort_expired`와 별도 epoch `frozen+live` 보존식으로 바꿨다.
+- **§5 (5a-4 개정, 2026-09-26):** 닫힌 버킷의 사후 충돌은 frozen cohort lifecycle을 옮기지 않고 진단·coverage·누적 증거 불확실성으로 분리했다.
+- **§6 (5a-4 개정, 2026-09-26):** 닫힘 때 상세 해제 뒤 tombstone으로 전환하고 작은 lifecycle 기록의 epoch 개별 보존을 frozen totals로 대체했다.
+- **§7 (5a-4 개정, 2026-09-26):** 120분 tombstone·무종료 4시간 만료·두 시계 재앵커·1분 신규 등록 신선도·ID 유일성 가정과 `record()`/cohort 조회 경계를 정했다.
+- **§7 예산·게이트 (5a-4 개정, 2026-09-26):** 5a-3b 짧은 ID 등록만의 25,361건·약 2.2일 실측을 반영하고, 동시 131,072 보유·7일 churn과 독립 압력 검증을 5b 배선 선행 조건으로 뒀다.
 
 | r3 판정에서 닫힌 항목/보존해야 할 결정 | r4 위치와 유지 결과 |
 |---|---|
