@@ -231,6 +231,8 @@ def test_B1_first_receipt_just_before_close():
     r = g.run("A", at(10, 0), at(11, 10, 59, 999999))
     assert r["classification"] == "finalized" and r["changes"][0]["action"] == "add"
     assert g.ld.record("A")["inclusion"] == "open_included" and r["health"]["retained_details"] == 1
+    assert "late_finish_accepted" in r["diagnostics"]["codes"]                 # 등록 시작 09:59:59 → 15분 경과(S4.6)
+    assert "ever_overdue" in g.ld.record("A")["diagnostics"]["codes"]
     s = g.snap(at(11, 11))
     each_pair(s["cumulative"], (1, 0, 0, 0, 1.0))
     assert g.ld.record("A")["detail"] is None and s["health"]["retained_details"] == 0
@@ -240,7 +242,9 @@ def test_B2_first_receipt_exactly_at_close():
     g = Agg()
     r = g.run("A", at(10, 0), at(11, 11))
     assert r["classification"] == "post_close_finish" and r["changes"] == []
-    assert r["diagnostics"]["codes"] == ["post_close_finish"] and r["diagnostics"]["coverage_error"] is True
+    assert r["diagnostics"]["codes"] == ["late_finish_accepted", "post_close_finish"]    # S4.6
+    assert r["diagnostics"]["coverage_error"] is True
+    assert "ever_overdue" in g.ld.record("A")["diagnostics"]["codes"]
     assert r["diagnostics"]["baseline_invalidated"] is False
     assert r["health"]["coverage_complete"] is False and "bs" in r["health"]["uncertain_sources"]
     s = g.snap(at(11, 11))
@@ -428,7 +432,8 @@ def test_public_methods_run_under_lock():
     tree = ast.parse(Path(lg.__file__).read_text(encoding="utf-8"))
     cls = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "RoundLedger"][0]
     public = {"register", "link_round", "finish", "record", "contributions_open", "aggregation_snapshot",
-              "_inject_identity_fault_for_test", "_inject_cumulative_merge_failure_for_test"}
+              "_inject_identity_fault_for_test", "_inject_cumulative_merge_failure_for_test",
+              "report_init_failed", "wrapper_exited", "note_registration_error", "cohort_snapshot"}   # 네 번째 조각
     seen = set()
     for fn in cls.body:
         if isinstance(fn, ast.FunctionDef) and fn.name in public:

@@ -55,11 +55,14 @@ RECORD_KEYS = {
     "expected_validity_contract", "round_id", "linked_report_schema", "linked_validity_contract", "connection",
     "lifecycle", "unavailable_reason", "first_finished_wall", "first_finished_mono", "first_digest", "bucket_start",
     "bucket_end", "close_at", "closed", "inclusion", "diagnostics", "detail",
+    # 네 번째 조각(slice4_contract_r2 S4.1)
+    "job_id", "serial_job", "init_failed_wall", "init_failed_mono", "exit_evidence", "exit_evidence_wall",
+    "exit_evidence_mono", "overdue_first_observed_at", "overdue_first_observed_mono",
 }
 HEALTH_KEYS = {
     "registered_records", "retained_details", "admission_stopped", "admission_stopped_at", "untracked_invocations",
     "coverage_complete", "uncertain_sources", "clock_error", "index_error", "counter_saturated", "last_received_at",
-    "last_received_mono",
+    "last_received_mono", "unsupported_invocations", "registration_errors",
 }
 DIAG_KEYS = {"codes", "baseline_invalidated", "coverage_error", "uncertain_pairs", "cumulative_evidence_uncertain"}
 
@@ -125,11 +128,11 @@ class Env:
         self.now = w
         return w, mono(w)
 
-    def register(self, inv="A", src="bs", sw=T - S1, sm=None, at=None, epoch=None, rm=None):
+    def register(self, inv="A", src="bs", sw=T - S1, sm=None, at=None, epoch=None, rm=None, **job):
         ra, rmm = self.at(at if at is not None else max(self.now, T - S1))
         return self.ld.register(epoch=epoch or self.epoch, invocation_id=inv, source=src, started_wall=sw,
                                 started_mono=mono(sw) if sm is None else sm, received_at=ra,
-                                received_mono=rmm if rm is None else rm)
+                                received_mono=rmm if rm is None else rm, **job)   # job_id·serial_job(S4.6)
 
     def link(self, inv="A", rid="r1", src="bs", schema=None, contract=None, at=None, epoch=None, rm=None):
         s, c = REG[src]
@@ -163,8 +166,11 @@ class Env:
     def rec(self, inv="A"):
         return self.ld.record(inv)
 
-    def ready(self, inv="A", rid="r1", src="bs"):
-        self.register(inv, src)
+    def ready(self, inv="A", rid="r1", src="bs", start=None):
+        if start is None:
+            self.register(inv, src)
+        else:
+            self.register(inv, src, sw=start, at=max(self.now, start))
         self.link(inv, rid, src)
 
 
@@ -443,7 +449,7 @@ def test_L9_03_one_closed_record_gets_F_other_B():
     e.finish("A", "r1")
     e.query(at=CLOSE)                                            # A 닫힘
     assert e.rec("A")["detail"] is None
-    e.ready("B", "r2")
+    e.ready("B", "r2", start=CLOSE)                               # B 는 A 닫힘 뒤 시작한 새 호출(S4.6)
     e.finish("B", "r2", fw=CLOSE, at=CLOSE)                      # B 는 다음 버킷에서 열림
     r = shape(e.link("B", "r1", at=CLOSE + S1))
     assert r["classification"] == "identity_conflict"
@@ -552,6 +558,8 @@ def test_L9_10_first_receipt_just_before_close():
     e.ready()
     r = e.finish(at=CLOSE - 1)
     assert r["classification"] == "finalized" and r["changes"] == [add("A", D(S()))]
+    assert r["diagnostics"]["codes"] == ["late_finish_accepted"]      # 네 번째 조각: 10:00 무렵 시작 → 15분 경과 뒤 첫 종료
+    assert "ever_overdue" in e.rec()["diagnostics"]["codes"]
     assert r["health"]["retained_details"] == 1 and e.rec()["inclusion"] == "open_included"
     s = snap(e)
     assert s["cumulative_end"] == T                               # 원점 부분 버킷 [09:59,10:00) 만 11:10 에 닫혔다
@@ -563,7 +571,8 @@ def test_L9_10_first_receipt_at_close():
     e.ready()
     r = shape(e.finish(at=CLOSE))
     assert r["classification"] == "post_close_finish" and r["changes"] == []
-    assert r["diagnostics"] == diag(["post_close_finish"], "G")
+    assert r["diagnostics"] == diag(["late_finish_accepted", "post_close_finish"], "G")
+    assert "ever_overdue" in e.rec()["diagnostics"]["codes"]
     rec = e.rec()
     assert (rec["lifecycle"], rec["inclusion"], rec["closed"], rec["detail"]) == \
         ("finalized", "post_close_excluded", True, None)
@@ -1422,9 +1431,9 @@ def test_L9_31_retained_detail_capacity():
     e.ready("A", "r1")
     e.finish("A", "r1")
     e.query(at=CLOSE)
-    e.ready("B", "r2")
+    e.ready("B", "r2", start=CLOSE)
     assert e.rec("A")["detail"] is None and e.query()["health"]["retained_details"] == 0   # 닫힘이 슬롯을 돌려준다
-    r = shape(e.finish("B", "r2", fw=CLOSE, at=CLOSE))                                   # [11:11,11:12) 로 열림
+    r = shape(e.finish("B", "r2", fw=CLOSE, at=CLOSE))                                   # B 는 CLOSE 에 시작(S4.6)                                   # [11:11,11:12) 로 열림
     assert r["classification"] == "finalized" and r["changes"] == [add("B", D(S()))]
     assert r["diagnostics"] == diag()
     rec = e.rec("B")
@@ -1450,6 +1459,8 @@ def test_L9_33_late_first_finish_after_detail_release_is_post_close():
     r = e.finish("B", "r2", at=CLOSE)
     assert r["classification"] == "post_close_finish" and e.rec("B")["inclusion"] == "post_close_excluded"
     assert r["changes"] == [] and r["health"]["retained_details"] == 0 and e.rec("A")["detail"] is None
+    assert "late_finish_accepted" in r["diagnostics"]["codes"]         # B 는 10:00 무렵 시작 → 15분 경과(S4.6)
+    assert "ever_overdue" in e.rec("B")["diagnostics"]["codes"]
 
 
 def test_L9_37_capacity_unavailable_then_different_digest():
@@ -1749,6 +1760,9 @@ def test_record_equation_holds():
     assert sorted(lif) == ["awaiting_report", "finalized", "report_unavailable", "report_unavailable"]
     con = [e.rec(i)["connection"] for i in "ABCD"]
     assert con.count("unbound") + con.count("started") == 4
+    c = e.ld.cohort_snapshot(source="bs", cohort_start=T - 2 * S1, cohort_end=T, as_of=e.now, as_of_mono=mono(e.now))
+    assert c["registered_invocations"] == 4 and c["equations_hold"] == {"connection": True, "lifecycle": True}
+    assert sum(c["connection_counts"].values()) == sum(c["lifecycle_counts"].values()) == 4
 
 
 # ───────── 모듈 제약(L1.3 + 보완 A7) ─────────

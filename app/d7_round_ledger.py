@@ -24,6 +24,7 @@ _MAX_TIME = 2**63 - 1 - 4260000000
 _MAX_COUNT = 2**64 - 1
 _MINUTE = 60000000
 _CLOSE_DELAY = 4200000000
+_OVERDUE = 900000000
 _ABSENT = object()
 _COLLECTION = frozenset(("valid", "missing", "unknown", "not_attempted"))
 _INVESTING_WRITE = frozenset(("unknown", "not_attempted"))
@@ -371,6 +372,7 @@ class RoundLedger:
         self._health = {
             "registered_records": 0, "retained_details": 0, "admission_stopped": False,
             "admission_stopped_at": None, "untracked_invocations": 0,
+            "unsupported_invocations": 0, "registration_errors": 0,
             "coverage_complete": True, "uncertain_sources": [], "clock_error": False,
             "index_error": False, "counter_saturated": False,
             "last_received_at": None, "last_received_mono": None,
@@ -598,6 +600,27 @@ class RoundLedger:
                     self._health["retained_details"] -= 1
         self._health["last_received_at"] = wall
         self._health["last_received_mono"] = mono
+        for rec in self._records.values():
+            self._mark_overdue(rec, wall, mono)
+
+    @staticmethod
+    def _mark_overdue(rec, wall, mono):
+        if (rec["first_digest"] is None and rec["lifecycle"] in ("awaiting_report", "in_flight")
+                and mono - rec["started_mono"] >= _OVERDUE):
+            rec["lifecycle"] = "overdue"
+            rec["overdue_first_observed_at"] = wall
+            rec["overdue_first_observed_mono"] = mono
+            _merge_diag(rec["diagnostics"], _diag(("ever_overdue",)))
+
+    def _evidence_time_reject(self, rec):
+        self._health["clock_error"] = True
+        return self._reject("time_integrity_error", ("time_integrity_error",), "G", rec["source"])
+
+    def _record_evidence_event(self, classification, rec, codes, level=None):
+        diag = _diag(codes, level)
+        _merge_diag(rec["diagnostics"], diag)
+        self._observe(diag, rec["source"])
+        return self._result(classification, (rec,), (), diag)
 
     def _unverified(self, records=()):
         records = tuple(records)
@@ -683,13 +706,24 @@ class RoundLedger:
         return self._result("identity_conflict", records, changes, event)
 
     def register(self, *, epoch: str, invocation_id: str, source: str, started_wall: int,
-                 started_mono: int, received_at: int, received_mono: int) -> dict:
+                 started_mono: int, received_at: int, received_mono: int,
+                 job_id: str | None = None, serial_job: bool = False) -> dict:
         with self._lock:
+            if job_id is not None and type(job_id) is not str:
+                raise TypeError("job_id must be exact str or None")
+            if type(serial_job) is not bool:
+                raise TypeError("serial_job must be exact bool")
             error = self._envelope((("str", epoch), ("str", invocation_id), ("str", source),
                                     ("time", started_wall), ("time", started_mono),
                                     ("time", received_at), ("time", received_mono)))
+            if job_id is not None:
+                job_error = _strict_bytes(job_id, 128)
+                if error is None:
+                    error = job_error
             if error:
                 return self._envelope_reject(error)
+            if serial_job and job_id is None:
+                return self._reject("invalid_argument", ("invalid_argument",))
             rec, early = self._early(epoch, invocation_id)
             if early:
                 return early
@@ -702,7 +736,8 @@ class RoundLedger:
                 return self._clock_reject(codes)
             self._advance_and_close(received_at, received_mono)
             if rec is not None:
-                if (source, started_wall, started_mono) == (rec["source"], rec["started_wall"], rec["started_mono"]):
+                if (source, started_wall, started_mono, job_id, serial_job) == (
+                        rec["source"], rec["started_wall"], rec["started_mono"], rec["job_id"], rec["serial_job"]):
                     return self._finish_record("duplicate_invocation", (rec,), [], _diag(("duplicate_invocation",)))
                 changes = []
                 self._isolate(rec, None, changes, "conflict")
@@ -718,6 +753,7 @@ class RoundLedger:
                 return self._reject("time_integrity_error", (*time_codes, "time_integrity_error"), "G", source=source,
                                     global_=source not in REGISTRY)
             if source not in REGISTRY:
+                self._bump("unsupported_invocations")
                 return self._reject("unsupported_source", ("unsupported_source",))
             if self._health["admission_stopped"] or len(self._records) >= self._limits["max_records"]:
                 if not self._health["admission_stopped"]:
@@ -728,16 +764,212 @@ class RoundLedger:
             schema, contract = REGISTRY[source]
             rec = {"epoch": self.epoch, "invocation_id": invocation_id, "source": source,
                    "seq": len(self._seq) + 1, "started_wall": started_wall, "started_mono": started_mono,
+                   "job_id": job_id, "serial_job": serial_job,
                    "expected_report_schema": schema, "expected_validity_contract": contract,
                    "round_id": None, "linked_report_schema": None, "linked_validity_contract": None,
                    "connection": "unbound", "lifecycle": "awaiting_report", "unavailable_reason": None,
+                   "init_failed_wall": None, "init_failed_mono": None,
+                   "exit_evidence": None, "exit_evidence_wall": None, "exit_evidence_mono": None,
+                   "overdue_first_observed_at": None, "overdue_first_observed_mono": None,
                    "first_finished_wall": None, "first_finished_mono": None, "first_digest": None,
                    "bucket_start": None, "bucket_end": None, "close_at": None, "closed": False,
                    "inclusion": "none", "diagnostics": _diag(), "detail": None}
             self._records[invocation_id] = rec
             self._seq.append(invocation_id)
             self._bump("registered_records")
-            return self._result("registered", (rec,))
+            self._mark_overdue(rec, received_at, received_mono)
+            if not serial_job:
+                return self._result("registered", (rec,))
+            previous = next((self._records[old_id] for old_id in reversed(self._seq[:-1])
+                             if old_id in self._records and self._records[old_id]["source"] == source
+                             and self._records[old_id]["job_id"] == job_id), None)
+            if previous is None or not previous["serial_job"]:
+                return self._result("registered", (rec,))
+            earlier = (started_wall < previous["started_wall"] or started_mono < previous["started_mono"])
+            if previous["exit_evidence"] == "wrapper_exited":
+                earlier |= (started_wall < previous["exit_evidence_wall"]
+                            or started_mono < previous["exit_evidence_mono"])
+            if previous["first_digest"] is not None:
+                earlier |= (started_wall < previous["first_finished_wall"]
+                            or started_mono < previous["first_finished_mono"])
+            if earlier:
+                diag = _diag(("wrapper_exit_conflict",), "G")
+                _merge_diag(previous["diagnostics"], diag)
+                self._observe(diag, source)
+            elif previous["first_digest"] is None and previous["exit_evidence"] is None:
+                previous["exit_evidence"] = "next_entry"
+                previous["exit_evidence_wall"] = started_wall
+                previous["exit_evidence_mono"] = started_mono
+                codes = ["next_entry"]
+                if previous["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
+                    previous["lifecycle"] = "report_unavailable"
+                    previous["unavailable_reason"] = "next_entry"
+                    codes.extend(("ever_unavailable", "report_unavailable"))
+                diag = _diag(codes, "G")
+                _merge_diag(previous["diagnostics"], diag)
+                self._observe(diag, source)
+            else:
+                diag = _diag()
+            return self._result("registered", (previous, rec), (), diag)
+
+    def report_init_failed(self, *, epoch: str, invocation_id: str, failed_wall: int,
+                           failed_mono: int, received_at: int, received_mono: int) -> dict:
+        with self._lock:
+            error = self._envelope((("str", epoch), ("str", invocation_id), ("time", failed_wall),
+                                    ("time", failed_mono), ("time", received_at), ("time", received_mono)))
+            if error:
+                return self._envelope_reject(error)
+            rec, early = self._early(epoch, invocation_id)
+            if early:
+                return early
+            if rec is None:
+                return self._reject("orphan", ("orphan_init_failure",), "G", global_=True)
+            if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
+                return self._origin_reject(rec["source"])
+            codes = self._clock_codes(received_at, received_mono)
+            if codes:
+                return self._clock_reject(codes)
+            if (failed_wall < rec["started_wall"] or failed_mono < rec["started_mono"]
+                    or failed_wall > received_at or failed_mono > received_mono):
+                return self._evidence_time_reject(rec)
+            self._advance_and_close(received_at, received_mono)
+            if rec["init_failed_wall"] is not None:
+                if (failed_wall, failed_mono) == (rec["init_failed_wall"], rec["init_failed_mono"]):
+                    return self._record_evidence_event("duplicate_init_failure", rec, ("duplicate_init_failure",))
+                return self._record_evidence_event("init_failure_conflict", rec, ("init_failure_conflict",), "G")
+            rec["init_failed_wall"] = failed_wall
+            rec["init_failed_mono"] = failed_mono
+            if rec["connection"] == "started":
+                return self._conflict((rec,))
+            rec["connection"] = "init_failed"
+            event_codes = ["report_init_failed"]
+            if rec["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
+                rec["lifecycle"] = "report_unavailable"
+                rec["unavailable_reason"] = "report_init_failed"
+                event_codes.extend(("ever_unavailable", "report_unavailable"))
+            return self._record_evidence_event("report_init_failed", rec, event_codes, "G")
+
+    def wrapper_exited(self, *, epoch: str, invocation_id: str, exited_wall: int,
+                       exited_mono: int, received_at: int, received_mono: int) -> dict:
+        with self._lock:
+            error = self._envelope((("str", epoch), ("str", invocation_id), ("time", exited_wall),
+                                    ("time", exited_mono), ("time", received_at), ("time", received_mono)))
+            if error:
+                return self._envelope_reject(error)
+            rec, early = self._early(epoch, invocation_id)
+            if early:
+                return early
+            if rec is None:
+                return self._reject("orphan", ("orphan_wrapper_exit",), "G", global_=True)
+            if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
+                return self._origin_reject(rec["source"])
+            codes = self._clock_codes(received_at, received_mono)
+            if codes:
+                return self._clock_reject(codes)
+            if (exited_wall < rec["started_wall"] or exited_mono < rec["started_mono"]
+                    or exited_wall > received_at or exited_mono > received_mono
+                    or (rec["exit_evidence"] == "next_entry" and
+                        (exited_wall > rec["exit_evidence_wall"] or exited_mono > rec["exit_evidence_mono"]))):
+                return self._evidence_time_reject(rec)
+            self._advance_and_close(received_at, received_mono)
+            if rec["exit_evidence"] == "wrapper_exited":
+                if (exited_wall, exited_mono) == (rec["exit_evidence_wall"], rec["exit_evidence_mono"]):
+                    return self._record_evidence_event("duplicate_wrapper_exit", rec, ("duplicate_wrapper_exit",))
+                return self._record_evidence_event("wrapper_exit_conflict", rec, ("wrapper_exit_conflict",), "G")
+            if rec["first_digest"] is not None and (exited_wall < rec["first_finished_wall"]
+                                                   or exited_mono < rec["first_finished_mono"]):
+                return self._record_evidence_event("wrapper_exit_conflict", rec, ("wrapper_exit_conflict",), "G")
+            rec["exit_evidence"] = "wrapper_exited"
+            rec["exit_evidence_wall"] = exited_wall
+            rec["exit_evidence_mono"] = exited_mono
+            event_codes = ["wrapper_exited"]
+            level = None
+            if rec["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
+                rec["lifecycle"] = "report_unavailable"
+                rec["unavailable_reason"] = "wrapper_exited"
+                event_codes.extend(("ever_unavailable", "report_unavailable"))
+                level = "G"
+            elif rec["lifecycle"] == "report_unavailable":
+                level = "G"
+            return self._record_evidence_event("wrapper_exited", rec, event_codes, level)
+
+    def note_registration_error(self, *, epoch: str, source: str,
+                                received_at: int, received_mono: int) -> dict:
+        with self._lock:
+            error = self._envelope((("str", epoch), ("str", source),
+                                    ("time", received_at), ("time", received_mono)))
+            if error:
+                return self._envelope_reject(error)
+            if epoch != self.epoch:
+                return self._result("foreign_epoch", diag=_diag(("foreign_epoch",)))
+            if self._health["index_error"]:
+                return self._reject("post_close_unverified", ("identity_unverified",), "B", global_=True)
+            if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
+                return self._origin_reject(source if source in REGISTRY else None)
+            codes = self._clock_codes(received_at, received_mono)
+            if codes:
+                return self._clock_reject(codes)
+            self._advance_and_close(received_at, received_mono)
+            self._bump("registration_errors")
+            return self._reject("registration_error_recorded", ("registration_error",), "G",
+                                source if source in REGISTRY else None, source not in REGISTRY)
+
+    def cohort_snapshot(self, *, source: str, cohort_start: int, cohort_end: int,
+                        as_of: int, as_of_mono: int) -> dict:
+        with self._lock:
+            if type(source) is not str or any(type(value) is not int for value in
+                                              (cohort_start, cohort_end, as_of, as_of_mono)):
+                raise TypeError("cohort arguments must have exact types")
+            if (_strict_bytes(source, 128) is not None or source not in REGISTRY
+                    or not 0 <= cohort_start < cohort_end <= as_of <= _MAX_TIME
+                    or not 0 <= as_of_mono <= _MAX_TIME):
+                return self._aggregation_reject("invalid_argument", _diag(("invalid_argument",)))
+            if self._health["index_error"]:
+                return self._aggregation_reject("post_close_unverified",
+                                                _diag(("identity_unverified",), "B", True))
+            if self._health["last_received_at"] is None and as_of < self.aggregation_started_at:
+                return self._origin_reject(query=True)
+            codes = self._clock_codes(as_of, as_of_mono)
+            if codes:
+                return self._clock_reject(codes, aggregation=True)
+            self._advance_and_close(as_of, as_of_mono)
+            connection = {name: 0 for name in ("started", "init_failed", "unbound")}
+            lifecycle = {name: 0 for name in ("awaiting_report", "in_flight", "overdue",
+                                             "report_unavailable", "finalized", "conflicting", "contract_mixed")}
+            selected = []
+            damaged = False
+            for invocation_id in self._seq:
+                rec = self._records.get(invocation_id)
+                if rec is None:
+                    damaged = True
+                    break
+                if rec["source"] != source or not cohort_start <= rec["started_wall"] < cohort_end:
+                    continue
+                selected.append(rec)
+                if rec["connection"] not in connection or rec["lifecycle"] not in lifecycle:
+                    damaged = True
+                    break
+                connection[rec["connection"]] += 1
+                lifecycle[rec["lifecycle"]] += 1
+            total = len(selected)
+            if damaged or sum(connection.values()) != total or sum(lifecycle.values()) != total:
+                self._health["index_error"] = True
+                diag = _diag(("identity_unverified",), "B", True)
+                self._observe(diag, global_=True)
+                return self._aggregation_reject("post_close_unverified", diag)
+            return {
+                "classification": "snapshot", "as_of": as_of, "as_of_mono": as_of_mono,
+                "process_epoch": self.epoch, "source": source,
+                "expected_report_schema": REGISTRY[source][0], "validity_contract": REGISTRY[source][1],
+                "cohort_start": cohort_start, "cohort_end": cohort_end,
+                "registered_invocations": total, "connection_counts": connection, "lifecycle_counts": lifecycle,
+                "ever_overdue": sum("ever_overdue" in rec["diagnostics"]["codes"] for rec in selected),
+                "ever_unavailable": sum("ever_unavailable" in rec["diagnostics"]["codes"] for rec in selected),
+                "late_finish_accepted": sum("late_finish_accepted" in rec["diagnostics"]["codes"]
+                                            for rec in selected),
+                "equations_hold": {"connection": True, "lifecycle": True},
+                "diagnostics": _diag(), "health": copy.deepcopy(self._health),
+            }
 
     def link_round(self, *, epoch: str, invocation_id: str, round_id: str, report_schema: int,
                    validity_contract: str, received_at: int, received_mono: int) -> dict:
@@ -767,6 +999,8 @@ class RoundLedger:
                 if other_id and other_id != invocation_id:
                     involved.append(self._records[other_id])
                 return self._conflict(involved)
+            if rec["connection"] == "init_failed":
+                return self._conflict((rec,))
             if rec["connection"] == "started":
                 if (report_schema, validity_contract) == (rec["linked_report_schema"], rec["linked_validity_contract"]):
                     return self._finish_record("relinked_same", (rec,), [], _diag(("relinked_same",)))
@@ -821,6 +1055,8 @@ class RoundLedger:
             other_id = self._owners.get((rec["source"], round_id))
             if other_id is not None and other_id != invocation_id:
                 return self._conflict((rec, self._records[other_id]))
+            if rec["connection"] == "init_failed":
+                return self._conflict((rec,))
             if rec["connection"] == "unbound":
                 changes = []
                 self._isolate(rec, "start_unrecorded", changes)
@@ -838,6 +1074,9 @@ class RoundLedger:
                 time_codes.append("finish_wall_in_future")
             if finished_mono > received_mono:
                 time_codes.append("finish_mono_in_future")
+            if rec["exit_evidence"] is not None and (
+                    finished_wall > rec["exit_evidence_wall"] or finished_mono > rec["exit_evidence_mono"]):
+                time_codes.append("finish_after_exit")
             if time_codes:
                 time_codes.append("time_integrity_error")
                 self._health["clock_error"] = True
@@ -892,7 +1131,7 @@ class RoundLedger:
                 duplicate = "post_close_duplicate" if rec["closed"] else "duplicate_finish"
                 codes = ("duplicate_finish", "post_close_duplicate") if rec["closed"] else ("duplicate_finish",)
                 return self._finish_record(duplicate, (rec,), [], _diag(codes))
-            prior_unavailable = rec["lifecycle"] == "report_unavailable"
+            prior_unavailable = rec["lifecycle"] in ("report_unavailable", "overdue")
             bucket = (finished_wall // _MINUTE) * _MINUTE
             rec["first_finished_wall"] = finished_wall
             rec["first_finished_mono"] = finished_mono
