@@ -7,6 +7,7 @@ import bisect
 import hashlib
 import heapq
 import json
+import sys
 import threading
 
 from .d7_round_axes import PAIRS, REGISTRY, normalize_round_axes
@@ -42,6 +43,95 @@ _FIELDS = {
 }
 _PATHS = frozenset(("official_primary", "official_secondary", "mibank"))
 _JSON = json.JSONEncoder(sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+
+# 5a-3b resident tariff. Only this table defines field ownership and reserves;
+# transitions change field values and the same tariff prices the resulting state.
+_BUDGET_F = 4_310_732
+_BUDGET_B = 62_914_560
+_BUDGET_ID_MAX = sys.getsizeof("😀" + "a" * 124)
+_BUDGET_INT_MAX = sys.getsizeof(_MAX_COUNT)
+_BUDGET_PAIR = sys.getsizeof((None, None))
+_BUDGET_INITIAL = ("invocation_id", "job_id", "seq", "started_wall", "started_mono")
+_BUDGET_ONCE = {
+    "round_id": _BUDGET_ID_MAX,
+    **{name: _BUDGET_INT_MAX for name in (
+        "init_failed_wall", "init_failed_mono", "exit_evidence_wall", "exit_evidence_mono",
+        "overdue_first_observed_at", "overdue_first_observed_mono",
+        "first_finished_wall", "first_finished_mono", "bucket_start", "bucket_end", "close_at")},
+    "first_digest": sys.getsizeof("a" * 64),
+}
+_BUDGET_ENUM = {
+    name: max(map(sys.getsizeof, values)) for name, values in {
+        "connection": ("unbound", "started", "init_failed"),
+        "lifecycle": ("awaiting_report", "in_flight", "overdue", "report_unavailable",
+                      "finalized", "conflicting", "contract_mixed"),
+        "unavailable_reason": ("next_entry", "report_init_failed", "wrapper_exited",
+                               "unregistered_contract", "start_unrecorded", "input_shape",
+                               "input_limit", "time_integrity_error", "aggregation_capacity",
+                               "identity_unverified"),
+        "exit_evidence": ("next_entry", "wrapper_exited"),
+        "inclusion": ("none", "open_included", "open_excluded", "frozen_included",
+                      "frozen_excluded", "post_close_excluded"),
+    }.items()
+}
+# Backing sizes measured for the locked CPython 3.13 runtime. The list bound
+# below covers every intermediate length, including front insertion and split.
+_BUDGET_DICT_STEPS = (
+    (0, 64, 64), (1, 224, 184), (6, 352, 272), (11, 632, 464),
+    (22, 1168, 832), (43, 2264, 1584), (86, 4688, 3328),
+    (171, 9304, 6576), (342, 18512, 13056), (683, 36952, 26032),
+    (1366, 73808, 51968), (2731, 147544, 103856),
+    (5462, 294992, 207616), (10923, 589912, 415152),
+    (21846, 1310800, 961280), (43691, 2621528, 1922480),
+    (87382, 5242960, 3844864),
+)
+_BUDGET_SET_STEPS = (
+    (0, 216), (5, 728), (19, 2264), (77, 8408), (307, 32984),
+    (1229, 131288), (4915, 524504), (19661, 2097368), (78643, 4194520),
+)
+
+
+def _budget_step(steps, count):
+    return steps[bisect.bisect_right(steps, (count, sys.maxsize)) - 1]
+
+
+def _budget_list_backing(count):
+    if count == 0:
+        return 0
+    return ((count + (count >> 3) + 9) & ~3) * (sys.getsizeof([None]) - sys.getsizeof([]))
+
+
+def _budget_q(count):
+    _, generic, unicode = _budget_step(_BUDGET_DICT_STEPS, count)
+    _, set_size = _budget_step(_BUDGET_SET_STEPS, count)
+    detail_count = min(count, 2048)
+    blocks = min(3, count) + count // 128 if count else 0
+    return (unicode - 64 + _budget_list_backing(count)
+            + 2 * (generic - 64) + set_size - 216
+            + 6 * _budget_list_backing(blocks)
+            + blocks * (sys.getsizeof([]) + _budget_list_backing(257))
+            + _budget_list_backing(detail_count) + generic - 64
+            + detail_count * (sys.getsizeof([]) + _budget_list_backing(1)))
+
+
+def _budget_graph_size(root):
+    """Identity-based getsizeof of a normalized detail, with no unknown types."""
+    seen, pending, total = set(), [root], 0
+    while pending:
+        obj = pending.pop()
+        marker = id(obj)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        total += sys.getsizeof(obj)
+        if type(obj) is dict:
+            for key, value in obj.items():
+                pending.extend((key, value))
+        elif type(obj) in (list, tuple, set, frozenset):
+            pending.extend(obj)
+        elif type(obj) not in (str, int, float, bool, bytes, bytearray, type(None)):
+            raise RuntimeError(f"unaccounted detail type: {type(obj)!r}")
+    return total
 
 
 class _MinimumBySeq:
@@ -570,11 +660,14 @@ class RoundLedger:
             raise ValueError("invalid aggregation_started_at")
         if limits is not None and type(limits) is not dict:
             raise TypeError("limits must be dict or None")
-        defaults = {"max_records": 131072, "max_retained_details": 2048, "max_detail_bytes": 4096}
+        defaults = {"max_records": 131072, "max_retained_details": 2048,
+                    "max_detail_bytes": 4096, "max_resident_bytes": _BUDGET_B}
         for key, value in (limits or {}).items():
             if key not in defaults or type(value) is not int or not 1 <= value <= defaults[key]:
                 raise ValueError("invalid limit")
             defaults[key] = value
+        if defaults["max_resident_bytes"] < _BUDGET_F:
+            raise ValueError("resident budget below fixed charge")
         self.epoch = epoch
         self.aggregation_started_at = aggregation_started_at
         self._first_bucket_start = aggregation_started_at // _MINUTE * _MINUTE
@@ -588,6 +681,9 @@ class RoundLedger:
             "post_close_duplicate", "post_close_conflict", "post_close_finish", "post_close_unverified")}
         self._cumulative_evidence_uncertain = False
         self._limits = defaults
+        self._budget_ar = 0
+        self._budget_d = 0
+        self._budget_dirty = False
         self._records = {}
         self._seq = []
         self._owners = {}
@@ -607,6 +703,106 @@ class RoundLedger:
             "last_received_at": None, "last_received_mono": None,
         }
 
+    def _record_tariff(self, rec, *, admitted=True):
+        """Return actual A and still reserved R for the single field registry."""
+        a = sys.getsizeof(rec) + sys.getsizeof(rec._diag_bits)
+        r = 0
+        for name in _BUDGET_INITIAL:
+            value = rec[name]
+            if value is not None:
+                a += sys.getsizeof(value)
+        for name, bound in _BUDGET_ONCE.items():
+            value = rec[name]
+            if value is None:
+                r += bound
+            else:
+                actual = sys.getsizeof(value)
+                if actual > bound:
+                    raise RuntimeError(f"resident field bound exceeded: {name}")
+                a += actual
+        for name, bound in _BUDGET_ENUM.items():
+            value = rec[name]
+            actual = 0 if value is None else sys.getsizeof(value)
+            if actual > bound:
+                raise RuntimeError(f"resident enum bound exceeded: {name}")
+            a += actual
+            r += bound - actual
+        # The cohort key exists for each admitted Record. A displaced job key
+        # keeps its 56-byte reserve for identity-fault rewind.
+        a += _BUDGET_PAIR
+        if rec["job_id"] is not None:
+            if (admitted and self._previous_job.get((rec["source"], rec["job_id"])) == rec["seq"]):
+                a += _BUDGET_PAIR
+            elif admitted:
+                r += _BUDGET_PAIR
+            else:
+                a += _BUDGET_PAIR
+        if (admitted and rec["round_id"] is not None
+                and self._owners.get((rec["source"], rec["round_id"])) == rec["invocation_id"]):
+            a += _BUDGET_PAIR
+        else:
+            r += _BUDGET_PAIR
+        if admitted:
+            deadline = self._overdue_index.data[self._overdue_index.size + rec["seq"] - 1]
+            if deadline is not None:
+                a += sys.getsizeof(deadline)
+            elif rec["first_digest"] is None and rec["lifecycle"] in ("awaiting_report", "in_flight"):
+                r += _BUDGET_INT_MAX
+        elif rec["lifecycle"] in ("awaiting_report", "in_flight"):
+            a += sys.getsizeof(rec["started_mono"] + _OVERDUE)
+        return a, r
+
+    def _budget_refresh(self):
+        if self._budget_dirty:
+            self._budget_ar = sum(sum(self._record_tariff(rec)) for rec in self._records.values())
+            self._budget_dirty = False
+
+    def budget_state(self) -> dict:
+        with self._lock:
+            self._budget_refresh()
+            n = len(self._seq)
+            q = _budget_q(n)
+            e = _BUDGET_F + q + self._budget_d + self._budget_ar
+            return {"F": _BUDGET_F, "Q": q, "D": self._budget_d, "AR": self._budget_ar,
+                    "E": e, "B": self._limits["max_resident_bytes"], "N": n}
+
+    def record_charge(self, invocation_id: str) -> dict | None:
+        with self._lock:
+            if type(invocation_id) is not str:
+                raise TypeError("invocation_id must be exact str")
+            if _strict_bytes(invocation_id, 128) is not None:
+                raise ValueError("invalid invocation_id")
+            rec = self._records.get(invocation_id)
+            if rec is None:
+                return None
+            a, r = self._record_tariff(rec)
+            return {"A": a, "R": r}
+
+    def _stop_admission(self, received_at):
+        if not self._health["admission_stopped"]:
+            self._health["admission_stopped"] = True
+            self._health["admission_stopped_at"] = received_at
+
+    def _reject_admission(self, received_at):
+        self._stop_admission(received_at)
+        self._bump("untracked_invocations")
+        diag = _diag(("admission_stopped", "aggregation_capacity"), "G")
+        self._observe(diag, global_=True)
+        return self._result("admission_stopped", diag=diag)
+
+    def _budget_put(self, rec, name, value):
+        """Move one once-only field's reserve into its actual resident charge."""
+        if (name in _BUDGET_ONCE and rec["invocation_id"] in self._records
+                and self._records[rec["invocation_id"]] is rec):
+            bound = _BUDGET_ONCE[name]
+            old = rec[name]
+            old_charge = bound if old is None else sys.getsizeof(old)
+            new_charge = bound if value is None else sys.getsizeof(value)
+            if new_charge > bound:
+                raise RuntimeError(f"resident field bound exceeded: {name}")
+            self._budget_ar += new_charge - old_charge
+        rec[name] = value
+
     def _bump(self, key):
         if self._health[key] == _MAX_COUNT:
             self._health["counter_saturated"] = True
@@ -614,6 +810,9 @@ class RoundLedger:
             self._health[key] += 1
 
     def _drop_overdue(self, rec):
+        deadline = self._overdue_index.data[self._overdue_index.size + rec["seq"] - 1]
+        if deadline is not None:
+            self._budget_ar -= sys.getsizeof(deadline)
         self._overdue_index.set(rec["seq"], None)
 
     def _add_open(self, rec):
@@ -858,25 +1057,26 @@ class RoundLedger:
                 elif rec["inclusion"] == "open_excluded":
                     rec["inclusion"] = "frozen_excluded"
                 if rec["detail"] is not None:
+                    self._budget_d -= _budget_graph_size(rec["detail"])
                     rec["detail"] = None
                     self._health["retained_details"] -= 1
         self._health["last_received_at"] = wall
         self._health["last_received_mono"] = mono
         for seq in self._overdue_index.due(mono):
-            self._overdue_index.set(seq, None)
             invocation_id = self._seq[seq - 1]
             if invocation_id not in self._records:
+                self._overdue_index.set(seq, None)
                 continue
             rec = self._records[invocation_id]
+            self._drop_overdue(rec)
             self._mark_overdue(rec, wall, mono)
 
-    @staticmethod
-    def _mark_overdue(rec, wall, mono):
+    def _mark_overdue(self, rec, wall, mono):
         if (rec["first_digest"] is None and rec["lifecycle"] in ("awaiting_report", "in_flight")
                 and mono - rec["started_mono"] >= _OVERDUE):
             rec["lifecycle"] = "overdue"
-            rec["overdue_first_observed_at"] = wall
-            rec["overdue_first_observed_mono"] = mono
+            self._budget_put(rec, "overdue_first_observed_at", wall)
+            self._budget_put(rec, "overdue_first_observed_mono", mono)
             bit = _DIAG_INDEX["ever_overdue"]
             rec._diag_bits[bit // 8] |= 1 << (bit % 8)
 
@@ -1025,12 +1225,8 @@ class RoundLedger:
             if source not in REGISTRY:
                 self._bump("unsupported_invocations")
                 return self._reject("unsupported_source", ("unsupported_source",))
-            if self._health["admission_stopped"] or len(self._records) >= self._limits["max_records"]:
-                if not self._health["admission_stopped"]:
-                    self._health["admission_stopped"] = True
-                    self._health["admission_stopped_at"] = received_at
-                self._bump("untracked_invocations")
-                return self._reject("admission_stopped", ("admission_stopped", "aggregation_capacity"), "G", source)
+            if self._health["admission_stopped"] or len(self._seq) >= self._limits["max_records"]:
+                return self._reject_admission(received_at)
             source = _SOURCE_CANON[source]
             schema, contract = REGISTRY[source]
             previous_seq = self._previous_job.get((source, job_id)) if serial_job else None
@@ -1046,15 +1242,24 @@ class RoundLedger:
                    "first_finished_wall": None, "first_finished_mono": None, "first_digest": None,
                    "bucket_start": None, "bucket_end": None, "close_at": None, "closed": False,
                    "inclusion": "none", "diagnostics": _diag(), "detail": None})
+            self._mark_overdue(rec, received_at, received_mono)
+            # The candidate has no ledger-owned index entry yet. Reserve its
+            # complete field tariff and Q(N+1) before publishing any identity.
+            self._budget_refresh()
+            candidate_a, candidate_r = self._record_tariff(rec, admitted=False)
+            if (_BUDGET_F + _budget_q(len(self._seq) + 1) + self._budget_d
+                    + self._budget_ar + candidate_a + candidate_r > self._limits["max_resident_bytes"]):
+                return self._reject_admission(received_at)
             self._records[invocation_id] = rec
             self._seq.append(invocation_id)
+            self._budget_ar += candidate_a + candidate_r
             self._cohort_index[source].add((started_wall, rec["seq"]))
             if job_id is not None:
                 self._previous_job[(source, job_id)] = rec["seq"]
             self._bump("registered_records")
-            self._mark_overdue(rec, received_at, received_mono)
             if rec["lifecycle"] in ("awaiting_report", "in_flight"):
-                self._overdue_index.set(rec["seq"], started_mono + _OVERDUE)
+                deadline = started_mono + _OVERDUE
+                self._overdue_index.set(rec["seq"], deadline)
             if not serial_job:
                 return self._result("registered", (rec,))
             previous = self._records[self._seq[previous_seq - 1]] if previous_seq is not None else None
@@ -1073,8 +1278,8 @@ class RoundLedger:
                 self._observe(diag, source)
             elif previous["first_digest"] is None and previous["exit_evidence"] is None:
                 previous["exit_evidence"] = "next_entry"
-                previous["exit_evidence_wall"] = started_wall
-                previous["exit_evidence_mono"] = started_mono
+                self._budget_put(previous, "exit_evidence_wall", started_wall)
+                self._budget_put(previous, "exit_evidence_mono", started_mono)
                 codes = ["next_entry"]
                 if previous["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
                     previous["lifecycle"] = "report_unavailable"
@@ -1113,8 +1318,8 @@ class RoundLedger:
                 if (failed_wall, failed_mono) == (rec["init_failed_wall"], rec["init_failed_mono"]):
                     return self._record_evidence_event("duplicate_init_failure", rec, ("duplicate_init_failure",))
                 return self._record_evidence_event("init_failure_conflict", rec, ("init_failure_conflict",), "G")
-            rec["init_failed_wall"] = failed_wall
-            rec["init_failed_mono"] = failed_mono
+            self._budget_put(rec, "init_failed_wall", failed_wall)
+            self._budget_put(rec, "init_failed_mono", failed_mono)
             if rec["connection"] == "started":
                 return self._conflict((rec,))
             rec["connection"] = "init_failed"
@@ -1157,8 +1362,8 @@ class RoundLedger:
                                                    or exited_mono < rec["first_finished_mono"]):
                 return self._record_evidence_event("wrapper_exit_conflict", rec, ("wrapper_exit_conflict",), "G")
             rec["exit_evidence"] = "wrapper_exited"
-            rec["exit_evidence_wall"] = exited_wall
-            rec["exit_evidence_mono"] = exited_mono
+            self._budget_put(rec, "exit_evidence_wall", exited_wall)
+            self._budget_put(rec, "exit_evidence_mono", exited_mono)
             event_codes = ["wrapper_exited"]
             level = None
             if rec["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
@@ -1302,7 +1507,7 @@ class RoundLedger:
                 self._isolate(rec, "unregistered_contract", changes)
                 return self._finish_record("unregistered_contract", (rec,), changes,
                                            _diag(("unregistered_contract",), "G"))
-            rec["round_id"] = round_id
+            self._budget_put(rec, "round_id", round_id)
             rec["linked_report_schema"] = report_schema
             rec["linked_validity_contract"] = REGISTRY[rec["source"]][1]
             rec["connection"] = "started"
@@ -1420,13 +1625,13 @@ class RoundLedger:
                 return self._finish_record(duplicate, (rec,), [], _diag(codes))
             prior_unavailable = rec["lifecycle"] in ("report_unavailable", "overdue")
             bucket = (finished_wall // _MINUTE) * _MINUTE
-            rec["first_finished_wall"] = finished_wall
-            rec["first_finished_mono"] = finished_mono
-            rec["first_digest"] = candidate
+            self._budget_put(rec, "first_finished_wall", finished_wall)
+            self._budget_put(rec, "first_finished_mono", finished_mono)
+            self._budget_put(rec, "first_digest", candidate)
             self._drop_overdue(rec)
-            rec["bucket_start"] = bucket
-            rec["bucket_end"] = bucket + _MINUTE
-            rec["close_at"] = bucket + _MINUTE + _CLOSE_DELAY
+            self._budget_put(rec, "bucket_start", bucket)
+            self._budget_put(rec, "bucket_end", bucket + _MINUTE)
+            self._budget_put(rec, "close_at", bucket + _MINUTE + _CLOSE_DELAY)
             if received_at >= rec["close_at"]:
                 rec["closed"] = True
                 rec["lifecycle"] = "finalized"
@@ -1445,7 +1650,18 @@ class RoundLedger:
                 self._isolate(rec, "aggregation_capacity", [])
                 return self._finish_record("report_unavailable", (rec,), [],
                                            _diag(("report_unavailable", "aggregation_capacity", *detail_codes), "G"))
+            detail_charge = _budget_graph_size(detail)
+            self._budget_refresh()
+            if (_BUDGET_F + _budget_q(len(self._seq)) + self._budget_d
+                    + self._budget_ar + detail_charge > self._limits["max_resident_bytes"]):
+                self._stop_admission(received_at)
+                rec["inclusion"] = "open_excluded"
+                self._isolate(rec, "aggregation_capacity", [])
+                return self._finish_record("report_unavailable", (rec,), [],
+                                           _diag(("report_unavailable", "aggregation_capacity", *detail_codes), "G"),
+                                           global_=True)
             rec["detail"] = detail
+            self._budget_d += detail_charge
             self._bump("retained_details")
             rec["lifecycle"] = "finalized"
             rec["unavailable_reason"] = None
@@ -1570,6 +1786,7 @@ class RoundLedger:
 
     def _inject_identity_fault_for_test(self, *, invocation_id: str, fault: str) -> None:
         with self._lock:
+            self._budget_dirty = True
             if type(invocation_id) is not str or type(fault) is not str:
                 raise TypeError("fault arguments must be exact str")
             rec = self._records.get(invocation_id)
