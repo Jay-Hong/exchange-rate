@@ -118,7 +118,7 @@ class Env:
 
     def __init__(self, epoch="E1", **limits):
         self.epoch = epoch
-        self.ld = lg.RoundLedger(epoch, limits=limits or None)
+        self.ld = lg.RoundLedger(epoch, aggregation_started_at=T - 2 * S1, limits=limits or None)
         self.now = T - 2 * S1
 
     def at(self, w):
@@ -174,6 +174,24 @@ def finalized_env(src="bs", summary=None, **limits):
     r = e.finish(src=src, summary=summary)
     assert r["classification"] == "finalized", r
     return e, r
+
+
+def snap(e, w=None):
+    """세 번째 조각: 조회도 같은 닫힘 경로를 탄다(S3.2)."""
+    w = e.now if w is None else w
+    e.now = w
+    return e.ld.aggregation_snapshot(as_of=w, as_of_mono=mono(w))
+
+
+def cum(s, pair="usd-krw", src="bs"):
+    hit = [x for x in s["cumulative"] if x["source"] == src and x["pair"] == pair]
+    assert len(hit) == 1
+    return hit[0]["collection"]
+
+
+def cum_all(s, expect, src="bs"):
+    for p in P:
+        assert cum(s, p, src) == expect, p
 
 
 def shape(r):
@@ -292,24 +310,24 @@ def test_enum_is_exact():
                                     {"max_detail_bytes": 1.0}])
 def test_constructor_limit_values(limits):
     with pytest.raises(ValueError):
-        lg.RoundLedger("E1", limits=limits)
+        lg.RoundLedger("E1", aggregation_started_at=T - 2 * S1, limits=limits)
 
 
 def test_constructor_limit_types():
     with pytest.raises(TypeError):
-        lg.RoundLedger("E1", limits=[("max_records", 1)])
+        lg.RoundLedger("E1", aggregation_started_at=T - 2 * S1, limits=[("max_records", 1)])
     with pytest.raises(TypeError):
-        lg.RoundLedger(1)
+        lg.RoundLedger(1, aggregation_started_at=T - 2 * S1)
 
 
 def test_constructor_limits_at_bounds_are_accepted():
-    lg.RoundLedger("E1", limits={"max_records": 131072, "max_retained_details": 2048, "max_detail_bytes": 4096})
-    lg.RoundLedger("E1", limits={"max_records": 1, "max_retained_details": 1, "max_detail_bytes": 1})
+    lg.RoundLedger("E1", aggregation_started_at=T - 2 * S1, limits={"max_records": 131072, "max_retained_details": 2048, "max_detail_bytes": 4096})
+    lg.RoundLedger("E1", aggregation_started_at=T - 2 * S1, limits={"max_records": 1, "max_retained_details": 1, "max_detail_bytes": 1})
 
 
 def test_constructor_epoch_value():
     with pytest.raises(ValueError):
-        lg.RoundLedger("")
+        lg.RoundLedger("", aggregation_started_at=T - 2 * S1)
 
 
 @pytest.mark.parametrize("kw", [{"started_wall": True}, {"started_wall": 1.0}, {"source": 1}, {"received_mono": None}])
@@ -424,6 +442,7 @@ def test_L9_03_one_closed_record_gets_F_other_B():
     e.ready("A", "r1")
     e.finish("A", "r1")
     e.query(at=CLOSE)                                            # A 닫힘
+    assert e.rec("A")["detail"] is None
     e.ready("B", "r2")
     e.finish("B", "r2", fw=CLOSE, at=CLOSE)                      # B 는 다음 버킷에서 열림
     r = shape(e.link("B", "r1", at=CLOSE + S1))
@@ -433,6 +452,13 @@ def test_L9_03_one_closed_record_gets_F_other_B():
     ra, rb = e.rec("A"), e.rec("B")
     assert ra["diagnostics"] == diag(["identity_conflict"], "F") and ra["inclusion"] == "frozen_included"
     assert rb["diagnostics"] == diag(["identity_conflict"], "B") and rb["inclusion"] == "open_excluded"
+    cum_all(snap(e), {"V": 1, "M": 0, "U": 0, "N": 0})                          # B 의 remove 가 닫힌 A 누적을 지우지 않는다
+    assert e.rec("B")["detail"] is not None and snap(e)["health"]["retained_details"] == 1
+    s = snap(e, CLOSE + 71 * MIN)                                  # B 버킷 [11:11,11:12) 의 close_at = 12:22
+    rb = e.rec("B")
+    assert (rb["inclusion"], rb["detail"], rb["closed"]) == ("frozen_excluded", None, True)
+    assert s["health"]["retained_details"] == 0
+    cum_all(s, {"V": 1, "M": 0, "U": 0, "N": 0})                  # 제외된 B 는 누적되지 않는다
 
 
 def test_L9_03_same_round_string_other_source_is_separate():
@@ -526,6 +552,10 @@ def test_L9_10_first_receipt_just_before_close():
     e.ready()
     r = e.finish(at=CLOSE - 1)
     assert r["classification"] == "finalized" and r["changes"] == [add("A", D(S()))]
+    assert r["health"]["retained_details"] == 1 and e.rec()["inclusion"] == "open_included"
+    s = snap(e)
+    assert s["cumulative_end"] == T                               # 원점 부분 버킷 [09:59,10:00) 만 11:10 에 닫혔다
+    cum_all(s, {"V": 0, "M": 0, "U": 0, "N": 0})
 
 
 def test_L9_10_first_receipt_at_close():
@@ -538,6 +568,9 @@ def test_L9_10_first_receipt_at_close():
     assert (rec["lifecycle"], rec["inclusion"], rec["closed"], rec["detail"]) == \
         ("finalized", "post_close_excluded", True, None)
     assert rec["first_digest"] == digest("bs", "r1", S())
+    s = snap(e)
+    assert s["cumulative_end"] == T + MIN
+    cum_all(s, {"V": 0, "M": 0, "U": 0, "N": 0})
 
 
 def test_L9_11_open_duplicate():
@@ -554,7 +587,8 @@ def test_L9_12_post_close_duplicate():
     assert r["classification"] == "post_close_duplicate" and r["changes"] == []
     assert r["diagnostics"] == diag(["duplicate_finish", "post_close_duplicate"])
     rec = e.rec()
-    assert rec["inclusion"] == "frozen_included" and rec["closed"] and rec["detail"] == D(S())
+    assert rec["inclusion"] == "frozen_included" and rec["closed"] and rec["detail"] is None
+    assert r["health"]["retained_details"] == 0 and rec["first_digest"] == digest("bs", "r1", S())
 
 
 def _bank_evidence_variants():
@@ -611,11 +645,13 @@ def test_L9_15_closed_conflict_then_original():
     assert r["classification"] == "post_close_conflict" and r["changes"] == []
     assert r["diagnostics"] == diag(["post_close_conflict"], "F")
     rec = e.rec()
-    assert rec["lifecycle"] == "conflicting" and rec["inclusion"] == "frozen_included" and rec["detail"] == D(S())
+    assert rec["lifecycle"] == "conflicting" and rec["inclusion"] == "frozen_included" and rec["detail"] is None
+    cum_all(snap(e), {"V": 1, "M": 0, "U": 0, "N": 0})
     r = shape(e.finish(at=CLOSE + S1))
     assert r["classification"] == "after_conflict_redelivery" and r["changes"] == []
     assert r["diagnostics"] == diag(["after_conflict_redelivery"], "F")
-    assert e.rec()["inclusion"] == "frozen_included" and e.rec()["detail"] == D(S())
+    assert e.rec()["inclusion"] == "frozen_included" and e.rec()["detail"] is None
+    cum_all(snap(e), {"V": 1, "M": 0, "U": 0, "N": 0})
 
 
 def test_L9_16_open_conflict_then_original_no_reinstatement():
@@ -634,7 +670,8 @@ def test_L9_17_closed_contract_change():
     assert r["classification"] == "contract_mixed" and r["changes"] == []
     assert r["diagnostics"] == diag(["contract_mixed", "post_close_conflict", "unregistered_contract"], "F")
     rec = e.rec()
-    assert rec["lifecycle"] == "contract_mixed" and rec["inclusion"] == "frozen_included" and rec["detail"] == D(S())
+    assert rec["lifecycle"] == "contract_mixed" and rec["inclusion"] == "frozen_included" and rec["detail"] is None
+    cum_all(snap(e), {"V": 1, "M": 0, "U": 0, "N": 0})
 
 
 def test_L9_18_open_contract_change():
@@ -716,6 +753,8 @@ def test_L9_21_closed_then_regressed_receipt_redelivery(which, state):
     e = _state_env(state)
     e.query(at=CLOSE)
     before = e.rec()
+    assert before["detail"] is None                           # 닫힘이 상세를 해제했다
+    s0 = snap(e)
     h0 = e.query()["health"]
     rw = CLOSE - S1 if which in ("wall", "both") else CLOSE
     rmo = mono(CLOSE) - S1 if which in ("mono", "both") else mono(CLOSE)
@@ -729,6 +768,10 @@ def test_L9_21_closed_then_regressed_receipt_redelivery(which, state):
     assert e.rec() == before and before["closed"] is True
     assert (r["health"]["last_received_at"], r["health"]["last_received_mono"]) == \
         (h0["last_received_at"], h0["last_received_mono"])
+    s1 = snap(e)
+    for k in ("cumulative", "cumulative_rounds", "cumulative_end"):
+        assert s1[k] == s0[k], k
+    assert s1["health"]["retained_details"] == s0["health"]["retained_details"] == 0
     expect = {"finalized": "finalized", "conflicting": "conflicting", "contract_mixed": "contract_mixed",
               "capacity": "report_unavailable"}[state]
     assert before["lifecycle"] == expect
@@ -752,7 +795,11 @@ def test_L9_23_query_closes_without_event():
     assert q["classification"] == "snapshot" and q["entries"] == [] and q["next_seq"] is None
     assert (q["as_of"], q["as_of_mono"]) == (CLOSE, mono(CLOSE))
     rec = e.rec()
-    assert rec["closed"] and rec["inclusion"] == "frozen_included" and q["health"]["retained_details"] == 1
+    assert rec["closed"] and rec["inclusion"] == "frozen_included" and q["health"]["retained_details"] == 0
+    assert rec["detail"] is None
+    s = snap(e)
+    assert s["cumulative_end"] == T + MIN
+    cum_all(s, {"V": 1, "M": 0, "U": 0, "N": 0})
 
 
 def test_query_open_entry_before_close():
@@ -1253,12 +1300,20 @@ MAXT = 2 ** 63 - 1 - 4260000000
 
 
 def test_time_range_upper_bound():
-    e = Env()
-    r = e.ld.register(epoch="E1", invocation_id="A", source="bs", started_wall=MAXT, started_mono=MAXT,
-                      received_at=MAXT, received_mono=MAXT)
+    import time as _t                                              # 시험 쪽 경과시간 측정(보완 B2) — 운영 모듈 제약과 무관
+    e, _ = finalized_env()                                         # A: [10:00,10:01) 에 열린 기여
+    t0 = _t.perf_counter()
+    r = e.ld.register(epoch="E1", invocation_id="Z", source="bs", started_wall=MAXT, started_mono=mono(MAXT),
+                      received_at=MAXT, received_mono=mono(MAXT))
+    assert _t.perf_counter() - t0 < 5.0                            # 원점부터 MAXT 근처까지 닫힘은 산술 전진이어야 한다
     assert r["classification"] == "registered"
-    r = e.ld.register(epoch="E1", invocation_id="B", source="bs", started_wall=MAXT, started_mono=MAXT,
-                      received_at=MAXT + 1, received_mono=MAXT)
+    assert e.rec("A")["closed"] is True and e.rec("A")["detail"] is None   # record 는 시계를 안 움직인다 — 등록 경로가 닫았다
+    assert r["health"]["retained_details"] == 0
+    s = snap(e, MAXT)
+    assert s["cumulative_end"] == ((MAXT - 70 * MIN) // MIN) * MIN
+    cum_all(s, {"V": 1, "M": 0, "U": 0, "N": 0})
+    r = e.ld.register(epoch="E1", invocation_id="B", source="bs", started_wall=MAXT, started_mono=mono(MAXT),
+                      received_at=MAXT + 1, received_mono=mono(MAXT + 1))
     assert r["classification"] == "invalid_argument" and e.rec("B") is None
 
 
@@ -1368,14 +1423,13 @@ def test_L9_31_retained_detail_capacity():
     e.finish("A", "r1")
     e.query(at=CLOSE)
     e.ready("B", "r2")
-    r = shape(e.finish("B", "r2", fw=CLOSE, at=CLOSE))
-    assert r["classification"] == "report_unavailable" and r["changes"] == []
-    assert r["diagnostics"] == diag(["aggregation_capacity", "report_unavailable", "ever_unavailable"], "G")
+    assert e.rec("A")["detail"] is None and e.query()["health"]["retained_details"] == 0   # 닫힘이 슬롯을 돌려준다
+    r = shape(e.finish("B", "r2", fw=CLOSE, at=CLOSE))                                   # [11:11,11:12) 로 열림
+    assert r["classification"] == "finalized" and r["changes"] == [add("B", D(S()))]
+    assert r["diagnostics"] == diag()
     rec = e.rec("B")
-    assert (rec["lifecycle"], rec["unavailable_reason"], rec["inclusion"], rec["detail"]) == \
-        ("report_unavailable", "aggregation_capacity", "open_excluded", None)
-    assert rec["first_digest"] == digest("bs", "r2", S(), fw=CLOSE)
-    assert r["health"]["retained_details"] == 1 and e.rec("A")["detail"] == D(S())
+    assert (rec["lifecycle"], rec["inclusion"], rec["detail"]) == ("finalized", "open_included", D(S()))
+    assert r["health"]["retained_details"] == 1
 
 
 def test_L9_32_detail_bytes_capacity_then_duplicate():
@@ -1388,13 +1442,14 @@ def test_L9_32_detail_bytes_capacity_then_duplicate():
     assert e.rec()["lifecycle"] == "report_unavailable"
 
 
-def test_L9_33_saturated_late_first_finish_is_post_close():
+def test_L9_33_late_first_finish_after_detail_release_is_post_close():
     e = Env(max_retained_details=1)
     e.ready("A", "r1")
     e.finish("A", "r1")
     e.ready("B", "r2")
     r = e.finish("B", "r2", at=CLOSE)
     assert r["classification"] == "post_close_finish" and e.rec("B")["inclusion"] == "post_close_excluded"
+    assert r["changes"] == [] and r["health"]["retained_details"] == 0 and e.rec("A")["detail"] is None
 
 
 def test_L9_37_capacity_unavailable_then_different_digest():
@@ -1432,7 +1487,9 @@ def test_L9_34_missing_owner(closed):
     e, _ = finalized_env()
     if closed:
         e.query(at=CLOSE)                                        # 정상 조회로 먼저 닫는다(색인 오류는 수신 게이트보다 앞서 끝난다)
-        assert e.rec()["closed"] is True
+        assert e.rec()["closed"] is True and e.rec()["detail"] is None
+        assert e.query()["health"]["retained_details"] == 0
+        cum_all(snap(e), {"V": 1, "M": 0, "U": 0, "N": 0})         # 닫힌 기여는 이미 누적됐다
     at = CLOSE if closed else T + S1
     pair_before = (e.query()["health"]["last_received_at"], e.query()["health"]["last_received_mono"])
     e.ld._inject_identity_fault_for_test(invocation_id="A", fault="missing_owner")
@@ -1446,6 +1503,8 @@ def test_L9_34_missing_owner(closed):
     assert (rec["lifecycle"], rec["unavailable_reason"]) == ("report_unavailable", "identity_unverified")
     assert rec["inclusion"] == ("frozen_included" if closed else "open_excluded")
     assert e.finish(at=at + S1)["classification"] == "post_close_unverified"
+    if closed:
+        assert e.rec()["detail"] is None                          # 닫힌 쪽은 changes=[] — 누적에서 빼지 않는다
 
 
 def test_fault_hook_validation():
@@ -1630,6 +1689,7 @@ def test_L9_42_query_receipt_gate():
     assert q["diagnostics"] == diag(["receipt_mono_regressed", "time_integrity_error"], "G", global_=True)
     assert e2.rec()["closed"] is False
     assert (q["health"]["last_received_at"], q["health"]["last_received_mono"]) == (T, mono(T))
+    assert snap(e2, T)["cumulative_end"] is None                  # 거절된 조회는 닫힘을 진행하지 않았다
     q = e2.ld.contributions_open(as_of=T, as_of_mono=mono(T), after_seq=0, limit=16)
     assert q["classification"] == "snapshot" and len(q["entries"]) == 1
 
@@ -1637,8 +1697,12 @@ def test_L9_42_query_receipt_gate():
 def test_query_after_closed_regressed_does_not_reopen():
     e, _ = finalized_env()
     e.query(at=CLOSE)
+    before = snap(e)
+    assert e.rec()["detail"] is None and before["health"]["retained_details"] == 0
     q = e.ld.contributions_open(as_of=CLOSE - 1, as_of_mono=mono(CLOSE), after_seq=0, limit=16)
     assert q["classification"] == "time_integrity_error" and e.rec()["closed"] is True
+    after = snap(e)
+    assert after["cumulative"] == before["cumulative"] and after["cumulative_end"] == before["cumulative_end"]
 
 
 # ───────── §5 반례 ─────────
