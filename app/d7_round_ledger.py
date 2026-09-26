@@ -22,6 +22,7 @@ report_malformed other
 """.split())
 
 _SOURCES = tuple(REGISTRY)
+_SOURCE_CANON = {source: source for source in REGISTRY}
 _MAX_TIME = 2**63 - 1 - 4260000000
 _MAX_COUNT = 2**64 - 1
 _MINUTE = 60000000
@@ -1030,6 +1031,7 @@ class RoundLedger:
                     self._health["admission_stopped_at"] = received_at
                 self._bump("untracked_invocations")
                 return self._reject("admission_stopped", ("admission_stopped", "aggregation_capacity"), "G", source)
+            source = _SOURCE_CANON[source]
             schema, contract = REGISTRY[source]
             previous_seq = self._previous_job.get((source, job_id)) if serial_job else None
             rec = _Record({"epoch": self.epoch, "invocation_id": invocation_id, "source": source,
@@ -1302,7 +1304,7 @@ class RoundLedger:
                                            _diag(("unregistered_contract",), "G"))
             rec["round_id"] = round_id
             rec["linked_report_schema"] = report_schema
-            rec["linked_validity_contract"] = validity_contract
+            rec["linked_validity_contract"] = REGISTRY[rec["source"]][1]
             rec["connection"] = "started"
             self._owners[(rec["source"], round_id)] = invocation_id
             self._owned_ids.add(invocation_id)
