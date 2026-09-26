@@ -86,6 +86,50 @@ def canon(value):
     return value
 
 
+def legacy_projection(result, baseline):
+    # r3 §6 정확 키 집합·차등: 새 health/사후 진단 가산 키만 기존 키 순서로 투영한다.
+    if not isinstance(result, dict) or not isinstance(baseline, dict):
+        return result
+    projected = result.copy()
+    for name in ("health", "post_close_diagnostics"):
+        if name in baseline and name in result:
+            projected[name] = {key: result[name][key] for key in baseline[name]}
+    return projected
+
+
+def same_legacy_health(old_health, new_health, *, omit_tomb_time_clock_error=False):
+    projected = {key: new_health[key] for key in old_health}
+    # r3 §6: 새 제외 사건은 기존 coverage 표현을 바꿀 수 있지만 수신·등록·수락 상태는 계속 차등한다.
+    exclusions = ("late_start_excluded", "expired_finish", "expired_start", "expired_wrapper",
+                  "expired_identity_unverified", "retention_expired", "clock_unverified")
+    if any(new_health[key] > 0 for key in exclusions):
+        keys = ("last_received_at", "last_received_mono", "registered_records",
+                "admission_stopped", "admission_stopped_at")
+        assert canon({key: old_health[key] for key in keys}) == canon({key: projected[key] for key in keys})
+    elif omit_tomb_time_clock_error:
+        # r3 §6: tombstone의 digest 판정은 동결 사본의 종료시각 재검사 코드를 다시 내지 않는다.
+        assert old_health["clock_error"] is True
+        keys = [key for key in old_health if key != "clock_error"]
+        assert canon({key: old_health[key] for key in keys}) == canon({key: projected[key] for key in keys})
+    else:
+        assert canon(old_health) == canon(projected)
+
+
+def omitted_tomb_finish_time_codes(method, tomb_target, old_result, new_result):
+    if (method != "finish" or not tomb_target or old_result["classification"] != "post_close_conflict"
+            or new_result["classification"] != "post_close_conflict"):
+        return set()
+    old_codes = set(old_result["diagnostics"]["codes"])
+    new_codes = set(new_result["diagnostics"]["codes"])
+    omitted = old_codes - new_codes
+    time_codes = {"finish_wall_before_start", "finish_mono_before_start", "finish_wall_in_future",
+                  "finish_mono_in_future", "finish_after_exit"}
+    if ("time_integrity_error" in omitted and omitted & time_codes
+            and omitted <= time_codes | {"time_integrity_error"}):
+        return omitted
+    return set()
+
+
 class Counted(dict):
     """계약 S5a.4 의 계수 래퍼: Record 를 꺼내는 values/items/get/__getitem__ 을 센다."""
 
@@ -167,7 +211,60 @@ class Dual:
         visits = self.new._records.visits
         if compare:
             assert type(err_old).__name__ == type(err_new).__name__, (method, err_old, err_new)
-            assert canon(r_old) == canon(r_new), method
+            if r_old is not None and r_new is not None and self.new._health["frozen_through"] is not None:
+                # r3 §6 첫 퇴출 뒤: live 부분과 열린·누적 수치는 계속 차등하고 tombstone Record만 제외한다.
+                target = kw.get("invocation_id")
+                tomb_target = target is not None and self.new.identity_status(target) == "tombstoned"
+                omitted_time_codes = omitted_tomb_finish_time_codes(method, tomb_target, r_old, r_new)
+                same_legacy_health(r_old["health"], r_new["health"],
+                                   omit_tomb_time_clock_error=bool(omitted_time_codes))
+                if tomb_target and not r_new.get("records"):
+                    # r3 §6 tombstone 단독 event: 첫 digest의 닫힘 근거와 빈 상세·변경을 확인한다.
+                    old_target = self.old.record(target)
+                    if old_target is not None and old_target["first_digest"] is not None:
+                        assert old_target["closed"] is True
+                    assert r_new["records"] == [] and r_new["changes"] == []
+                if r_new["classification"] == "cohort_expired":
+                    assert method == "cohort_snapshot" and kw["cohort_start"] < self.new._health["cohort_exact_from"]
+                elif r_old["classification"] == r_new["classification"]:
+                    for key in ("classification", "diagnostics"):
+                        if key not in r_old:
+                            continue
+                        if key == "diagnostics" and omitted_time_codes:
+                            # r3 §6: 최초 digest 충돌은 같고 old만 과거 종료시각 검사 코드를 덧붙인다.
+                            old_diag = copy.deepcopy(r_old[key])
+                            old_diag["codes"] = [code for code in old_diag["codes"] if code not in omitted_time_codes]
+                            assert canon(old_diag) == canon(r_new[key]), (method, key)
+                            continue
+                        assert canon(r_old[key]) == canon(r_new[key]), (method, key)
+                    if "records" in r_old:
+                        live_old = [rec for rec in r_old["records"]
+                                    if self.new.identity_status(rec["invocation_id"]) == "live"]
+                        assert canon(live_old) == canon(r_new["records"]), method
+                    if "changes" in r_old:
+                        live_changes = [change for change in r_old["changes"]
+                                        if self.new.identity_status(change["invocation_id"]) == "live"]
+                        assert canon(live_changes) == canon(r_new["changes"]), method
+                    for key in ("entries", "next_seq", "recent", "cumulative", "recent_rounds",
+                                "cumulative_rounds", "cumulative_end", "post_close_diagnostics"):
+                        if key in r_old:
+                            assert canon(r_old[key]) == canon(legacy_projection(r_new, r_old)[key]), (method, key)
+                else:
+                    # r3 §6: 직전 충돌·계약 혼합의 frozen 첫 digest 판정만 분류 차이를 허용한다.
+                    assert method == "finish" and tomb_target, method
+                    if r_new["classification"] == "expired_finish":
+                        assert r_new["health"]["retention_expired"] > 0
+                    else:
+                        assert (r_old["classification"] in {"after_conflict_redelivery", "contract_mixed"}
+                                and r_new["classification"] in {"post_close_duplicate", "post_close_conflict"}), method
+                    live_old = [rec for rec in r_old["records"]
+                                if self.new.identity_status(rec["invocation_id"]) == "live"]
+                    live_changes = [change for change in r_old["changes"]
+                                    if self.new.identity_status(change["invocation_id"]) == "live"]
+                    assert canon(live_old) == canon(r_new["records"]), method
+                    assert canon(live_changes) == canon(r_new["changes"]), method
+            else:
+                assert canon(r_old) == canon(legacy_projection(r_new, r_old)), method
         k = _k(method, r_old if compare else r_new)
         self.last = {"method": method, "visits": visits, "D": d, "K": k}
         if err_new is not None:
@@ -233,14 +330,21 @@ class Dual:
 
     def same_records(self):
         ids = list(dict.keys(self.old._records))
-        assert ids == list(dict.keys(self.new._records))
+        # r3 §6 Dual.same_records: 퇴출된 old Record는 new live 집합에서 제외한다.
+        assert [inv for inv in ids if self.new.identity_status(inv) == "live"] == list(dict.keys(self.new._records))
         for inv in ids:
-            assert canon(self.old.record(inv)) == canon(self.new.record(inv)), inv
+            if self.new.identity_status(inv) == "live":
+                assert canon(self.old.record(inv)) == canon(self.new.record(inv)), inv
 
     def same_internals(self):
         for name in ("_cumulative_rows", "_cumulative_rounds", "_cumulative_end", "_cumulative_first",
                      "_cumulative_last", "_post_close", "_cumulative_evidence_uncertain", "_health"):
-            assert canon(getattr(self.old, name)) == canon(getattr(self.new, name)), name
+            old_value, new_value = getattr(self.old, name), getattr(self.new, name)
+            # r3 §6 Dual.same_internals: health 가산 키는 기존 키로 투영해 비교한다.
+            if name == "_health":
+                same_legacy_health(old_value, new_value)
+            else:
+                assert canon(old_value) == canon(new_value), name
 
 
 def populate(g, n=N, *, src_cycle=("bs",), finish=True, fw_of=None, s_of=None, order=None, at_fin=None):
@@ -415,21 +519,25 @@ def test_V2_all_non_targets_crossing_is_d_zero():
 def test_V2_already_old_start_registers_overdue_immediately():
     g = Dual()
     populate(g, finish=False)
-    g.reg("old", start=hm(9, 59), at=hm(9, 59) + OVERDUE + 5 * S1)
-    g.bound_ok()
-    g.reg("fresh", start=g.now)
-    g.bound_ok()
-    g.same_records()
+    # r3 §6 새 ID의 오래된 시작: 기존 overdue-at-registration 입력은 무삽입이다.
+    now = hm(9, 59) + OVERDUE + 5 * S1
+    r = g.new.register(epoch="E1", invocation_id="old", source="bs", started_wall=hm(9, 59),
+                       started_mono=mono(hm(9, 59)), received_at=now, received_mono=mono(now))
+    assert r["classification"] == "late_start_excluded" and g.new.record("old") is None
+    r = g.new.register(epoch="E1", invocation_id="fresh", source="bs", started_wall=now,
+                       started_mono=mono(now), received_at=now, received_mono=mono(now))
+    assert r["classification"] == "registered" and r["health"]["N_total"] == N + 1  # r3 §6 late-start 예외 뒤 정상 접수
 
 
 def test_V2_wall_and_mono_disagree_uses_mono():
     g = Dual()
     ids, _ = populate(g, n=40, finish=False)
-    w = hm(10, 30)
+    w = hm(9, 59) + OVERDUE
     g.now = w
-    g.call("aggregation_snapshot", as_of=w, as_of_mono=mono(hm(9, 59)) + OVERDUE - 1)
+    # r3 §6 수신 clock skew: mono 경계 ±1µs 를 허용 오차 안에서 검증한다.
+    g.call("aggregation_snapshot", as_of=w, as_of_mono=mono(w) - 1)
     assert g.last["D"] == 0
-    g.call("aggregation_snapshot", as_of=w, as_of_mono=mono(hm(9, 59)) + OVERDUE + 40)
+    g.call("aggregation_snapshot", as_of=w, as_of_mono=mono(w) + 40)
     g.bound_ok()
     g.same_records()
 
@@ -483,17 +591,17 @@ def test_V3_deleted_previous_is_not_treated_as_live():
 
 def test_V4_reverse_started_wall_ranges():
     g = Dual()
-    base = hm(10, 0)
+    base = hm(10, 29)
     g.now = hm(10, 30)
     for j in range(N):                                        # 등록 순서와 started_wall 역순
-        g.reg(f"c{j:04d}", start=base + (N - j) // 2 * S1, at=g.now)
+        g.reg(f"c{j:04d}", start=base + (N - j) // 2 * 400_000, at=g.now)  # r3 §6 시작 신선도 1분 안
     for j in range(0, N, 3):
         g.link(f"c{j:04d}")
     for j in range(0, N, 6):
         g.fin(f"c{j:04d}", g.now)
     at = g.now
-    for lo, hi in ((base, base + N * S1), (base + 10 * S1, base + 11 * S1), (base + 10 * S1, base + 10 * S1 + 1),
-                   (base - MIN, base), (base + N * S1, base + N * S1 + MIN), (base + 1, base + 50 * S1)):
+    for lo, hi in ((base, base + MIN), (base + 10 * S1, base + 11 * S1), (base + 10 * S1, base + 10 * S1 + 1),
+                   (base - MIN, base), (base + 59 * S1, base + MIN), (base + 1, base + 50 * S1)):
         r = g.cohort(at, lo, hi)
         assert r["classification"] == "snapshot", (lo, hi)
         g.bound_ok()
@@ -538,6 +646,38 @@ def test_V6_recent_dynamic_keys_follow_seq_order():
 
 
 # ───────── V7 손상·예외 (§3.3 새 계약) ─────────
+
+
+@pytest.mark.parametrize("case,fw,old_extra", [
+    ("before_start", hm(9, 58), {"finish_wall_before_start", "finish_mono_before_start"}),
+    ("future_finish", hm(12, 0), {"finish_wall_in_future", "finish_mono_in_future"}),
+    ("after_exit", hm(10, 0, 2), {"finish_after_exit"}),
+])
+def test_tomb_conflict_only_omits_legacy_finish_time_diagnostics(case, fw, old_extra):
+    g = Dual()
+    g.reg("x")
+    g.link("x")
+    g.fin("x", hm(10, 0), at=hm(10, 0))
+    if case == "after_exit":
+        g.exit("x", hm(10, 0, 1), at=hm(10, 0, 1))
+    g.snap(hm(11, 11))
+    schema, contract = ax.REGISTRY["bs"]
+    kw = dict(epoch="E1", invocation_id="x", round_id="rx", report_schema=schema,
+              validity_contract=contract, finished_wall=fw, finished_mono=mono(fw),
+              selected_summary=summary("M"), telemetry_error_present=False,
+              received_at=hm(11, 11), received_mono=mono(hm(11, 11)))
+    original_finish = g.old.finish
+    old_result = {}
+
+    def capture_old(**fields):
+        old_result.update(original_finish(**fields))
+        return old_result
+
+    g.old.finish = capture_old
+    result = g.call("finish", **kw)
+    assert result["classification"] == "post_close_conflict"
+    assert result["diagnostics"]["codes"] == ["post_close_conflict"]
+    assert set(old_result["diagnostics"]["codes"]) == old_extra | {"post_close_conflict", "time_integrity_error"}
 
 def _missing_fixture():
     g = Dual()
@@ -597,8 +737,8 @@ def test_V7_advance_skips_deleted_close_and_overdue_candidates():
         g.fin(inv, hm(10, 0, 30), at=hm(10, 1))
     g.inject(ids[3], "missing_record")                              # 닫힘 대기 중인 열린 기여
     g.inject(ids[50], "missing_record")                             # overdue 대기 중인 in_flight
-    g.reg("z1", start=hm(10, 2), at=hm(9, 59) + OVERDUE + 100)      # 변경 API 가 overdue 경계를 넘긴다
-    g.reg("z2", start=hm(10, 2), at=hm(11, 11))                     # 변경 API 가 닫힘 경계를 넘긴다
+    g.reg("z1", start=hm(9, 59) + OVERDUE + 100, at=hm(9, 59) + OVERDUE + 100)  # r3 §6 신선한 등록으로 overdue advance
+    g.reg("z2", start=hm(11, 11), at=hm(11, 11))  # r3 §6 신선한 등록으로 닫힘 advance
     g.same_records()
     g.same_internals()
 
@@ -631,7 +771,10 @@ def test_V8_merge_failure_is_atomic_and_retry_counts_once():
     assert type(caught.value).__name__ == "CumulativeMergeFailureForTest"
     g.same_records()
     g.same_internals()
-    assert canon(g.new.aggregation_snapshot(as_of=hm(10, 6), as_of_mono=mono(hm(10, 6)))) == before_old
+    # r3 §6 정확 키 집합: merge 재시도 원자성은 기존 키 투영으로 계속 차등한다.
+    retry = g.new.aggregation_snapshot(as_of=hm(10, 6), as_of_mono=mono(hm(10, 6)))
+    assert canon(legacy_projection(retry, g.old.aggregation_snapshot(as_of=hm(10, 6),
+                                                                      as_of_mono=mono(hm(10, 6))))) == before_old
     g.snap(hm(11, 20))                                              # fault 소모 뒤 같은 시각 재시도
     g.bound_ok()
     g.snap(hm(11, 20))

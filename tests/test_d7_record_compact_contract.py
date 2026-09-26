@@ -100,7 +100,10 @@ def _registered(n):
 
 
 def test_mass_overdue_temporary_and_persistent_growth():
-    n = 20_000
+    # r3 §6: 동일시각·짧은 ID 등록만으로 기본 B의 첫 거절은 5a-3b 25,362, 5a-4b 15,245.
+    # 15,000건에서 F₄-F +14,563,636, Q₄-Q +7,680,000(512/건), live A +2,355,000(157/건).
+    # live R 차이와 tomb T/R_T는 0; E=62,255,408 < B=62,914,560이다.
+    n = 15_000
     ld = _registered(n)
     at = hm(9, 59) + OVERDUE + 10 * S1
     gc.collect()
@@ -144,7 +147,7 @@ def test_longest_ids_survive_close_compaction(inv):
     g.same_records()
     g.same_internals()
     rec = g.new.record(inv)
-    assert rec["first_finished_wall"] == fw and rec["first_digest"] is not None and rec["closed"] is True
+    assert rec is None and g.new.identity_status(inv) == "tombstoned"  # r3 §6 첫 퇴출 뒤 최초 digest 는 event 판정으로 검증
 
 
 def test_state_mix_then_close_matches_baseline():

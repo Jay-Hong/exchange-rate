@@ -60,7 +60,11 @@ class Co:
         self.now = w
         return {"received_at": w, "received_mono": mono(w)}
 
-    def reg(self, inv, start=T, at=None, job_id=None, serial=False, src="bs", sm=None):
+    def reg(self, inv, start=None, at=None, job_id=None, serial=False, src="bs", sm=None):
+        # r3 §6 새 ID의 오래된 시작: 기본 fixture 는 현재 수신 시각에 시작한다.
+        if start is None:
+            prior = self.ld.record(inv)
+            start = prior["started_wall"] if prior is not None else max(T, self.now)
         return self.ld.register(epoch="E1", invocation_id=inv, source=src, started_wall=start,
                                 started_mono=mono(start) if sm is None else sm, job_id=job_id, serial_job=serial,
                                 **self._rx(max(self.now, start) if at is None else at))
@@ -195,9 +199,9 @@ def test_overdue_uses_mono_not_wall():
 def test_late_registered_old_start_is_overdue_at_registration():
     co = Co()
     r = co.reg("A", start=T, at=T + OVERDUE)
-    assert r["classification"] == "registered" and r["records"][0]["lifecycle"] == "overdue"
-    assert "ever_overdue" in r["records"][0]["diagnostics"]["codes"]
-    assert "ever_overdue" not in r["diagnostics"]["codes"]          # 시간 경과 진단은 사건 Diagnostics 에 섞지 않는다
+    # r3 §6 새 ID의 오래된 시작: 15분 늦은 최초 등록은 무삽입으로 제외한다.
+    assert r["classification"] == "late_start_excluded" and r["records"] == []
+    assert co.rec("A") is None and r["health"]["N_total"] == 0
 
 
 def test_overdue_marks_other_records_but_not_event_diagnostics():
@@ -357,14 +361,13 @@ def test_V7_first_finish_exactly_at_close_after_overdue():
     r = co.fin("A", T, hm(11, 11))
     assert r["classification"] == "post_close_finish" and r["changes"] == []
     assert r["diagnostics"]["codes"] == ["late_finish_accepted", "post_close_finish"]
-    rec = co.rec("A")
-    assert (rec["lifecycle"], rec["inclusion"]) == ("finalized", "post_close_excluded")
-    assert "ever_overdue" in rec["diagnostics"]["codes"]
+    assert co.rec("A") is None and co.ld.identity_status("A") == "tombstoned"  # r3 §6 첫 퇴출
     col, s = cum(co, hm(11, 11))
     assert col == {"V": 0, "M": 0, "U": 0, "N": 0}
     assert s["cumulative_end"] == hm(10, 1) and s["post_close_diagnostics"]["post_close_finish"] == 1
-    c = co.cohort(hm(11, 11))
-    assert counts(c) == (1, 0, 0, 0, 0, 0, 0, 1, 0, 0) and (c["ever_overdue"], c["late_finish_accepted"]) == (1, 1)
+    c = co.ld.epoch_cohort_totals(as_of=hm(11, 11), as_of_mono=mono(hm(11, 11)))
+    row = next(x for x in c["sources"] if x["source"] == "bs")
+    assert row["lifecycle_counts"]["finalized"] == 1 and (row["ever_overdue"], row["late_finish_accepted"]) == (1, 1)  # r3 §6 epoch totals
 
 
 @pytest.mark.parametrize("change", ["content", "contract"])
@@ -375,22 +378,17 @@ def test_V8_closed_conflict_keeps_cumulative(change):
     assert co.fin("A", T, hm(10, 1))["classification"] == "finalized"
     col, _ = cum(co, hm(11, 11))
     assert col["V"] == 1
-    if change == "content":
-        r = co.fin("A", T, hm(11, 12), kind="M")
-        assert r["classification"] == "post_close_conflict"
-        state = "conflicting"
-    else:
-        r = co.fin("A", T, hm(11, 12), contract="bank_v2_evidence/9")
-        assert r["classification"] == "contract_mixed" and "post_close_conflict" in r["diagnostics"]["codes"]
-        state = "contract_mixed"
+    r = (co.fin("A", T, hm(11, 12), kind="M") if change == "content" else
+         co.fin("A", T, hm(11, 12), contract="bank_v2_evidence/9"))
+    assert r["classification"] == "post_close_conflict"  # r3 §6 tombstone 충돌은 최초 digest 로 판정
     assert r["changes"] == [] and r["diagnostics"]["cumulative_evidence_uncertain"] is True
-    assert co.rec("A")["lifecycle"] == state and co.rec("A")["inclusion"] == "frozen_included"
+    assert co.rec("A") is None and co.ld.identity_status("A") == "tombstoned"  # r3 §6 첫 퇴출
     col, _ = cum(co, hm(11, 12))
     assert col["V"] == 1
-    assert co.fin("A", T, hm(11, 13))["classification"] == "after_conflict_redelivery"
-    c = co.cohort(hm(11, 13))
-    assert counts(c)[8 if state == "conflicting" else 9] == 1
-    ok_equations(c)
+    assert co.fin("A", T, hm(11, 13))["classification"] == "post_close_duplicate"  # r3 §6 tombstone 재전달
+    c = co.ld.epoch_cohort_totals(as_of=hm(11, 13), as_of_mono=mono(hm(11, 13)))
+    row = next(x for x in c["sources"] if x["source"] == "bs")
+    assert row["lifecycle_counts"]["finalized"] == 1 and row["equations_hold"] == {"connection": True, "lifecycle": True}  # r3 §6 동결 lifecycle
 
 
 # ═════════ V9 · next_entry ═════════
@@ -537,7 +535,7 @@ def test_V15b_earlier_next_entry_after_finish_is_conflict_record_only():
     co.reg("A", job_id="j", serial=True)
     co.link("A")
     co.fin("A", hm(10, 9), hm(10, 9))
-    r = co.reg("B", start=hm(10, 8), at=hm(10, 11), job_id="j", serial=True)
+    r = co.reg("B", start=hm(10, 8, 59), at=hm(10, 9, 30), job_id="j", serial=True)  # r3 §6 신선도 안에서 순서 역전
     assert r["classification"] == "registered"
     assert "wrapper_exit_conflict" in r["diagnostics"]["codes"] and r["diagnostics"]["coverage_error"] is True
     rec = co.rec("A")
@@ -695,13 +693,14 @@ def test_serial_entry_after_explicit_exit_keeps_exit_evidence():
 
 
 @pytest.mark.parametrize("start,sm", [
-    (hm(10, 2), mono(hm(10, 4))), (hm(10, 4), mono(hm(10, 2))), (hm(10, 2), mono(hm(10, 2)))],
+    (hm(10, 2, 59), mono(hm(10, 3, 30))), (hm(10, 3, 30), mono(hm(10, 2, 59))),
+    (hm(10, 2, 59), mono(hm(10, 2, 59)))],
     ids=["wall_only_earlier", "mono_only_earlier", "both_earlier"])
 def test_serial_entry_earlier_than_explicit_exit_is_conflict(start, sm):
     co = Co()
     co.reg("A", job_id="j", serial=True)
     co.exit("A", hm(10, 3), hm(10, 3))
-    r = co.reg("B", start=start, sm=sm, at=hm(10, 4), job_id="j", serial=True)   # 반환시각보다 이른 새 진입
+    r = co.reg("B", start=start, sm=sm, at=hm(10, 3, 30), job_id="j", serial=True)  # r3 §6 신선도 안에서 반환 이전 새 진입
     assert r["classification"] == "registered"
     assert "wrapper_exit_conflict" in r["diagnostics"]["codes"] and r["diagnostics"]["coverage_error"] is True
     ra = co.rec("A")

@@ -51,10 +51,13 @@ class Agg:
         rid = rid or f"r{inv}"
         schema, contract = ax.REGISTRY[src]
         start = max(self.origin, fw - S1)
+        # r3 §6 새 ID의 오래된 시작: 늦게 도착한 finish fixture 는 등록·link 를 시작 시각에 먼저 접수한다.
+        registration_receipt = start if rw - start > MIN else rw
         self.ld.register(epoch="E1", invocation_id=inv, source=src, started_wall=start, started_mono=mono(start),
-                         received_at=rw, received_mono=mono(rw))
+                         received_at=registration_receipt, received_mono=mono(registration_receipt))
         self.ld.link_round(epoch="E1", invocation_id=inv, round_id=rid, report_schema=schema,
-                           validity_contract=contract, received_at=rw, received_mono=mono(rw))
+                           validity_contract=contract, received_at=registration_receipt,
+                           received_mono=mono(registration_receipt))
         return self.ld.finish(epoch="E1", invocation_id=inv, round_id=rid, report_schema=schema,
                               validity_contract=contract, finished_wall=fw, finished_mono=mono(fw),
                               selected_summary=s if s is not None else summary(), telemetry_error_present=tel,
@@ -103,7 +106,8 @@ def test_snapshot_shape_and_rows():
     assert [r["source"] for r in s["cumulative_rounds"]] == list(SRC3)
     assert [r["source"] for r in s["recent_rounds"]] == list(SRC3)
     assert s["post_close_diagnostics"] == {"post_close_duplicate": 0, "post_close_conflict": 0, "post_close_finish": 0,
-                                           "post_close_unverified": 0, "cumulative_evidence_uncertain": False}
+                                           "post_close_unverified": 0, "cumulative_evidence_uncertain": False,
+                                           "first_uncertain_event": None}  # r3 §6 snapshot 진단 exact-set
     assert s["coverage"]["ledger_health_complete"] is True and s["coverage"]["uncertain_sources"] == []
     assert s["close_policy"] == {"window_minutes": 60, "grace_minutes": 10, "bucket_minutes": 1}
     assert s["thresholds"] == {"insufficient_evidence": 0.9}
@@ -188,7 +192,7 @@ def test_R4_first_result_bucket_closes_once_and_releases():
     assert s["cumulative_first_finished_at"] == s["cumulative_last_finished_at"] == at(10, 0)
     assert s["recent_first_finished_at"] == s["recent_last_finished_at"] == at(10, 30)   # A 는 창에서 빠진다
     ra, rb = g.ld.record("A"), g.ld.record("B")
-    assert (ra["inclusion"], ra["detail"]) == ("frozen_included", None)
+    assert ra is None and g.ld.identity_status("A") == "tombstoned"  # r3 §6 첫 퇴출 뒤 Record 조회
     assert rb["inclusion"] == "open_included" and rb["detail"] is not None
     assert s["health"]["retained_details"] == 1
 
@@ -202,7 +206,7 @@ def test_R5_both_closed_and_idempotent_requery():
     assert (s["cumulative_first_finished_at"], s["cumulative_last_finished_at"]) == (at(10, 0), at(10, 30))
     assert s["recent_first_finished_at"] is None and s["recent_last_finished_at"] is None
     assert s["health"]["retained_details"] == 0
-    assert g.ld.record("A")["detail"] is None and g.ld.record("B")["detail"] is None
+    assert all(g.ld.record(inv) is None and g.ld.identity_status(inv) == "tombstoned" for inv in ("A", "B"))  # r3 §6 첫 퇴출
     s2 = g.snap(at(11, 41))
     assert s2["cumulative"] == s["cumulative"] and s2["cumulative_end"] == s["cumulative_end"]
     assert s2["health"]["retained_details"] == 0
@@ -235,7 +239,7 @@ def test_B1_first_receipt_just_before_close():
     assert "ever_overdue" in g.ld.record("A")["diagnostics"]["codes"]
     s = g.snap(at(11, 11))
     each_pair(s["cumulative"], (1, 0, 0, 0, 1.0))
-    assert g.ld.record("A")["detail"] is None and s["health"]["retained_details"] == 0
+    assert g.ld.record("A") is None and g.ld.identity_status("A") == "tombstoned" and s["health"]["retained_details"] == 0  # r3 §6 첫 퇴출
 
 
 def test_B2_first_receipt_exactly_at_close():
@@ -244,16 +248,21 @@ def test_B2_first_receipt_exactly_at_close():
     assert r["classification"] == "post_close_finish" and r["changes"] == []
     assert r["diagnostics"]["codes"] == ["late_finish_accepted", "post_close_finish"]    # S4.6
     assert r["diagnostics"]["coverage_error"] is True
-    assert "ever_overdue" in g.ld.record("A")["diagnostics"]["codes"]
+    assert g.ld.identity_status("A") == "tombstoned" and r["health"]["N_tomb"] == 1  # r3 §6 첫 퇴출 뒤 진단은 epoch totals
     assert r["diagnostics"]["baseline_invalidated"] is False
     assert r["health"]["coverage_complete"] is False and "bs" in r["health"]["uncertain_sources"]
     s = g.snap(at(11, 11))
     assert s["cumulative_end"] == at(10, 1)
     each_pair(s["cumulative"], (0, 0, 0, 0, None))
     assert s["post_close_diagnostics"]["post_close_finish"] == 1
-    rec = g.ld.record("A")
-    assert rec["inclusion"] == "post_close_excluded" and rec["closed"] and rec["detail"] is None
-    assert rec["first_digest"] is not None and rec["bucket_start"] == at(10, 0)
+    # r3 §6 첫 퇴출: post-close 첫 finish 는 같은 event 에 tombstone 전환한다.
+    assert g.ld.record("A") is None and g.ld.identity_status("A") == "tombstoned"
+    schema, contract = ax.REGISTRY["bs"]
+    replay = dict(epoch="E1", invocation_id="A", round_id="rA", report_schema=schema,
+                  validity_contract=contract, finished_wall=at(10, 0), finished_mono=mono(at(10, 0)),
+                  telemetry_error_present=False, received_at=at(11, 11), received_mono=mono(at(11, 11)))
+    assert g.ld.finish(selected_summary=summary(), **replay)["classification"] == "post_close_duplicate"  # r3 §6 첫 digest 보존
+    assert g.ld.finish(selected_summary=summary("M"), **replay)["classification"] == "post_close_conflict"
 
 
 def test_B3_minute_boundary_result_closes_one_minute_later():
@@ -268,7 +277,7 @@ def test_B3_minute_boundary_result_closes_one_minute_later():
     s = g.snap(at(11, 12))
     assert s["cumulative_end"] == at(10, 2)
     each_pair(s["cumulative"], (1, 0, 0, 0, 1.0))
-    assert g.ld.record("A")["inclusion"] == "frozen_included" and s["health"]["retained_details"] == 0
+    assert g.ld.record("A") is None and g.ld.identity_status("A") == "tombstoned" and s["health"]["retained_details"] == 0  # r3 §6 첫 퇴출
 
 
 def test_P1_post_close_redelivery_after_release():
@@ -288,8 +297,10 @@ def test_P1_post_close_redelivery_after_release():
     each_pair(s["cumulative"], (1, 0, 0, 0, 1.0))
     assert s["cumulative_end"] == at(10, 3) and s["health"]["retained_details"] == 1
     assert s["post_close_diagnostics"] == {"post_close_duplicate": 1, "post_close_conflict": 1, "post_close_finish": 0,
-                                           "post_close_unverified": 0, "cumulative_evidence_uncertain": True}
-    assert g.ld.record("A")["detail"] is None and g.ld.record("A")["first_digest"] is not None
+                                           "post_close_unverified": 0, "cumulative_evidence_uncertain": True,
+                                           "first_uncertain_event": {"code": "post_close_conflict", "received_at": at(11, 13),
+                                                                     "received_mono": mono(at(11, 13))}}  # r3 §6 snapshot 진단
+    assert g.ld.record("A") is None and g.ld.identity_status("A") == "tombstoned"  # r3 §6 첫 퇴출
 
 
 def test_F1_merge_failure_is_atomic_then_retry():
@@ -311,7 +322,7 @@ def test_F1_merge_failure_is_atomic_then_retry():
     s = g.snap(at(11, 11))
     assert s["cumulative_end"] == at(10, 1)
     each_pair(s["cumulative"], (1, 0, 0, 0, 1.0))
-    assert g.ld.record("A")["detail"] is None and s["health"]["retained_details"] == 0
+    assert g.ld.record("A") is None and g.ld.identity_status("A") == "tombstoned" and s["health"]["retained_details"] == 0  # r3 §6 첫 퇴출
     assert g.snap(at(11, 11))["cumulative"] == s["cumulative"]
 
 

@@ -388,10 +388,12 @@ def clone_ledger(base):
 def _structural_state(ledger):
     """Comparable Record, A-G index, Health and cumulative values."""
     state = {key: value for key, value in ledger.__dict__.items()
-             if key not in ("_lock", "_close_index", "_overdue_index", "_cohort_index")
+             if key not in ("_lock", "_close_index", "_overdue_index", "_expiry_index", "_prune_index", "_cohort_index")
              and not key.startswith("_gate_")}
-    state["_close_index"] = (ledger._close_index.size, ledger._close_index.data)
-    state["_overdue_index"] = (ledger._overdue_index.size, ledger._overdue_index.data)
+    # r3 §6 첫 퇴출 뒤: 새 deadline 색인의 slot/seq backing 도 분리 복제 동등성에 포함한다.
+    for name in ("_close_index", "_overdue_index", "_expiry_index", "_prune_index"):
+        index = getattr(ledger, name)
+        state[name] = (index.size, index.data, index.seqs, index.slots, index.free_count)
     state["_cohort_index"] = {source: (index.blocks, index.maxes)
                               for source, index in ledger._cohort_index.items()}
     return state
@@ -435,10 +437,22 @@ def _split_clone(base, mutable_ids):
     for invocation_id in mutable_ids:
         if invocation_id in clone._records:
             clone._records[invocation_id] = copy.deepcopy(clone._records[invocation_id])
-    clone._close_index = copy.copy(base._close_index)
-    clone._close_index.data = base._close_index.data.copy()
-    clone._overdue_index = copy.copy(base._overdue_index)
-    clone._overdue_index.data = base._overdue_index.data.copy()
+    # r3 §6 첫 퇴출 뒤: close/expiry/prune 는 동일 호출에서 변하므로 관련 backing 을 분리한다.
+    for name in ("_close_index", "_overdue_index", "_expiry_index", "_prune_index"):
+        source = getattr(base, name)
+        index = copy.copy(source)
+        index.data = source.data.copy()
+        index.seqs = source.seqs.copy()
+        index.slots = source.slots.copy()
+        index.free = source.free.copy()
+        setattr(clone, name, index)
+    clone._seq = copy.copy(base._seq)
+    clone._seq.positions = base._seq.positions.copy()
+    clone._tombs = base._tombs.copy()
+    clone._frozen = copy.deepcopy(base._frozen)
+    clone._cohort_index = copy.deepcopy(base._cohort_index)
+    clone._owners = base._owners.copy()
+    clone._owned_ids = base._owned_ids.copy()
     clone._open_seq = base._open_seq.copy()
     clone._recent_buckets = copy.deepcopy(base._recent_buckets)
     clone._health = copy.deepcopy(base._health)
@@ -822,8 +836,9 @@ def _candidate_state(ledger, kwargs):
 def _observed_d(ledger, before):
     close, overdue = before
     def current(seq):
-        return ledger._records.get(ledger._seq[seq - 1])
-    return (sum(not was_closed and current(seq) is not None and current(seq)["closed"]
+        return ledger._records.get(ledger._seq.positions.get(seq - 1))
+    # r3 §6 첫 퇴출 뒤: 닫힌 Record 가 tombstone/prune 되어도 그 호출의 D 전이는 센다.
+    return (sum(not was_closed and (current(seq) is None or current(seq)["closed"])
                 for seq, was_closed in close)
             + sum(old != "overdue" and current(seq) is not None
                   and current(seq)["lifecycle"] == "overdue" for seq, old in overdue))
@@ -951,6 +966,10 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                     visits = ledger._records.visits
                     if cohort_range_audit:
                         row["out_of_range_visits"] += ledger._records.out_of_range_visits
+                    # Retirement removes Record entries. Keep those mutations when
+                    # the counting wrapper is detached from a sequential fixture.
+                    old_counted.clear()
+                    old_counted.update(ledger._records)
                     ledger._records = old_counted
             observed_d = _observed_d(ledger, old)
             observed_k = _observed_k(ledger, method, kwargs, outcome or {})
@@ -1103,6 +1122,9 @@ def _repeat_provider(factory, method, arguments, *, independent=False, prepare=N
                 "overdue_root": base._overdue_index.data[1],
                 "open_seq": _anchor_metric(base._open_seq),
                 "records_size": len(base._records),
+                "owned_ids": _anchor_metric(base._owned_ids),
+                "previous_job": _anchor_metric(base._previous_job),
+                "seq": _anchor_metric(base._seq),
                 "records": {key: copy.deepcopy(base._records[key])
                             for key in mutable if key in base._records},
             }
@@ -1127,6 +1149,9 @@ def _repeat_provider(factory, method, arguments, *, independent=False, prepare=N
                     and base._overdue_index.data[1] == anchor["overdue_root"]
                     and _anchor_metric(base._open_seq) == anchor["open_seq"]
                     and len(base._records) == anchor["records_size"]
+                    and _anchor_metric(base._owned_ids) == anchor["owned_ids"]
+                    and _anchor_metric(base._previous_job) == anchor["previous_job"]
+                    and _anchor_metric(base._seq) == anchor["seq"]
                     and all(base._records.get(key) == value
                             for key, value in anchor["records"].items()))
         provide.original_unchanged = original_unchanged

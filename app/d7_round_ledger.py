@@ -29,6 +29,13 @@ _MAX_COUNT = 2**64 - 1
 _MINUTE = 60000000
 _CLOSE_DELAY = 4200000000
 _OVERDUE = 900000000
+_W_LATE = 7_200_000_000
+_UNFINISHED_EXPIRY = 14_400_000_000
+_REGISTRATION_FRESHNESS = 60_000_000
+_MAX_CLOCK_SKEW = 60_000_000
+_REANCHOR_STEP_SKEW = 1_000_000
+_REANCHOR_PAIRS = 3
+_REANCHOR_MIN_SPAN = 10_000_000
 _ABSENT = object()
 _COLLECTION = frozenset(("valid", "missing", "unknown", "not_attempted"))
 _INVESTING_WRITE = frozenset(("unknown", "not_attempted"))
@@ -47,8 +54,10 @@ _JSON = json.JSONEncoder(sort_keys=True, separators=(",", ":"), ensure_ascii=Fal
 # 5a-3b resident tariff. Only this table defines field ownership and reserves;
 # transitions change field values and the same tariff prices the resulting state.
 _BUDGET_F = 4_310_732
+_BUDGET_F_4 = 18_874_368
 _BUDGET_B = 62_914_560
 _BUDGET_ID_MAX = sys.getsizeof("😀" + "a" * 124)
+_BUDGET_JOB_ENTRY = 1_536  # key/string, nine-field summary, retained times, and map backing
 _BUDGET_INT_MAX = sys.getsizeof(_MAX_COUNT)
 _BUDGET_PAIR = sys.getsizeof((None, None))
 _BUDGET_INITIAL = ("invocation_id", "job_id", "seq", "started_wall", "started_mono")
@@ -141,9 +150,36 @@ class _MinimumBySeq:
         size = 1 << (capacity - 1).bit_length()
         self.size = size
         self.data = [None] * (2 * size)
+        self.seqs = [None] * size
+        self.slots = {}
+        self.free = [None] * size
+        self.free_count = 0
+        self.next_slot = 0
 
     def set(self, seq, deadline):
-        pos = self.size + seq - 1
+        if deadline is not None:
+            slot = self.slots.get(seq)
+            if slot is None:
+                if self.free_count:
+                    self.free_count -= 1
+                    slot = self.free[self.free_count]
+                    self.free[self.free_count] = None
+                else:
+                    slot = self.next_slot
+                if slot >= self.size:
+                    raise RuntimeError("deadline index capacity exceeded")
+                if slot == self.next_slot:
+                    self.next_slot += 1
+                self.slots[seq] = slot
+            self.seqs[slot] = seq
+        else:
+            slot = self.slots.pop(seq, None)
+            if slot is None:
+                return
+            self.seqs[slot] = None
+            self.free[self.free_count] = slot
+            self.free_count += 1
+        pos = self.size + slot
         data = self.data
         data[pos] = deadline
         pos //= 2
@@ -155,6 +191,22 @@ class _MinimumBySeq:
             data[pos] = value
             pos //= 2
 
+    def reserve(self, seq):
+        """Allocate a leaf while keeping it out of due-time searches."""
+        if seq in self.slots:
+            return
+        if self.free_count:
+            self.free_count -= 1
+            slot = self.free[self.free_count]
+            self.free[self.free_count] = None
+        else:
+            slot = self.next_slot
+            self.next_slot += 1
+        if slot >= self.size:
+            raise RuntimeError("deadline index capacity exceeded")
+        self.slots[seq] = slot
+        self.seqs[slot] = seq
+
     def due(self, deadline):
         """Yield due seqs in registration order without materializing candidates."""
         data, size = self.data, self.size
@@ -164,7 +216,9 @@ class _MinimumBySeq:
             if value is None or value > deadline:
                 return
             if pos >= size:
-                yield pos - size + 1
+                seq = self.seqs[pos - size]
+                if seq is not None:
+                    yield seq
             else:
                 yield from walk(2 * pos)
                 yield from walk(2 * pos + 1)
@@ -205,6 +259,57 @@ class _SortedBlocks:
             if stop < len(block):
                 break
             index += 1
+
+    def remove(self, key):
+        index = bisect.bisect_left(self.maxes, key)
+        if index == len(self.blocks):
+            raise RuntimeError("missing cohort key")
+        block = self.blocks[index]
+        place = bisect.bisect_left(block, key)
+        if place == len(block) or block[place] != key:
+            raise RuntimeError("missing cohort key")
+        block.pop(place)
+        if block:
+            self.maxes[index] = block[-1]
+        else:
+            self.blocks.pop(index)
+            self.maxes.pop(index)
+
+
+class _SeqWindow:
+    """Cumulative sequence numbers with only resident positions retained."""
+
+    def __init__(self):
+        self.positions = {}
+        self.total = 0
+
+    def append(self, invocation_id):
+        self.positions[self.total] = invocation_id
+        self.total += 1
+
+    def remove(self, seq):
+        del self.positions[seq - 1]
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self.positions.get(i) for i in range(*index.indices(self.total))]
+        if index < 0:
+            index += self.total
+        return self.positions[index]
+
+    def __len__(self):
+        return self.total
+
+    def __iter__(self):
+        return (self.positions.get(i) for i in range(self.total))
+
+    def __contains__(self, value):
+        return value in self.positions.values()
+
+    def __eq__(self, other):
+        if isinstance(other, _SeqWindow):
+            return self.total == other.total and self.positions == other.positions
+        return NotImplemented
 
 
 def _diag(codes=(), level=None, global_=False):
@@ -247,6 +352,8 @@ report_unavailable start_mono_in_future start_unrecorded start_wall_in_future
 string_bytes_limit telemetry_error time_integrity_error total_keys_limit
 total_list_items_limit total_string_bytes_limit unexpected_keys unregistered_contract
 unsupported_source wrapper_exit_conflict wrapper_exited
+clock_unverified cohort_expired expired_finish expired_start expired_wrapper
+expired_identity_unverified late_start_excluded retention_expired
 """.split()))
 _DIAG_INDEX = {code: index for index, code in enumerate(DIAG_CODES)}
 _DIAG_FLAGS = ("baseline_invalidated", "coverage_error", "cumulative_evidence_uncertain")
@@ -312,12 +419,18 @@ _RECORD_FIELDS = (
     "bucket_end", "close_at", "closed", "inclusion", "diagnostics", "detail",
 )
 _RECORD_FIELD_SET = frozenset(_RECORD_FIELDS)
+_TOMB_FIELDS = frozenset((
+    "invocation_id", "seq", "source", "round_id", "started_wall", "started_mono",
+    "first_finished_wall", "first_finished_mono", "first_digest", "connection", "lifecycle",
+    "job_id", "serial_job", "bucket_start", "bucket_end", "close_at", "_diag_bits",
+    "retire_at", "retire_mono", "prune_at", "expired"))
 
 
 class _Record:
     """Fixed-slot resident state with dict-like access for the existing indexes."""
 
-    __slots__ = tuple(key for key in _RECORD_FIELDS if key != "diagnostics") + ("_diag_bits",)
+    __slots__ = tuple(key for key in _RECORD_FIELDS if key != "diagnostics") + (
+        "_diag_bits", "retire_at", "retire_mono", "prune_at", "expired")
 
     def __init__(self, fields):
         for key in _RECORD_FIELDS:
@@ -325,6 +438,10 @@ class _Record:
                 setattr(self, key, fields[key])
         self._diag_bits = bytearray(_DIAG_WIDTH)
         _DiagView(self._diag_bits).merge(fields["diagnostics"])
+        self.retire_at = fields["started_wall"] + _UNFINISHED_EXPIRY
+        self.retire_mono = fields["started_mono"] + _UNFINISHED_EXPIRY
+        self.prune_at = self.retire_at + _W_LATE
+        self.expired = True
 
     def __getitem__(self, key):
         if key == "diagnostics":
@@ -357,7 +474,9 @@ class _Record:
     def __eq__(self, other):
         if isinstance(other, _Record):
             return all(self[key] == other[key] for key in _RECORD_FIELDS if key != "diagnostics") \
-                and self._diag_bits == other._diag_bits
+                and self._diag_bits == other._diag_bits \
+                and all(getattr(self, key) == getattr(other, key) for key in
+                        ("retire_at", "retire_mono", "prune_at", "expired"))
         if isinstance(other, dict):
             return self.to_dict() == other
         return NotImplemented
@@ -666,7 +785,7 @@ class RoundLedger:
             if key not in defaults or type(value) is not int or not 1 <= value <= defaults[key]:
                 raise ValueError("invalid limit")
             defaults[key] = value
-        if defaults["max_resident_bytes"] < _BUDGET_F:
+        if defaults["max_resident_bytes"] < _BUDGET_F_4:
             raise ValueError("resident budget below fixed charge")
         self.epoch = epoch
         self.aggregation_started_at = aggregation_started_at
@@ -680,20 +799,36 @@ class RoundLedger:
         self._post_close = {name: 0 for name in (
             "post_close_duplicate", "post_close_conflict", "post_close_finish", "post_close_unverified")}
         self._cumulative_evidence_uncertain = False
+        self._first_uncertain_event = None
         self._limits = defaults
         self._budget_ar = 0
+        self._budget_t = 0
         self._budget_d = 0
         self._budget_dirty = False
         self._records = {}
-        self._seq = []
+        self._tombs = {}
+        self._seq = _SeqWindow()
+        self._q_highwater = 0
+        self._job_highwater = 0
+        self._rebuild_count = 0
         self._owners = {}
         self._owned_ids = set()
         self._close_index = _MinimumBySeq(defaults["max_records"])
         self._overdue_index = _MinimumBySeq(defaults["max_records"])
+        self._expiry_index = _MinimumBySeq(defaults["max_records"])
+        self._prune_index = _MinimumBySeq(defaults["max_records"])
         self._previous_job = {}
         self._cohort_index = {source: _SortedBlocks() for source in _SOURCES}
         self._open_seq = []
         self._recent_buckets = {}
+        self._frozen = {source: {"invocations": 0,
+                                 "connection": {name: 0 for name in ("started", "init_failed", "unbound")},
+                                 "lifecycle": {name: 0 for name in ("awaiting_report", "in_flight", "overdue",
+                                    "report_unavailable", "finalized", "conflicting", "contract_mixed")},
+                                 "ever_overdue": 0, "ever_unavailable": 0, "late_finish_accepted": 0}
+                        for source in _SOURCES}
+        self._isolation_first_mono = None
+        self._isolation_candidate = None
         self._health = {
             "registered_records": 0, "retained_details": 0, "admission_stopped": False,
             "admission_stopped_at": None, "untracked_invocations": 0,
@@ -701,11 +836,21 @@ class RoundLedger:
             "coverage_complete": True, "uncertain_sources": [], "clock_error": False,
             "index_error": False, "counter_saturated": False,
             "last_received_at": None, "last_received_mono": None,
+            "N_total": 0, "N_live": 0, "N_tomb": 0, "N_res": 0,
+            "identity_pruned": False, "cohort_exact_from": 0, "frozen_through": None,
+            **{name: 0 for name in ("late_start_excluded", "expired_finish", "expired_start",
+                                     "expired_wrapper", "expired_identity_unverified", "retention_expired",
+                                     "clock_unverified")},
+            "clock_isolation": {"active": False, "candidate_pairs": 0, "since_at": None,
+                                "since_mono": None, "unverified_from_at": None,
+                                "unverified_through_at": None, "reanchor_count": 0},
         }
 
     def _record_tariff(self, rec, *, admitted=True):
         """Return actual A and still reserved R for the single field registry."""
         a = sys.getsizeof(rec) + sys.getsizeof(rec._diag_bits)
+        a += sum(sys.getsizeof(getattr(rec, name)) for name in
+                 ("retire_at", "retire_mono", "prune_at", "expired"))
         r = 0
         for name in _BUDGET_INITIAL:
             value = rec[name]
@@ -731,7 +876,8 @@ class RoundLedger:
         # keeps its 56-byte reserve for identity-fault rewind.
         a += _BUDGET_PAIR
         if rec["job_id"] is not None:
-            if (admitted and self._previous_job.get((rec["source"], rec["job_id"])) == rec["seq"]):
+            previous = self._previous_job.get((rec["source"], rec["job_id"]))
+            if (admitted and isinstance(previous, dict) and previous["seq"] == rec["seq"]):
                 a += _BUDGET_PAIR
             elif admitted:
                 r += _BUDGET_PAIR
@@ -743,7 +889,8 @@ class RoundLedger:
         else:
             r += _BUDGET_PAIR
         if admitted:
-            deadline = self._overdue_index.data[self._overdue_index.size + rec["seq"] - 1]
+            slot = self._overdue_index.slots.get(rec["seq"])
+            deadline = self._overdue_index.data[self._overdue_index.size + slot] if slot is not None else None
             if deadline is not None:
                 a += sys.getsizeof(deadline)
             elif rec["first_digest"] is None and rec["lifecycle"] in ("awaiting_report", "in_flight"):
@@ -757,14 +904,33 @@ class RoundLedger:
             self._budget_ar = sum(sum(self._record_tariff(rec)) for rec in self._records.values())
             self._budget_dirty = False
 
+    def _q_charge(self, resident=None, jobs=None):
+        n = self._health["N_res"] if resident is None else resident
+        count = max(self._q_highwater, n)
+        job_count = len(self._previous_job) if jobs is None else jobs
+        return (_budget_q(count) + 512 * count
+                + _BUDGET_JOB_ENTRY * max(self._job_highwater, job_count))
+
     def budget_state(self) -> dict:
         with self._lock:
-            self._budget_refresh()
-            n = len(self._seq)
-            q = _budget_q(n)
-            e = _BUDGET_F + q + self._budget_d + self._budget_ar
-            return {"F": _BUDGET_F, "Q": q, "D": self._budget_d, "AR": self._budget_ar,
-                    "E": e, "B": self._limits["max_resident_bytes"], "N": n}
+            # Split A/R for observation without repairing the incremental
+            # admission total: callers must be able to detect its drift.
+            charges = (self._record_tariff(rec) for rec in self._records.values())
+            a = r = 0
+            for actual, reserve in charges:
+                a += actual
+                r += reserve
+            n = self._health["N_res"]
+            q = self._q_charge()
+            e = _BUDGET_F_4 + q + self._budget_d + self._budget_ar + self._budget_t
+            return {"F": _BUDGET_F_4, "Q": q, "D": self._budget_d, "AR": self._budget_ar,
+                    "E": e, "B": self._limits["max_resident_bytes"], "N": n,
+                    "F_4": _BUDGET_F_4, "Q_4": q, "A": a, "R": r,
+                    "T": self._budget_t, "R_T": 0, "TR": self._budget_t,
+                    "N_total": self._health["N_total"], "N_live": self._health["N_live"],
+                    "N_tomb": self._health["N_tomb"], "N_res": n,
+                    "capacity": {"charged_bytes": q, "rebuild_old_bytes": 0, "rebuild_new_bytes": 0},
+                    "rebuild_count": self._rebuild_count}
 
     def record_charge(self, invocation_id: str) -> dict | None:
         with self._lock:
@@ -810,7 +976,8 @@ class RoundLedger:
             self._health[key] += 1
 
     def _drop_overdue(self, rec):
-        deadline = self._overdue_index.data[self._overdue_index.size + rec["seq"] - 1]
+        slot = self._overdue_index.slots.get(rec["seq"])
+        deadline = self._overdue_index.data[self._overdue_index.size + slot] if slot is not None else None
         if deadline is not None:
             self._budget_ar -= sys.getsizeof(deadline)
         self._overdue_index.set(rec["seq"], None)
@@ -847,6 +1014,10 @@ class RoundLedger:
         if classification in self._post_close:
             self._post_close[classification] = min(_MAX_COUNT, self._post_close[classification] + 1)
         if diag is not None and diag["cumulative_evidence_uncertain"]:
+            if not self._cumulative_evidence_uncertain:
+                self._first_uncertain_event = {"code": classification,
+                                               "received_at": self._health["last_received_at"],
+                                               "received_mono": self._health["last_received_mono"]}
             self._cumulative_evidence_uncertain = True
         return {"classification": classification,
                 "records": [rec.to_dict() for rec in sorted(records, key=lambda rec: rec["seq"])],
@@ -884,21 +1055,60 @@ class RoundLedger:
     def _clock_codes(self, wall, mono):
         codes = []
         if self._health["last_received_at"] is not None:
-            if wall < self._health["last_received_at"]:
-                codes.append("receipt_wall_regressed")
             if mono < self._health["last_received_mono"]:
                 codes.append("receipt_mono_regressed")
+            if wall < self._health["last_received_at"]:
+                codes.append("receipt_wall_regressed")
+            if "receipt_mono_regressed" in codes:
+                return codes
+            if abs((wall - self._health["last_received_at"]) -
+                   (mono - self._health["last_received_mono"])) > _MAX_CLOCK_SKEW:
+                codes.append("clock_unverified")
+        isolation = self._health["clock_isolation"]
+        if isolation["active"] or (codes and "receipt_mono_regressed" not in codes):
+            if not isolation["active"]:
+                isolation["active"] = True
+                isolation["since_at"] = wall
+                isolation["since_mono"] = mono
+            isolation["unverified_from_at"] = (wall if isolation["unverified_from_at"] is None
+                                                else min(wall, isolation["unverified_from_at"]))
+            isolation["unverified_through_at"] = (wall if isolation["unverified_through_at"] is None
+                                                   else max(wall, isolation["unverified_through_at"]))
+            previous = self._isolation_candidate
+            if previous is None or not (wall > previous[0] and mono > previous[1] and
+                                        abs((wall - previous[0]) - (mono - previous[1])) <= _REANCHOR_STEP_SKEW):
+                if previous != (wall, mono):
+                    isolation["candidate_pairs"] = 1
+                    self._isolation_first_mono = mono
+            else:
+                isolation["candidate_pairs"] = min(_REANCHOR_PAIRS, isolation["candidate_pairs"] + 1)
+            self._isolation_candidate = (wall, mono)
+            if (isolation["candidate_pairs"] >= _REANCHOR_PAIRS and
+                    mono - self._isolation_first_mono >= _REANCHOR_MIN_SPAN):
+                isolation["active"] = False
+                isolation["candidate_pairs"] = 0
+                isolation["since_at"] = isolation["since_mono"] = None
+                isolation["reanchor_count"] += 1
+                self._health["last_received_at"] = wall
+                self._health["last_received_mono"] = mono
+                self._isolation_candidate = None
+            if "clock_unverified" not in codes:
+                codes.append("clock_unverified")
         return codes
 
     def _clock_reject(self, codes, query=False, aggregation=False):
         self._health["clock_error"] = True
-        diag = _diag((*codes, "time_integrity_error"), "G", True)
+        mono_bad = "receipt_mono_regressed" in codes
+        classification = "time_integrity_error" if mono_bad else "clock_unverified"
+        if not mono_bad:
+            self._bump("clock_unverified")
+        diag = _diag((*codes, classification), "G", True)
         self._observe(diag, global_=True)
         if aggregation:
-            return self._aggregation_reject("time_integrity_error", diag)
+            return self._aggregation_reject(classification, diag)
         if query:
-            return self._query_result("time_integrity_error", (), None, diag)
-        return self._result("time_integrity_error", diag=diag)
+            return self._query_result(classification, (), None, diag)
+        return self._result(classification, diag=diag)
 
     def _origin_reject(self, source=None, query=False):
         diag = _diag(("before_aggregation_start", "invalid_argument"), None if query else "G",
@@ -1014,9 +1224,100 @@ class RoundLedger:
                 "as_of_mono": self._health["last_received_mono"], "diagnostics": copy.deepcopy(diag),
                 "health": copy.deepcopy(self._health)}
 
+    def _indices_intact(self):
+        return (len(self._seq.positions) == self._health["N_res"] ==
+                len(self._records) + len(self._tombs))
+
+    @staticmethod
+    def _tomb_charge(tomb):
+        return sys.getsizeof(tomb) + sum(sys.getsizeof(getattr(tomb, name))
+                                         for name in _TOMB_FIELDS if getattr(tomb, name) is not None)
+
+    def _freeze_record(self, rec):
+        row = self._frozen[rec["source"]]
+        row["invocations"] = self._checked_add(row["invocations"], 1)
+        for category, value in (("connection", rec["connection"]), ("lifecycle", rec["lifecycle"])):
+            row[category][value] = self._checked_add(row[category][value], 1)
+        for key in ("ever_overdue", "ever_unavailable", "late_finish_accepted"):
+            bit = _DIAG_INDEX[key]
+            if rec._diag_bits[bit // 8] & (1 << (bit % 8)):
+                row[key] = self._checked_add(row[key], 1)
+
+    @staticmethod
+    def _job_summary(rec):
+        return {key: rec[key] for key in ("seq", "serial_job", "started_wall", "started_mono",
+                                          "exit_evidence", "exit_evidence_wall", "exit_evidence_mono",
+                                          "first_finished_wall", "first_finished_mono")}
+
+    def _sync_job(self, rec):
+        if rec["job_id"] is not None:
+            key = (rec["source"], rec["job_id"])
+            old = self._previous_job.get(key)
+            if isinstance(old, dict) and old["seq"] == rec["seq"]:
+                old.update(self._job_summary(rec))
+
+    def _retire(self, rec, wall, mono, *, expired=False):
+        seq = rec["seq"]
+        self._budget_refresh()
+        # Charge the live Record before removing its pending deadline. Once
+        # removed, the generic tariff would mistake that transient state for
+        # an unfilled deadline reserve.
+        self._budget_ar -= sum(self._record_tariff(rec))
+        self._overdue_index.set(seq, None)
+        if expired:
+            rec["lifecycle"] = "report_unavailable"
+            rec["unavailable_reason"] = "retention_expired"
+            bit = _DIAG_INDEX["ever_unavailable"]
+            rec._diag_bits[bit // 8] |= 1 << (bit % 8)
+            self._bump("retention_expired")
+            self._observe(_diag(("retention_expired",), "G"), rec["source"])
+        else:
+            late = rec["inclusion"] == "post_close_excluded"
+            if late:
+                rec.retire_at = max(rec.retire_at, wall)
+                rec.retire_mono = max(rec.retire_mono, mono)
+                rec.prune_at = rec.retire_at + _W_LATE
+        self._freeze_record(rec)
+        self._sync_job(rec)
+        # Reuse the already charged Record object. Clearing the non-tomb
+        # references frees detail and diagnostics without allocating one new
+        # Python object per retired invocation in a mass catch-up.
+        for name in rec.__slots__:
+            if name not in _TOMB_FIELDS:
+                setattr(rec, name, None)
+        tomb = rec
+        self._budget_t += self._tomb_charge(tomb)
+        self._tombs[rec["invocation_id"]] = tomb
+        del self._records[rec["invocation_id"]]
+        self._cohort_index[rec["source"]].remove((rec["started_wall"], seq))
+        self._expiry_index.set(seq, None)
+        self._health["N_live"] -= 1
+        self._bump("N_tomb")
+        previous = self._health["frozen_through"]
+        self._health["frozen_through"] = rec["started_wall"] if previous is None else max(previous, rec["started_wall"])
+        self._health["cohort_exact_from"] = self._health["frozen_through"] + 1
+        self._prune_index.set(seq, tomb.prune_at)
+
+    def _prune(self, tomb):
+        seq = tomb.seq
+        self._prune_index.set(seq, None)
+        self._seq.remove(seq)
+        if tomb.round_id is not None:
+            self._owners.pop((tomb.source, tomb.round_id), None)
+            self._owned_ids.discard(tomb.invocation_id)
+        self._budget_t -= self._tomb_charge(tomb)
+        del self._tombs[tomb.invocation_id]
+        self._health["N_tomb"] -= 1
+        self._health["N_res"] -= 1
+        self._health["identity_pruned"] = True
+
     def _advance_and_close(self, wall, mono):
         """Prepare a close candidate, then publish it with the receipt pair."""
         target_end = ((wall - 70 * _MINUTE) // _MINUTE) * _MINUTE
+        for seq in self._close_index.due(target_end):
+            rec = self._records.get(self._seq[seq - 1])
+            if rec is not None and rec["first_finished_mono"] is not None and mono < rec.retire_mono:
+                target_end = min(target_end, rec["bucket_end"] - _MINUTE)
         previous_end = self._cumulative_end if self._cumulative_end is not None else self._first_bucket_start
         rows = rounds = None
         first = last = None
@@ -1060,6 +1361,8 @@ class RoundLedger:
                     self._budget_d -= _budget_graph_size(rec["detail"])
                     rec["detail"] = None
                     self._health["retained_details"] -= 1
+                if rec["first_digest"] is not None:
+                    self._retire(rec, wall, mono)
         self._health["last_received_at"] = wall
         self._health["last_received_mono"] = mono
         for seq in self._overdue_index.due(mono):
@@ -1070,6 +1373,16 @@ class RoundLedger:
             rec = self._records[invocation_id]
             self._drop_overdue(rec)
             self._mark_overdue(rec, wall, mono)
+        for seq in self._expiry_index.due(wall):
+            invocation_id = self._seq[seq - 1]
+            rec = self._records.get(invocation_id)
+            if rec is not None and rec["first_digest"] is None and mono >= rec["started_mono"] + _UNFINISHED_EXPIRY:
+                self._retire(rec, wall, mono, expired=True)
+        for seq in self._prune_index.due(wall):
+            invocation_id = self._seq[seq - 1]
+            tomb = self._tombs.get(invocation_id)
+            if tomb is not None and mono >= tomb.retire_mono + _W_LATE:
+                self._prune(tomb)
 
     def _mark_overdue(self, rec, wall, mono):
         if (rec["first_digest"] is None and rec["lifecycle"] in ("awaiting_report", "in_flight")
@@ -1087,6 +1400,7 @@ class RoundLedger:
     def _record_evidence_event(self, classification, rec, codes, level=None):
         diag = _diag(codes, level)
         _merge_diag(rec["diagnostics"], diag)
+        self._sync_job(rec)
         self._observe(diag, rec["source"])
         return self._result(classification, (rec,), (), diag)
 
@@ -1107,9 +1421,19 @@ class RoundLedger:
             self._observe(event, global_=True)
         return self._result("post_close_unverified", records, changes, event)
 
+    def _unverified_tomb(self, source):
+        self._health["index_error"] = True
+        event = _diag(("identity_unverified",), "F")
+        self._observe(event, source)
+        return self._result("post_close_unverified", diag=event)
+
     def _check_identity(self, invocation_id, rec=None, candidate=None):
         if rec is None:
-            if invocation_id in self._owned_ids:
+            tomb = self._tombs.get(invocation_id)
+            if tomb is not None and tomb.connection == "started" and (
+                    self._owners.get((tomb.source, tomb.round_id)) != invocation_id):
+                return self._unverified_tomb(tomb.source)
+            if invocation_id in self._owned_ids and invocation_id not in self._tombs:
                 return self._unverified()
         elif rec["connection"] == "started":
             if self._owners.get((rec["source"], rec["round_id"])) != invocation_id:
@@ -1117,10 +1441,15 @@ class RoundLedger:
         if candidate is not None:
             owner_id = self._owners.get(candidate)
             if owner_id is not None:
-                owner = self._records.get(owner_id)
+                owner = self._records.get(owner_id) or self._tombs.get(owner_id)
                 if owner is None:
                     return self._unverified()
-                if owner["connection"] != "started" or (owner["source"], owner["round_id"]) != candidate:
+                connection = owner["connection"] if isinstance(owner, _Record) else owner.connection
+                source = owner["source"] if isinstance(owner, _Record) else owner.source
+                round_id = owner["round_id"] if isinstance(owner, _Record) else owner.round_id
+                if connection != "started" or (source, round_id) != candidate:
+                    if owner_id in self._tombs:
+                        return self._unverified()
                     return self._unverified((owner,))
         return None
 
@@ -1132,6 +1461,39 @@ class RoundLedger:
         rec = self._records.get(invocation_id)
         fault = self._check_identity(invocation_id, rec, candidate)
         return rec, fault
+
+    def _missing_event(self, orphan_code):
+        if self._health["identity_pruned"]:
+            self._bump("expired_identity_unverified")
+            return self._reject("expired_identity_unverified", ("expired_identity_unverified",), "F", global_=True)
+        return self._reject("orphan", (orphan_code,), "G", global_=True)
+
+    def _expired_event(self, classification, source):
+        self._bump(classification)
+        return self._reject(classification, (classification,), "G", source)
+
+    def _finish_tomb(self, tomb, round_id, report_schema, validity_contract,
+                     finished_wall, finished_mono, selected_summary, telemetry_error_present):
+        if tomb.expired:
+            return self._expired_event("expired_finish", tomb.source)
+        if round_id != tomb.round_id:
+            return self._reject("identity_conflict", ("identity_conflict",), "F", tomb.source)
+        try:
+            _check_summary(selected_summary)
+            candidate_obj = _digest_object(tomb.source, round_id, report_schema, validity_contract,
+                                           finished_wall, finished_mono, selected_summary, telemetry_error_present)
+            _, candidate = _encoded_size_and_hash(candidate_obj, 65536)
+            if candidate is None:
+                raise _InputProblem("canonical_bytes_limit")
+        except _InputProblem as exc:
+            classification = "input_shape_error" if exc.shape else "input_limit_exceeded"
+            return self._reject(classification, (classification, exc.code), "F", tomb.source)
+        if candidate == tomb.first_digest:
+            return self._result("post_close_duplicate", diag=_diag(("duplicate_finish", "post_close_duplicate")))
+        codes = ["post_close_conflict"]
+        if (report_schema, validity_contract) != REGISTRY[tomb.source]:
+            codes.append("unregistered_contract")
+        return self._reject("post_close_conflict", codes, "F", tomb.source)
 
     @staticmethod
     def _change(rec, action):
@@ -1159,12 +1521,13 @@ class RoundLedger:
             if rec["lifecycle"] == "report_unavailable":
                 _merge_diag(diag, _diag(("ever_unavailable",)))
             _merge_diag(rec["diagnostics"], diag)
+            self._sync_job(rec)
         if diag["coverage_error"]:
             for rec in records:
                 self._observe(diag, rec["source"], global_)
         return self._result(classification, records, changes, diag)
 
-    def _conflict(self, records):
+    def _conflict(self, records, tomb=None):
         changes = []
         event = _diag()
         for rec in records:
@@ -1173,6 +1536,10 @@ class RoundLedger:
             _merge_diag(rec["diagnostics"], local)
             _merge_diag(event, local)
             self._observe(local, rec["source"])
+        if tomb is not None:
+            frozen = _diag(("identity_conflict",), "F")
+            _merge_diag(event, frozen)
+            self._observe(frozen, tomb.source)
         return self._result("identity_conflict", records, changes, event)
 
     def register(self, *, epoch: str, invocation_id: str, source: str, started_wall: int,
@@ -1205,6 +1572,14 @@ class RoundLedger:
             if codes:
                 return self._clock_reject(codes)
             self._advance_and_close(received_at, received_mono)
+            rec = self._records.get(invocation_id)
+            tomb = self._tombs.get(invocation_id)
+            if tomb is not None:
+                if (source, started_wall, started_mono, job_id, serial_job) == (
+                        tomb.source, tomb.started_wall, tomb.started_mono, tomb.job_id, tomb.serial_job):
+                    return self._result("duplicate_invocation", diag=_diag(("duplicate_invocation",)))
+                return self._reject("registration_conflict", ("registration_conflict", "identity_conflict"),
+                                    "F", tomb.source)
             if rec is not None:
                 if (source, started_wall, started_mono, job_id, serial_job) == (
                         rec["source"], rec["started_wall"], rec["started_mono"], rec["job_id"], rec["serial_job"]):
@@ -1225,13 +1600,23 @@ class RoundLedger:
             if source not in REGISTRY:
                 self._bump("unsupported_invocations")
                 return self._reject("unsupported_source", ("unsupported_source",))
-            if self._health["admission_stopped"] or len(self._seq) >= self._limits["max_records"]:
+            if (received_at - started_wall > _REGISTRATION_FRESHNESS or
+                    received_mono - started_mono > _REGISTRATION_FRESHNESS):
+                self._bump("late_start_excluded")
+                return self._reject("late_start_excluded", ("late_start_excluded",), "G", source)
+            if started_wall < self._health["cohort_exact_from"]:
+                self._bump("clock_unverified")
+                return self._reject("clock_unverified", ("clock_unverified",), "G", source)
+            if (self._health["admission_stopped"] or
+                    self._health["N_res"] >= self._limits["max_records"] or
+                    self._health["N_total"] == _MAX_COUNT):
                 return self._reject_admission(received_at)
             source = _SOURCE_CANON[source]
             schema, contract = REGISTRY[source]
-            previous_seq = self._previous_job.get((source, job_id)) if serial_job else None
+            previous_summary = self._previous_job.get((source, job_id)) if serial_job else None
+            new_job_key = job_id is not None and (source, job_id) not in self._previous_job
             rec = _Record({"epoch": self.epoch, "invocation_id": invocation_id, "source": source,
-                   "seq": len(self._seq) + 1, "started_wall": started_wall, "started_mono": started_mono,
+                   "seq": self._health["N_total"] + 1, "started_wall": started_wall, "started_mono": started_mono,
                    "job_id": job_id, "serial_job": serial_job,
                    "expected_report_schema": schema, "expected_validity_contract": contract,
                    "round_id": None, "linked_report_schema": None, "linked_validity_contract": None,
@@ -1247,51 +1632,66 @@ class RoundLedger:
             # complete field tariff and Q(N+1) before publishing any identity.
             self._budget_refresh()
             candidate_a, candidate_r = self._record_tariff(rec, admitted=False)
-            if (_BUDGET_F + _budget_q(len(self._seq) + 1) + self._budget_d
-                    + self._budget_ar + candidate_a + candidate_r > self._limits["max_resident_bytes"]):
+            if (_BUDGET_F_4 + self._q_charge(self._health["N_res"] + 1,
+                                             len(self._previous_job) + int(new_job_key)) + self._budget_d
+                    + self._budget_ar + self._budget_t + candidate_a + candidate_r
+                    > self._limits["max_resident_bytes"]):
                 return self._reject_admission(received_at)
             self._records[invocation_id] = rec
             self._seq.append(invocation_id)
             self._budget_ar += candidate_a + candidate_r
             self._cohort_index[source].add((started_wall, rec["seq"]))
             if job_id is not None:
-                self._previous_job[(source, job_id)] = rec["seq"]
+                self._previous_job[(source, job_id)] = self._job_summary(rec)
+                self._job_highwater = max(self._job_highwater, len(self._previous_job))
             self._bump("registered_records")
+            self._bump("N_total")
+            self._bump("N_live")
+            self._bump("N_res")
+            self._q_highwater = max(self._q_highwater, self._health["N_res"])
+            self._expiry_index.set(rec["seq"], started_wall + _UNFINISHED_EXPIRY)
+            self._prune_index.reserve(rec["seq"])
             if rec["lifecycle"] in ("awaiting_report", "in_flight"):
                 deadline = started_mono + _OVERDUE
                 self._overdue_index.set(rec["seq"], deadline)
             if not serial_job:
                 return self._result("registered", (rec,))
-            previous = self._records[self._seq[previous_seq - 1]] if previous_seq is not None else None
-            if previous is None or not previous["serial_job"]:
+            previous_id = (self._seq.positions.get(previous_summary["seq"] - 1)
+                           if isinstance(previous_summary, dict) else None)
+            previous = self._records.get(previous_id)
+            if previous_summary is None or not previous_summary["serial_job"]:
                 return self._result("registered", (rec,))
-            earlier = (started_wall < previous["started_wall"] or started_mono < previous["started_mono"])
-            if previous["exit_evidence"] == "wrapper_exited":
-                earlier |= (started_wall < previous["exit_evidence_wall"]
-                            or started_mono < previous["exit_evidence_mono"])
-            if previous["first_digest"] is not None:
-                earlier |= (started_wall < previous["first_finished_wall"]
-                            or started_mono < previous["first_finished_mono"])
+            earlier = (started_wall < previous_summary["started_wall"] or
+                       started_mono < previous_summary["started_mono"])
+            if previous_summary["exit_evidence"] == "wrapper_exited":
+                earlier |= (started_wall < previous_summary["exit_evidence_wall"]
+                            or started_mono < previous_summary["exit_evidence_mono"])
+            if previous_summary["first_finished_wall"] is not None:
+                earlier |= (started_wall < previous_summary["first_finished_wall"]
+                            or started_mono < previous_summary["first_finished_mono"])
             if earlier:
                 diag = _diag(("wrapper_exit_conflict",), "G")
-                _merge_diag(previous["diagnostics"], diag)
+                if previous is not None:
+                    _merge_diag(previous["diagnostics"], diag)
                 self._observe(diag, source)
-            elif previous["first_digest"] is None and previous["exit_evidence"] is None:
-                previous["exit_evidence"] = "next_entry"
-                self._budget_put(previous, "exit_evidence_wall", started_wall)
-                self._budget_put(previous, "exit_evidence_mono", started_mono)
+            elif previous_summary["first_finished_wall"] is None and previous_summary["exit_evidence"] is None:
+                if previous is not None:
+                    previous["exit_evidence"] = "next_entry"
+                    self._budget_put(previous, "exit_evidence_wall", started_wall)
+                    self._budget_put(previous, "exit_evidence_mono", started_mono)
                 codes = ["next_entry"]
-                if previous["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
+                if previous is not None and previous["lifecycle"] in ("awaiting_report", "in_flight", "overdue"):
                     previous["lifecycle"] = "report_unavailable"
                     self._drop_overdue(previous)
                     previous["unavailable_reason"] = "next_entry"
                     codes.extend(("ever_unavailable", "report_unavailable"))
                 diag = _diag(codes, "G")
-                _merge_diag(previous["diagnostics"], diag)
+                if previous is not None:
+                    _merge_diag(previous["diagnostics"], diag)
                 self._observe(diag, source)
             else:
                 diag = _diag()
-            return self._result("registered", (previous, rec), (), diag)
+            return self._result("registered", (previous, rec) if previous is not None else (rec,), (), diag)
 
     def report_init_failed(self, *, epoch: str, invocation_id: str, failed_wall: int,
                            failed_mono: int, received_at: int, received_mono: int) -> dict:
@@ -1303,17 +1703,26 @@ class RoundLedger:
             rec, early = self._early(epoch, invocation_id)
             if early:
                 return early
-            if rec is None:
-                return self._reject("orphan", ("orphan_init_failure",), "G", global_=True)
+            if rec is None and invocation_id not in self._tombs:
+                return self._missing_event("orphan_init_failure")
             if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
-                return self._origin_reject(rec["source"])
+                return self._origin_reject(rec["source"] if rec is not None else None)
             codes = self._clock_codes(received_at, received_mono)
             if codes:
                 return self._clock_reject(codes)
+            if rec is not None and (failed_wall < rec["started_wall"] or failed_mono < rec["started_mono"]
+                                    or failed_wall > received_at or failed_mono > received_mono):
+                return self._evidence_time_reject(rec)
+            self._advance_and_close(received_at, received_mono)
+            rec = self._records.get(invocation_id)
+            if rec is None:
+                tomb = self._tombs.get(invocation_id)
+                return (self._expired_event("expired_wrapper", tomb.source) if tomb is not None and tomb.expired
+                        else self._missing_event("orphan_init_failure") if tomb is None
+                        else self._result("duplicate_init_failure", diag=_diag(("duplicate_init_failure",))))
             if (failed_wall < rec["started_wall"] or failed_mono < rec["started_mono"]
                     or failed_wall > received_at or failed_mono > received_mono):
                 return self._evidence_time_reject(rec)
-            self._advance_and_close(received_at, received_mono)
             if rec["init_failed_wall"] is not None:
                 if (failed_wall, failed_mono) == (rec["init_failed_wall"], rec["init_failed_mono"]):
                     return self._record_evidence_event("duplicate_init_failure", rec, ("duplicate_init_failure",))
@@ -1341,19 +1750,28 @@ class RoundLedger:
             rec, early = self._early(epoch, invocation_id)
             if early:
                 return early
-            if rec is None:
-                return self._reject("orphan", ("orphan_wrapper_exit",), "G", global_=True)
+            if rec is None and invocation_id not in self._tombs:
+                return self._missing_event("orphan_wrapper_exit")
             if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
-                return self._origin_reject(rec["source"])
+                return self._origin_reject(rec["source"] if rec is not None else None)
             codes = self._clock_codes(received_at, received_mono)
             if codes:
                 return self._clock_reject(codes)
+            if rec is not None and (exited_wall < rec["started_wall"] or exited_mono < rec["started_mono"]
+                                    or exited_wall > received_at or exited_mono > received_mono):
+                return self._evidence_time_reject(rec)
+            self._advance_and_close(received_at, received_mono)
+            rec = self._records.get(invocation_id)
+            if rec is None:
+                tomb = self._tombs.get(invocation_id)
+                return (self._expired_event("expired_wrapper", tomb.source) if tomb is not None and tomb.expired
+                        else self._missing_event("orphan_wrapper_exit") if tomb is None
+                        else self._result("duplicate_wrapper_exit", diag=_diag(("duplicate_wrapper_exit",))))
             if (exited_wall < rec["started_wall"] or exited_mono < rec["started_mono"]
                     or exited_wall > received_at or exited_mono > received_mono
                     or (rec["exit_evidence"] == "next_entry" and
                         (exited_wall > rec["exit_evidence_wall"] or exited_mono > rec["exit_evidence_mono"]))):
                 return self._evidence_time_reject(rec)
-            self._advance_and_close(received_at, received_mono)
             if rec["exit_evidence"] == "wrapper_exited":
                 if (exited_wall, exited_mono) == (rec["exit_evidence_wall"], rec["exit_evidence_mono"]):
                     return self._record_evidence_event("duplicate_wrapper_exit", rec, ("duplicate_wrapper_exit",))
@@ -1416,10 +1834,12 @@ class RoundLedger:
             if codes:
                 return self._clock_reject(codes, aggregation=True)
             self._advance_and_close(as_of, as_of_mono)
+            if cohort_start < self._health["cohort_exact_from"]:
+                return self._aggregation_reject("cohort_expired", _diag(("cohort_expired",), "G"))
             connection = {name: 0 for name in ("started", "init_failed", "unbound")}
             lifecycle = {name: 0 for name in ("awaiting_report", "in_flight", "overdue",
                                              "report_unavailable", "finalized", "conflicting", "contract_mixed")}
-            damaged = len(self._seq) != len(self._records)
+            damaged = not self._indices_intact()
             total = ever_overdue = ever_unavailable = late_finish_accepted = 0
             if not damaged:
                 overdue_byte, overdue_bit = divmod(_DIAG_INDEX["ever_overdue"], 8)
@@ -1462,6 +1882,57 @@ class RoundLedger:
                 "diagnostics": _diag(), "health": copy.deepcopy(self._health),
             }
 
+    def epoch_cohort_totals(self, *, as_of: int, as_of_mono: int) -> dict:
+        with self._lock:
+            if type(as_of) is not int or type(as_of_mono) is not int:
+                raise TypeError("query integers must be exact int")
+            if not 0 <= as_of <= _MAX_TIME or not 0 <= as_of_mono <= _MAX_TIME:
+                return self._aggregation_reject("invalid_argument", _diag(("invalid_argument",)))
+            if self._health["index_error"]:
+                return self._aggregation_reject("post_close_unverified", _diag(("identity_unverified",), "B", True))
+            if self._health["last_received_at"] is None and as_of < self.aggregation_started_at:
+                return self._origin_reject(query=True)
+            codes = self._clock_codes(as_of, as_of_mono)
+            if codes:
+                return self._clock_reject(codes, aggregation=True)
+            self._advance_and_close(as_of, as_of_mono)
+            if not self._indices_intact():
+                self._health["index_error"] = True
+                return self._aggregation_reject("post_close_unverified", _diag(("identity_unverified",), "B", True))
+            sources = []
+            for source in _SOURCES:
+                frozen = self._frozen[source]
+                connection = dict(frozen["connection"])
+                lifecycle = dict(frozen["lifecycle"])
+                overdue, unavailable, late = (frozen[key] for key in
+                                                ("ever_overdue", "ever_unavailable", "late_finish_accepted"))
+                live = 0
+                for rec in self._records.values():
+                    if rec["source"] != source:
+                        continue
+                    live += 1
+                    connection[rec["connection"]] += 1
+                    lifecycle[rec["lifecycle"]] += 1
+                    for key in ("ever_overdue", "ever_unavailable", "late_finish_accepted"):
+                        bit = _DIAG_INDEX[key]
+                        amount = bool(rec._diag_bits[bit // 8] & (1 << (bit % 8)))
+                        if key == "ever_overdue": overdue += amount
+                        elif key == "ever_unavailable": unavailable += amount
+                        else: late += amount
+                total = frozen["invocations"] + live
+                sources.append({"source": source, "expected_report_schema": REGISTRY[source][0],
+                                "validity_contract": REGISTRY[source][1], "registered_invocations": total,
+                                "frozen_invocations": frozen["invocations"], "live_invocations": live,
+                                "connection_counts": connection, "lifecycle_counts": lifecycle,
+                                "ever_overdue": overdue, "ever_unavailable": unavailable,
+                                "late_finish_accepted": late,
+                                "equations_hold": {"connection": sum(connection.values()) == total,
+                                                   "lifecycle": sum(lifecycle.values()) == total}})
+            return {"classification": "snapshot", "as_of": as_of, "as_of_mono": as_of_mono,
+                    "process_epoch": self.epoch, "cohort_exact_from": self._health["cohort_exact_from"],
+                    "frozen_through": self._health["frozen_through"], "sources": sources,
+                    "diagnostics": _diag(), "health": copy.deepcopy(self._health)}
+
     def link_round(self, *, epoch: str, invocation_id: str, round_id: str, report_schema: int,
                    validity_contract: str, received_at: int, received_mono: int) -> dict:
         with self._lock:
@@ -1473,23 +1944,36 @@ class RoundLedger:
             rec, early = self._early(epoch, invocation_id)
             if early:
                 return early
-            if rec is None:
-                return self._reject("orphan", ("orphan_start",), "G", global_=True)
-            fault = self._check_identity(invocation_id, rec, (rec["source"], round_id))
-            if fault:
-                return fault
+            if rec is None and invocation_id not in self._tombs:
+                return self._missing_event("orphan_start")
+            if rec is not None:
+                fault = self._check_identity(invocation_id, rec, (rec["source"], round_id))
+                if fault:
+                    return fault
             if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
-                return self._origin_reject(rec["source"])
+                return self._origin_reject(rec["source"] if rec is not None else None)
             codes = self._clock_codes(received_at, received_mono)
             if codes:
                 return self._clock_reject(codes)
             self._advance_and_close(received_at, received_mono)
+            rec = self._records.get(invocation_id)
+            if rec is None:
+                tomb = self._tombs.get(invocation_id)
+                if tomb is None:
+                    return self._missing_event("orphan_start")
+                if tomb.expired:
+                    return self._expired_event("expired_start", tomb.source)
+                if tomb.round_id == round_id:
+                    return self._result("relinked_same", diag=_diag(("relinked_same",)))
+                return self._reject("identity_conflict", ("identity_conflict",), "F", tomb.source)
             other_id = self._owners.get((rec["source"], round_id))
             if (rec["connection"] == "started" and rec["round_id"] != round_id) or (other_id and other_id != invocation_id):
                 involved = [rec]
                 if other_id and other_id != invocation_id:
-                    involved.append(self._records[other_id])
-                return self._conflict(involved)
+                    other = self._records.get(other_id)
+                    if other is not None:
+                        involved.append(other)
+                return self._conflict(involved, self._tombs.get(other_id))
             if rec["connection"] == "init_failed":
                 return self._conflict((rec,))
             if rec["connection"] == "started":
@@ -1533,20 +2017,40 @@ class RoundLedger:
             rec, early = self._early(epoch, invocation_id)
             if early:
                 return early
-            if rec is None:
-                return self._reject("orphan", ("orphan_finish",), "G", global_=True)
-            fault = self._check_identity(invocation_id, rec, (rec["source"], round_id))
-            if fault:
-                return fault
+            if rec is None and invocation_id not in self._tombs:
+                return self._missing_event("orphan_finish")
+            if rec is not None:
+                fault = self._check_identity(invocation_id, rec, (rec["source"], round_id))
+                if fault:
+                    return fault
             if self._health["last_received_at"] is None and received_at < self.aggregation_started_at:
-                return self._origin_reject(rec["source"])
+                return self._origin_reject(rec["source"] if rec is not None else None)
             codes = self._clock_codes(received_at, received_mono)
             if codes:
                 return self._clock_reject(codes)
+            if (rec is not None and rec["connection"] == "started" and rec["round_id"] == round_id
+                    and rec["first_digest"] is None
+                    and rec["started_wall"] <= finished_wall <= received_at
+                    and rec["started_mono"] <= finished_mono <= received_mono):
+                close_at = (finished_wall // _MINUTE + 1) * _MINUTE + _CLOSE_DELAY
+                close_mono = finished_mono + close_at - finished_wall
+                if ((self._cumulative_end is not None and
+                     (finished_wall // _MINUTE + 1) * _MINUTE <= self._cumulative_end and
+                     received_at < close_at) or
+                        (received_at >= close_at and received_mono < close_mono)):
+                    return self._clock_reject(("clock_unverified",))
             self._advance_and_close(received_at, received_mono)
+            rec = self._records.get(invocation_id)
+            if rec is None:
+                tomb = self._tombs.get(invocation_id)
+                if tomb is None:
+                    return self._missing_event("orphan_finish")
+                return self._finish_tomb(tomb, round_id, report_schema, validity_contract,
+                                         finished_wall, finished_mono, selected_summary, telemetry_error_present)
             other_id = self._owners.get((rec["source"], round_id))
             if other_id is not None and other_id != invocation_id:
-                return self._conflict((rec, self._records[other_id]))
+                other = self._records.get(other_id)
+                return self._conflict((rec, other)) if other is not None else self._conflict((rec,), self._tombs.get(other_id))
             if rec["connection"] == "init_failed":
                 return self._conflict((rec,))
             if rec["connection"] == "unbound":
@@ -1629,9 +2133,14 @@ class RoundLedger:
             self._budget_put(rec, "first_finished_mono", finished_mono)
             self._budget_put(rec, "first_digest", candidate)
             self._drop_overdue(rec)
+            self._expiry_index.set(rec["seq"], None)
             self._budget_put(rec, "bucket_start", bucket)
             self._budget_put(rec, "bucket_end", bucket + _MINUTE)
             self._budget_put(rec, "close_at", bucket + _MINUTE + _CLOSE_DELAY)
+            rec.retire_at = rec["close_at"]
+            rec.retire_mono = finished_mono + rec["close_at"] - finished_wall
+            rec.prune_at = rec.retire_at + _W_LATE
+            rec.expired = False
             if received_at >= rec["close_at"]:
                 rec["closed"] = True
                 rec["lifecycle"] = "finalized"
@@ -1640,7 +2149,11 @@ class RoundLedger:
                 codes = ["post_close_finish"]
                 if prior_unavailable:
                     codes.append("late_finish_accepted")
-                return self._finish_record("post_close_finish", (rec,), [], _diag(codes, "G"))
+                result = self._finish_record("post_close_finish", (rec,), [], _diag(codes, "G"))
+                self._retire(rec, received_at, received_mono)
+                result["records"] = []
+                result["health"] = copy.deepcopy(self._health)
+                return result
             self._close_index.set(rec["seq"], rec["bucket_end"])
             detail, detail_codes = _detail_and_codes(rec["source"], report_schema, validity_contract,
                                                      selected_summary, telemetry_error_present)
@@ -1652,8 +2165,8 @@ class RoundLedger:
                                            _diag(("report_unavailable", "aggregation_capacity", *detail_codes), "G"))
             detail_charge = _budget_graph_size(detail)
             self._budget_refresh()
-            if (_BUDGET_F + _budget_q(len(self._seq)) + self._budget_d
-                    + self._budget_ar + detail_charge > self._limits["max_resident_bytes"]):
+            if (_BUDGET_F_4 + self._q_charge() + self._budget_d
+                    + self._budget_ar + self._budget_t + detail_charge > self._limits["max_resident_bytes"]):
                 self._stop_admission(received_at)
                 rec["inclusion"] = "open_excluded"
                 self._isolate(rec, "aggregation_capacity", [])
@@ -1681,6 +2194,18 @@ class RoundLedger:
             rec = self._records.get(invocation_id)
             return rec.to_dict() if rec is not None else None
 
+    def identity_status(self, invocation_id: str) -> str:
+        with self._lock:
+            if type(invocation_id) is not str:
+                raise TypeError("invocation_id must be exact str")
+            if _strict_bytes(invocation_id, 128) is not None:
+                raise ValueError("invalid invocation_id")
+            if invocation_id in self._records:
+                return "live"
+            if invocation_id in self._tombs:
+                return "tombstoned"
+            return "expired_or_untracked"
+
     def _query_result(self, classification, entries, next_seq, diag):
         return {"classification": classification, "as_of": self._health["last_received_at"],
                 "as_of_mono": self._health["last_received_mono"], "entries": copy.deepcopy(list(entries)),
@@ -1692,7 +2217,7 @@ class RoundLedger:
                 if type(value) is not int:
                     raise TypeError("query integers must be exact int")
             if (not 0 <= as_of <= _MAX_TIME or not 0 <= as_of_mono <= _MAX_TIME
-                    or not 0 <= after_seq <= self._limits["max_records"] or not 1 <= limit <= 16):
+                    or not 0 <= after_seq <= _MAX_COUNT or not 1 <= limit <= 16):
                 return self._query_result("invalid_argument", (), None, _diag(("invalid_argument",)))
             if self._health["index_error"]:
                 return self._query_result("post_close_unverified", (), None,
@@ -1704,7 +2229,7 @@ class RoundLedger:
             if codes:
                 return self._clock_reject(codes, query=True)
             self._advance_and_close(as_of, as_of_mono)
-            if len(self._seq) != len(self._records):
+            if not self._indices_intact():
                 self._health["index_error"] = True
                 diag = _diag(("identity_unverified",), "B", True)
                 self._observe(diag, global_=True)
@@ -1736,7 +2261,7 @@ class RoundLedger:
             if codes:
                 return self._clock_reject(codes, aggregation=True)
             self._advance_and_close(as_of, as_of_mono)
-            if len(self._seq) != len(self._records):
+            if not self._indices_intact():
                 self._health["index_error"] = True
                 diag = _diag(("identity_unverified",), "B", True)
                 self._observe(diag, global_=True)
@@ -1769,7 +2294,8 @@ class RoundLedger:
                 "close_policy": {"window_minutes": 60, "grace_minutes": 10, "bucket_minutes": 1},
                 "thresholds": {"insufficient_evidence": 0.9},
                 "post_close_diagnostics": {**self._post_close,
-                                           "cumulative_evidence_uncertain": self._cumulative_evidence_uncertain},
+                                           "cumulative_evidence_uncertain": self._cumulative_evidence_uncertain,
+                                           "first_uncertain_event": copy.deepcopy(self._first_uncertain_event)},
                 "health": copy.deepcopy(self._health),
             }
 
@@ -1790,6 +2316,13 @@ class RoundLedger:
             if type(invocation_id) is not str or type(fault) is not str:
                 raise TypeError("fault arguments must be exact str")
             rec = self._records.get(invocation_id)
+            tomb = self._tombs.get(invocation_id)
+            if (rec is None and tomb is not None and fault == "missing_owner" and
+                    not self._health["index_error"] and tomb.connection == "started" and
+                    self._owners.get((tomb.source, tomb.round_id)) == invocation_id):
+                del self._owners[(tomb.source, tomb.round_id)]
+                self._owned_ids.discard(invocation_id)
+                return
             if (fault not in ("missing_record", "missing_owner") or self._health["index_error"]
                     or rec is None or rec["connection"] != "started"
                     or self._owners.get((rec["source"], rec["round_id"])) != invocation_id):
@@ -1797,13 +2330,14 @@ class RoundLedger:
             if fault == "missing_record":
                 del self._records[invocation_id]
                 key = (rec["source"], rec["job_id"])
-                if rec["job_id"] is not None and self._previous_job.get(key) == rec["seq"]:
+                summary = self._previous_job.get(key)
+                if rec["job_id"] is not None and isinstance(summary, dict) and summary["seq"] == rec["seq"]:
                     self._previous_job.pop(key)
                     for old_id in reversed(self._seq[:rec["seq"] - 1]):
                         if old_id in self._records:
                             old_rec = self._records[old_id]
                             if (old_rec["source"], old_rec["job_id"]) == key:
-                                self._previous_job[key] = old_rec["seq"]
+                                self._previous_job[key] = self._job_summary(old_rec)
                                 break
             else:
                 del self._owners[(rec["source"], rec["round_id"])]

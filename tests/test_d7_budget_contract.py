@@ -47,7 +47,8 @@ class L:
 
     def _check(self):
         state = self.ld.budget_state()
-        assert state["E"] == state["F"] + state["Q"] + state["D"] + state["AR"], state
+        # r3 §6 budget 계상: tombstone TR 를 새 항으로 포함한다.
+        assert state["E"] == state["F"] + state["Q"] + state["D"] + state["AR"] + state["TR"], state
         assert state["E"] <= state["B"], state
         recomputed = sum(sum(self.ld.record_charge(inv).values()) for inv in dict.keys(self.ld._records))
         assert state["AR"] == recomputed, (state["AR"], recomputed)       # 증분 합계가 Record 별 재계산과 어긋나지 않는다(구현 검토 보강 — Codex 재승인 대상)
@@ -134,9 +135,11 @@ def _all_transitions(led, n=12):
 def test_budget_state_shape_and_default_b():
     led = L()
     s = led.ld.budget_state()
-    assert set(s) == {"F", "Q", "D", "AR", "E", "B", "N"}
+    # r3 §6 budget 계상: 기존 키와 새 F₄/Q₄/T/Rᵀ·상주 계수를 모두 요구한다.
+    assert set(s) == {"F", "Q", "D", "AR", "E", "B", "N", "F_4", "Q_4", "A", "R", "T", "R_T",
+                      "TR", "N_total", "N_live", "N_tomb", "N_res", "capacity", "rebuild_count"}
     assert s["B"] == B_DEFAULT and s["N"] == 0 and s["D"] == 0 and s["AR"] == 0
-    assert s["E"] == s["F"] + s["Q"] and s["F"] > 0
+    assert s["E"] == s["F"] + s["Q"] + s["TR"] and s["F"] > 0
     assert led.ld.record_charge("nope") is None
 
 
