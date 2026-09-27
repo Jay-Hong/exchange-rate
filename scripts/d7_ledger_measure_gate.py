@@ -26,6 +26,7 @@ import time
 import tracemalloc
 from collections import Counter
 from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
 
@@ -58,7 +59,7 @@ def offline_app_import():
 
 with offline_app_import():
     from app.d7_round_axes import PAIRS, REGISTRY  # noqa: E402
-    from app.d7_round_ledger import RoundLedger  # noqa: E402
+    from app.d7_round_ledger import RoundLedger, _budget_q  # noqa: E402
 
 CAP = 131072
 DETAIL_CAP = 2048
@@ -74,6 +75,11 @@ SUMMARY = {
     "writing": {p: {"status": "not_attempted", "reason": "not_submitted_to_writer"} for p in PAIRS},
     "final_db": "not_checked",
 }
+_gate_resident_budget = ContextVar("d7_gate_resident_budget", default=62_914_560)
+
+
+class HeadroomUnverified(RuntimeError):
+    """A public-API fixture could not establish the planned byte reserve."""
 
 
 class CountedRecords(dict):
@@ -152,10 +158,12 @@ def rid(i):
     return f"m{i:06d}"
 
 
-def new_ledger(limit):
+def new_ledger(limit, max_resident_bytes=None):
     return RoundLedger(EPOCH, aggregation_started_at=T - MINUTE,
                        limits={"max_records": limit, "max_retained_details": min(DETAIL_CAP, limit),
-                               "max_detail_bytes": 4096})
+                               "max_detail_bytes": 4096,
+                               "max_resident_bytes": (max_resident_bytes if max_resident_bytes is not None
+                                                      else _gate_resident_budget.get())})
 
 
 def register_args(i, wall=T, *, source=SOURCE):
@@ -185,8 +193,15 @@ def large_summary(chars):
 
 def fill(limit, *, linked=0, finalized=0, stop=None, unavailable_rest=False):
     ledger = new_ledger(limit)
-    for i in range(stop if stop is not None else limit):
+    target = stop if stop is not None else limit
+    for i in range(target):
         result = ledger.register(**register_args(i))
+        if result["classification"] == "admission_stopped":
+            if ledger._health["N_res"] >= limit:
+                raise RuntimeError(f"fixture slot stop before target {i}")
+            ledger._gate_fixture_n = i
+            ledger._gate_fixture_stop = "byte"
+            return ledger
         if result["classification"] != "registered":
             raise RuntimeError(f"fixture register {i}: {result['classification']}")
         if i < linked or i < finalized:
@@ -197,12 +212,101 @@ def fill(limit, *, linked=0, finalized=0, stop=None, unavailable_rest=False):
             result = ledger.finish(**finish_args(i))
             if result["classification"] != "finalized":
                 raise RuntimeError(f"fixture finish {i}: {result['classification']}")
-        elif unavailable_rest:
+        elif unavailable_rest and i >= max(linked, finalized):
             result = ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i),
                                                failed_wall=T, failed_mono=T,
                                                received_at=T, received_mono=T)
             if result["classification"] != "report_init_failed":
                 raise RuntimeError(f"fixture unavailable {i}: {result['classification']}")
+    ledger._gate_fixture_n = target
+    ledger._gate_fixture_stop = "limit"
+    return ledger
+
+
+def _headroom_tariffs(summary=SUMMARY, *, reverse=False, need_detail=False):
+    """Measure one public registration and normalized detail on a small origin."""
+    record_charges = []
+    for source in (REGISTRY if reverse else (SOURCE,)):
+        candidate = new_ledger(1)
+        before = candidate.budget_state()
+        if candidate.register(**register_args(0, source=source))["classification"] != "registered":
+            raise HeadroomUnverified("headroom tariff registration unavailable")
+        registered = candidate.budget_state()
+        record_charges.append((registered["E"] - before["E"])
+                              - (registered["Q_4"] - before["Q_4"]))
+    record_charge = max(record_charges)
+    if not need_detail:
+        return record_charge, 4096
+    probe = new_ledger(1)
+    if probe.register(**register_args(0))["classification"] != "registered":
+        raise HeadroomUnverified("headroom tariff detail registration unavailable")
+    if probe.link_round(**link_args(0))["classification"] != "linked":
+        raise HeadroomUnverified("headroom tariff link unavailable")
+    if probe.finish(**finish_args(0, summary=summary))["classification"] != "finalized":
+        raise HeadroomUnverified("headroom tariff detail unavailable")
+    detail_charge = max(4096, probe.budget_state()["D"])
+    if record_charge <= 0 or detail_charge <= 0:
+        raise HeadroomUnverified("headroom tariff nonpositive")
+    return record_charge, detail_charge
+
+
+def fill_with_headroom(limit, *, accepts, detail_accepts=0, linked=0,
+                       finalized=0, unavailable_rest=False, summary=SUMMARY,
+                       reserve_slots=0, reverse=False, min_existing=0):
+    """Build an API origin that leaves charged room for its measured accepts."""
+    if accepts < 1 or detail_accepts < 0 or reserve_slots < 0 or min_existing < 0:
+        raise ValueError("invalid headroom plan")
+    record_charge, detail_charge = _headroom_tariffs(
+        summary, reverse=reverse, need_detail=bool(detail_accepts or finalized))
+    ledger = new_ledger(limit)
+    target = max(0, limit - reserve_slots)
+    for i in range(target):
+        budget = ledger.budget_state()
+        # Include the next fixture insertion as well as every later measured
+        # acceptance; otherwise the last fixture insertion spends a probe's room.
+        planned = min(limit, i + accepts + 1)
+        future_q = _budget_q(planned) + 512 * planned - budget["Q_4"]
+        required = (record_charge * (accepts + 1) + max(0, future_q)
+                    + detail_charge * detail_accepts)
+        if budget["B"] - budget["E"] < required:
+            ledger._gate_fixture_n = i
+            ledger._gate_fixture_stop = "byte_headroom"
+            ledger._gate_headroom_bytes = budget["B"] - budget["E"]
+            if i < min_existing:
+                ledger._gate_headroom_error = "insufficient room for required existing identities"
+            return ledger
+        kwargs = register_args(i, source=_reverse_source(i) if reverse else SOURCE)
+        if reverse:
+            kwargs["started_wall"] = T - i
+        result = ledger.register(**kwargs)
+        if result["classification"] == "admission_stopped":
+            ledger._gate_fixture_n = i
+            ledger._gate_fixture_stop = "byte_headroom"
+            ledger._gate_headroom_bytes = budget["B"] - budget["E"]
+            ledger._gate_headroom_error = "registration rejected before planned headroom stop"
+            return ledger
+        if result["classification"] != "registered":
+            raise RuntimeError(f"headroom fixture register {i}: {result['classification']}")
+        if i < linked or i < finalized:
+            result = ledger.link_round(**link_args(i))
+            if result["classification"] != "linked":
+                raise RuntimeError(f"headroom fixture link {i}: {result['classification']}")
+        if i < finalized:
+            result = ledger.finish(**finish_args(i))
+            if result["classification"] != "finalized":
+                if result["classification"] == "report_unavailable":
+                    raise HeadroomUnverified(f"headroom fixture finish {i}: report_unavailable")
+                raise RuntimeError(f"headroom fixture finish {i}: {result['classification']}")
+        elif unavailable_rest and i >= max(linked, finalized):
+            result = ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i),
+                                               failed_wall=T, failed_mono=T,
+                                               received_at=T, received_mono=T)
+            if result["classification"] != "report_init_failed":
+                raise RuntimeError(f"headroom fixture unavailable {i}: {result['classification']}")
+    ledger._gate_fixture_n = target
+    ledger._gate_fixture_stop = "limit"
+    if target < min_existing:
+        raise HeadroomUnverified("slot limit below required existing identities")
     return ledger
 
 
@@ -530,7 +634,9 @@ def memory_state(name, limit, *, detail_count=0, release=False, reject=False, qu
     tracemalloc.start()
     before, _ = tracemalloc.get_traced_memory()
     baseline = tracemalloc.take_snapshot()
-    ledger = fill(limit, finalized=detail_count)
+    ledger = (fill_with_headroom(limit, accepts=1, detail_accepts=detail_count,
+                                 finalized=detail_count, min_existing=detail_count)
+              if detail_count else fill(limit))
     if release:
         result = ledger.aggregation_snapshot(as_of=T + 71 * MINUTE,
                                              as_of_mono=T + 71 * MINUTE)
@@ -552,6 +658,8 @@ def memory_state(name, limit, *, detail_count=0, release=False, reject=False, qu
     owned = owned_graph(ledger)
     outcome = "FAIL" if owned["bytes"] > OWNED_LIMIT else "UNVERIFIED" if owned["unknown_types"] or quick else "PASS"
     data = {"name": name, "slots": len(ledger._records),
+            "fixture_n": ledger._gate_fixture_n,
+            "fixture_stop": ledger._gate_fixture_stop,
             "retained_details": ledger._health["retained_details"], "D": 0, "K": 0,
             "visits": None, "timing": None, "owned_graph": owned,
             "tracemalloc": {"current_before": before, "current_after": current,
@@ -692,26 +800,25 @@ def _adapter_status(*, limit, demand, warmup, samples, quick, clock=None):
                                                        time_gate=time_gate, correct=correct)})
 
         reports = []
-        ledger = new_ledger(limit)
-        for i in range(limit):
-            result = ledger.register(**register_args(i))
-            if result["classification"] != "registered":
-                raise RuntimeError("adapter maximum-slot fixture registration failed")
-            if i < demand:
-                report = BankReport(NullLogger(), "bs", PAIRS, ("official_primary",))
-                report.finish()
-                projected = adapter.report_link_args(report, expected_source="bs",
-                                                     received_at=T, received_mono=T)
-                if not projected.get("ok"):
-                    raise RuntimeError("adapter link projection failed")
-                linked = ledger.link_round(epoch=EPOCH, invocation_id=rid(i),
-                                           round_id=projected["round_id"],
-                                           report_schema=projected["report_schema"],
-                                           validity_contract=projected["validity_contract"],
-                                           received_at=T, received_mono=T)
-                if linked["classification"] != "linked":
-                    raise RuntimeError("adapter combined fixture link failed")
-                reports.append(report)
+        ledger = fill_with_headroom(limit, accepts=1, detail_accepts=demand,
+                                    min_existing=demand)
+        if ledger._gate_fixture_n < demand or hasattr(ledger, "_gate_headroom_error"):
+            raise HeadroomUnverified("adapter combined origin lacks finish headroom")
+        for i in range(demand):
+            report = BankReport(NullLogger(), "bs", PAIRS, ("official_primary",))
+            report.finish()
+            projected = adapter.report_link_args(report, expected_source="bs",
+                                                 received_at=T, received_mono=T)
+            if not projected.get("ok"):
+                raise RuntimeError("adapter link projection failed")
+            linked = ledger.link_round(epoch=EPOCH, invocation_id=rid(i),
+                                       round_id=projected["round_id"],
+                                       report_schema=projected["report_schema"],
+                                       validity_contract=projected["validity_contract"],
+                                       received_at=T, received_mono=T)
+            if linked["classification"] != "linked":
+                raise RuntimeError("adapter combined fixture link failed")
+            reports.append(report)
 
         ledger_gc = clone_ledger(ledger)
 
@@ -735,11 +842,16 @@ def _adapter_status(*, limit, demand, warmup, samples, quick, clock=None):
             return {"classification": outcome["classification"], "projection": projection,
                     "ledger_result": outcome}
 
-        rows.append(measure_case("adapter_bank_to_finish", ledger, "combined",
-                                 list(enumerate(reports)), expected="finalized",
-                                 invoke=lambda pair: combined_on(ledger, pair),
-                                 gc_invoke=lambda pair: combined_on(ledger_gc, pair),
-                                 quick=quick, warmup=warmup, samples=samples, clock=clock))
+        combined = measure_case("adapter_bank_to_finish", ledger, "combined",
+                                list(enumerate(reports)), expected="finalized",
+                                invoke=lambda pair: combined_on(ledger, pair),
+                                gc_invoke=lambda pair: combined_on(ledger_gc, pair),
+                                quick=quick, warmup=warmup, samples=samples, clock=clock)
+        combined["fixture_n"] = ledger._gate_fixture_n
+        combined["fixture_stop"] = ledger._gate_fixture_stop
+        if ledger._gate_fixture_stop == "byte_headroom":
+            combined["headroom_bytes"] = ledger._gate_headroom_bytes
+        rows.append(combined)
         adapter_state = ("FAIL" if any(x["status"] == "FAIL" for x in observations + rows)
                          else "UNVERIFIED" if quick or any(x["status"] != "PASS"
                                                              for x in observations + rows) else "PASS")
@@ -770,13 +882,16 @@ def time_verdict(*, d, k, gc_disabled, required_n, full_cohort):
 
 
 def _gated_rows(rows):
-    return [row for row in rows if not row["name"].startswith("resident_")
+    return [row for row in rows if row.get("partial_acceptance_applicable", True)
+            and not row["name"].startswith("resident_")
             and row["name"] != "record_baseline" and row.get("status") != "baseline"]
 
 
 def overall_status(rows, *, adapter_status, mode):
     gated = [row for row in rows if row["name"] != "record_baseline"
-             and row.get("status") != "baseline"]
+             and row.get("status") != "baseline"
+             and not (row.get("kind") == "rebuild" and row.get("status") == "N/A"
+                      and row.get("reason") == "N/A (no rebuild in this implementation)")]
     if adapter_status == "FAIL" or any(row["status"] == "FAIL" for row in gated):
         return "FAIL"
     if (mode != "full" or not gated or adapter_status != "PASS"
@@ -909,6 +1024,8 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
             try:
                 ledger, method, kwargs, target = provider(index)
             except Exception as exc:
+                if isinstance(exc, HeadroomUnverified):
+                    row["reason"] = f"headroom: {exc}"
                 row["sample_checks"]["failures"].append(
                     {"index": index, "reason": f"prepare:{type(exc).__name__}:{exc}",
                      "D": None, "K": None, "target": None})
@@ -927,6 +1044,18 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
             if index == 1:
                 row["slots"] = slots_before
                 row["retained_details"] = old_health
+                if hasattr(ledger, "_gate_fixture_n"):
+                    row["fixture_n"] = ledger._health["N_total"]
+                    row["fixture_stop"] = ledger._gate_fixture_stop
+                    if row["fixture_stop"] == "byte_headroom":
+                        row["headroom_bytes"] = ledger._gate_headroom_bytes
+                        if hasattr(ledger, "_gate_headroom_error"):
+                            row["reason"] = ledger._gate_headroom_error
+                    if row["fixture_stop"] == "byte":
+                        if expected_d == ledger._limits["max_records"]:
+                            row["D"] = row["fixture_n"]
+                        if expected_k == ledger._limits["max_records"]:
+                            row["K"] = row["fixture_n"]
             old_counted = None
             if phase == "visit":
                 old_counted = ledger._records
@@ -992,6 +1121,11 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                 reasons.append(f"classification:{classification} expected:{expected}")
             want_d = expected_d(index - 1) if callable(expected_d) else expected_d
             want_k = expected_k(index - 1) if callable(expected_k) else expected_k
+            if row.get("fixture_stop") == "byte":
+                if expected_d == ledger._limits["max_records"]:
+                    want_d = row["fixture_n"]
+                if expected_k == ledger._limits["max_records"]:
+                    want_k = row["fixture_n"]
             if want_d is not None and observed_d != want_d:
                 reasons.append(f"D:{observed_d} expected:{want_d}")
             if want_k is not None and observed_k != want_k:
@@ -1053,7 +1187,8 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
     k_for_time = max(k_values) if k_values else 0
     row["time_gate"] = time_verdict(d=d_for_time, k=k_for_time,
                                     gc_disabled=row["timing"]["gc_disabled"],
-                                    required_n=required, full_cohort=full_cohort)
+                                    required_n=required,
+                                    full_cohort=full_cohort and row.get("fixture_stop") != "byte")
     if len(durations["gc_enabled"]) < required:
         row["time_gate"] = "UNVERIFIED"
     row["visit_gate"] = "UNVERIFIED" if visits is None else "FAIL" if visit_over_limit else "PASS"
@@ -1066,6 +1201,12 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
             row["copy_equivalence"] = {**provider.proof, "original_unchanged": False}
     row["status"] = scenario_status(visit_gate=row["visit_gate"], temp_gate=row["temporary_gate"],
                                     time_gate=row["time_gate"], correct=row["classification_ok"])
+    if row.get("reason", "").startswith("headroom:") or row.get("fixture_stop") == "byte_headroom" and (
+            row.get("reason") or any(
+                item["classification"] in ("admission_stopped", "report_unavailable")
+                for item in row["sample_observations"])):
+        row["status"] = "UNVERIFIED"
+        row["reason"] = row.get("reason") or "planned headroom did not admit an acceptance"
     if row.get("copy_mutation") and not any(
             failure["reason"] != "split clone mutated API-built original"
             for failure in row["sample_checks"]["failures"]) and all(
@@ -1166,32 +1307,32 @@ def _at(wall):
     return {"as_of": wall, "as_of_mono": wall}
 
 
+def _detail_origin_target(limit, requested):
+    """Keep a small injected byte budget from hiding an origin's actual stop."""
+    record, detail = _headroom_tariffs(need_detail=True)
+    available = _gate_resident_budget.get() - new_ledger(1).budget_state()["F_4"]
+    # Q growth and the last registration need room in addition to the detail.
+    feasible = max(1, available // (record + detail + 2048))
+    return min(requested, limit, feasible)
+
+
 def _close_base(limit, n=1):
-    ledger = new_ledger(limit)
-    for i in range(limit):
-        if ledger.register(**register_args(i))["classification"] != "registered":
-            raise RuntimeError("close fixture registration")
-    for i in range(n):
-        if ledger.link_round(**link_args(i))["classification"] != "linked":
-            raise RuntimeError("close fixture link")
-        if ledger.finish(**finish_args(i))["classification"] != "finalized":
-            raise RuntimeError("close fixture finish")
-    for i in range(n, limit):
-        ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i), failed_wall=T,
-                                  failed_mono=T, received_at=T, received_mono=T)
+    actual_target = _detail_origin_target(limit, n)
+    ledger = fill(limit, finalized=actual_target, unavailable_rest=True)
+    ledger._gate_detail_target_requested = n
+    ledger._gate_detail_target_actual = min(actual_target, ledger._gate_fixture_n)
     return ledger
 
 
 def _multi_bucket_base(limit):
-    n = min(DETAIL_CAP, limit)
-    ledger = new_ledger(limit)
-    for i in range(limit):
-        ledger.register(**register_args(i))
-    for i in range(n):
-        ledger.link_round(**link_args(i))
-    for i in range(n, limit):
-        ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i), failed_wall=T,
-                                  failed_mono=T, received_at=T, received_mono=T)
+    requested = min(DETAIL_CAP, limit)
+    n = _detail_origin_target(limit, requested)
+    ledger = fill_with_headroom(limit, accepts=1, detail_accepts=n, linked=n,
+                                unavailable_rest=True, min_existing=n)
+    if ledger._gate_fixture_n < n:
+        raise HeadroomUnverified("multi-bucket detail identities unavailable")
+    ledger._gate_detail_target_requested = requested
+    ledger._gate_detail_target_actual = n
     for i in range(n):
         bucket = T + (i * 3 // n) * MINUTE
         kwargs = finish_args(i, wall=bucket)
@@ -1210,14 +1351,11 @@ def _exact_provider(limit):
         nonlocal ledger
         offset = index % count
         if offset == 0:
-            ledger = new_ledger(limit)
-            for i in range(limit):
-                ledger.register(**register_args(i))
-            for i in range(count):
-                ledger.link_round(**link_args(i))
-            for i in range(count, limit):
-                ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i), failed_wall=T,
-                                          failed_mono=T, received_at=T, received_mono=T)
+            ledger = fill_with_headroom(limit, accepts=1, detail_accepts=count,
+                                        linked=count, unavailable_rest=True,
+                                        min_existing=count)
+            if ledger._gate_fixture_n < count:
+                raise HeadroomUnverified("exact boundary identities unavailable")
             for i in range(count):
                 instant = T + i * MINUTE
                 kwargs = finish_args(i, wall=instant)
@@ -1233,12 +1371,19 @@ def _exact_provider(limit):
 
 def _reverse_base(limit, stop=None):
     ledger = new_ledger(limit)
-    for i in range(limit if stop is None else stop):
+    target = limit if stop is None else stop
+    for i in range(target):
         kwargs = register_args(i, source=_reverse_source(i))
         kwargs["started_wall"] = T - i
         result = ledger.register(**kwargs)
+        if result["classification"] == "admission_stopped" and ledger._health["N_res"] < limit:
+            ledger._gate_fixture_n = i
+            ledger._gate_fixture_stop = "byte"
+            return ledger
         if result["classification"] != "registered":
             raise RuntimeError(f"reverse registration {i}: {result['classification']}")
+    ledger._gate_fixture_n = target
+    ledger._gate_fixture_stop = "limit"
     return ledger
 
 
@@ -1248,34 +1393,47 @@ def _reverse_source(i):
 
 
 def _stale_base(limit):
+    third = min(limit // 3, _detail_origin_target(limit, min(DETAIL_CAP, max(1, limit // 3))))
     ledger = new_ledger(limit)
     for i in range(limit):
         kwargs = register_args(i)
-        if i >= 2 * limit // 3:
+        if i >= 2 * third:
             kwargs.update(job_id="serial", serial_job=True)
-        ledger.register(**kwargs)
-        if i < limit // 3:
-            ledger.link_round(**link_args(i))
-            ledger.finish(**finish_args(i))
-        elif i < 2 * limit // 3:
+        result = ledger.register(**kwargs)
+        if result["classification"] == "admission_stopped" and ledger._health["N_res"] < limit:
+            ledger._gate_fixture_n = i
+            ledger._gate_fixture_stop = "byte"
+            break
+        if result["classification"] != "registered":
+            raise RuntimeError(f"stale fixture register {i}: {result['classification']}")
+        if i < third:
+            if ledger.link_round(**link_args(i))["classification"] != "linked":
+                raise RuntimeError("stale fixture link")
+            if ledger.finish(**finish_args(i))["classification"] != "finalized":
+                raise HeadroomUnverified("stale fixture detail unavailable")
+        elif i < 2 * third:
             ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i), failed_wall=T,
                                       failed_mono=T, received_at=T, received_mono=T)
+    else:
+        ledger._gate_fixture_n = limit
+        ledger._gate_fixture_stop = "limit"
     # The final serial successor has no next entry, so remove its B deadline too.
-    ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(limit - 1), failed_wall=T,
-                              failed_mono=T, received_at=T, received_mono=T)
+    if ledger._gate_fixture_n > 2 * third:
+        last = ledger._gate_fixture_n - 1
+        ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(last), failed_wall=T,
+                                  failed_mono=T, received_at=T, received_mono=T)
     return ledger
 
 
 def _recent_base(limit, one_inside=False):
-    n = min(DETAIL_CAP, limit)
-    ledger = new_ledger(limit)
-    for i in range(limit):
-        ledger.register(**register_args(i))
-    for i in range(n):
-        ledger.link_round(**link_args(i))
-    for i in range(n, limit):
-        ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i), failed_wall=T,
-                                  failed_mono=T, received_at=T, received_mono=T)
+    requested = min(DETAIL_CAP, limit)
+    n = _detail_origin_target(limit, requested)
+    ledger = fill_with_headroom(limit, accepts=1, detail_accepts=n,
+                                linked=n, unavailable_rest=True, min_existing=n)
+    if ledger._gate_fixture_n < n:
+        raise HeadroomUnverified("recent detail identities unavailable")
+    ledger._gate_detail_target_requested = requested
+    ledger._gate_detail_target_actual = n
     for i in range(n):
         instant = T + 60 * MINUTE if one_inside and i == n - 1 else T
         kwargs = finish_args(i, wall=instant)
@@ -1289,13 +1447,10 @@ def _recent_base(limit, one_inside=False):
 
 def _recent_seq_order_base(limit):
     """Finish two records in bucket order opposite to registration order."""
-    ledger = fill(limit)
-    for i in (0, 1):
-        if ledger.link_round(**link_args(i))["classification"] != "linked":
-            raise RuntimeError(f"recent order fixture link {i}")
-    for i in range(2, limit):
-        ledger.report_init_failed(epoch=EPOCH, invocation_id=rid(i), failed_wall=T,
-                                  failed_mono=T, received_at=T, received_mono=T)
+    ledger = fill_with_headroom(limit, accepts=1, detail_accepts=2,
+                                linked=2, unavailable_rest=True, min_existing=2)
+    if ledger._gate_fixture_n < 2:
+        raise HeadroomUnverified("recent order identities unavailable")
     earlier = copy.deepcopy(SUMMARY)
     earlier["collection"][PAIRS[0]]["reason"] = "parse_failed"
     for i, instant, summary in ((1, T, earlier), (0, T + MINUTE, SUMMARY)):
@@ -1308,13 +1463,15 @@ def _recent_seq_order_base(limit):
 
 
 def _wait_base(limit):
-    ledger = new_ledger(limit)
-    for i in range(limit):
-        ledger.register(**register_args(i))
-        ledger.link_round(**link_args(i))
+    detail_target = _detail_origin_target(limit, min(DETAIL_CAP, limit))
+    ledger = fill_with_headroom(limit, accepts=1, detail_accepts=detail_target,
+                                linked=limit, min_existing=detail_target)
+    for i in range(ledger._gate_fixture_n):
         outcome = ledger.finish(**finish_args(i))
         if outcome["classification"] not in ("finalized", "report_unavailable"):
             raise RuntimeError(f"wait fixture finish {i}: {outcome['classification']}")
+    ledger._gate_detail_target_requested = min(DETAIL_CAP, limit)
+    ledger._gate_detail_target_actual = ledger._health["retained_details"]
     return ledger
 
 
@@ -1331,15 +1488,15 @@ def _tail_register_provider(limit, samples, warmup, *, reverse=False):
         if index < probe_count:
             offset = index
             if index == 0:
-                ledger = (_reverse_base(limit, limit-probe_count) if reverse
-                          else fill(limit, stop=limit-probe_count))
-            target = limit-probe_count+offset
+                ledger = fill_with_headroom(limit, accepts=probe_count,
+                                            reserve_slots=probe_count, reverse=reverse)
+            target = ledger._gate_fixture_n + offset
         else:
             offset = (index-probe_count) % samples
             if offset == 0:
-                ledger = (_reverse_base(limit, limit-samples) if reverse
-                          else fill(limit, stop=limit-samples))
-            target = limit-samples+offset
+                ledger = fill_with_headroom(limit, accepts=samples,
+                                            reserve_slots=samples, reverse=reverse)
+            target = ledger._gate_fixture_n + offset
         kwargs = register_args(target, source=_reverse_source(target) if reverse else SOURCE)
         if reverse:
             kwargs["started_wall"] = T-target
@@ -1355,7 +1512,10 @@ def _finish_reprepared_provider(limit, total, summary=SUMMARY):
         nonlocal ledger
         target = index % detail_cap
         if ledger is None or target == 0:
-            ledger = fill(limit, linked=min(total, detail_cap))
+            group_count = min(total, detail_cap)
+            ledger = fill_with_headroom(limit, accepts=group_count,
+                                        detail_accepts=group_count, linked=group_count,
+                                        summary=summary, min_existing=group_count)
         return ledger, "finish", finish_args(target, summary=summary), rid(target)
     return provide
 
@@ -1368,12 +1528,15 @@ def _scenario_specs(limit, samples, warmup):
             exception=None, full_cohort=False):
         specs.append((name, provider, plan, classification, d, k, validate, exception, full_cohort))
 
-    add("link_round_accept", _repeat_provider(lambda: fill(limit), "link_round",
+    add("link_round_accept", _repeat_provider(lambda: fill_with_headroom(limit, accepts=total,
+        min_existing=total), "link_round",
         lambda i: link_args(i)), "sequential", "linked")
-    add("report_init_failed_accept", _repeat_provider(lambda: fill(limit), "report_init_failed",
+    add("report_init_failed_accept", _repeat_provider(lambda: fill_with_headroom(limit, accepts=total,
+        min_existing=total), "report_init_failed",
         lambda i: dict(epoch=EPOCH, invocation_id=rid(i), failed_wall=T, failed_mono=T,
                        received_at=T, received_mono=T)), "sequential", "report_init_failed")
-    add("wrapper_exited_accept", _repeat_provider(lambda: fill(limit), "wrapper_exited",
+    add("wrapper_exited_accept", _repeat_provider(lambda: fill_with_headroom(limit, accepts=total,
+        min_existing=total), "wrapper_exited",
         lambda i: dict(epoch=EPOCH, invocation_id=rid(i), exited_wall=T, exited_mono=T,
                        received_at=T, received_mono=T)), "sequential", "wrapper_exited")
     add("contributions_tail_empty", _repeat_provider(lambda: fill(limit), "contributions_open",
@@ -1426,12 +1589,18 @@ def _scenario_specs(limit, samples, warmup):
         return ledger
     add("close_same_time_requery", _repeat_provider(closed_base, "aggregation_snapshot",
         _at(T + 71 * MINUTE)), "repeat")
-    add("mass_close_boundary", _repeat_provider(lambda: _close_base(limit, close_n),
-        "aggregation_snapshot", _at(T + 71 * MINUTE), independent=True, split=True), "independent_split_copy", d=close_n,
+    mass_close_actual = {"n": close_n}
+    def mass_close_base():
+        ledger = _close_base(limit, close_n)
+        mass_close_actual["n"] = ledger._gate_detail_target_actual
+        return ledger
+    add("mass_close_boundary", _repeat_provider(mass_close_base,
+        "aggregation_snapshot", _at(T + 71 * MINUTE), independent=True, split=True),
+        "independent_split_copy", d=lambda _index: mass_close_actual["n"],
         validate=lambda ledger, outcome, error, before: (
             "detail not released or cumulative count incorrect"
             if error or ledger._health["retained_details"] != 0
-            or ledger._cumulative_rounds[SOURCE]["rounds"] != close_n else None))
+            or ledger._cumulative_rounds[SOURCE]["rounds"] != mass_close_actual["n"] else None))
     add("mass_overdue", _repeat_provider(lambda: fill(limit), "aggregation_snapshot",
         _at(T + 15 * MINUTE), independent=True), "full_deepcopy", d=limit,
         exception="mass_overdue_report_only_100_per_gc")
@@ -1459,13 +1628,18 @@ def _scenario_specs(limit, samples, warmup):
             "stale same-time requery changed tail or B"
             if error or outcome["entries"] or outcome["next_seq"] is not None
             or ledger._overdue_index.data[1] is not None else None))
-    multi = lambda: _multi_bucket_base(limit)
+    multi_actual = {"n": close_n}
+    def multi():
+        ledger = _multi_bucket_base(limit)
+        multi_actual["n"] = ledger._gate_detail_target_actual
+        return ledger
     add("multi_bucket_close", _repeat_provider(multi, "aggregation_snapshot",
-        _at(T + 73 * MINUTE), independent=True, split=True), "independent_split_copy", d=close_n,
+        _at(T + 73 * MINUTE), independent=True, split=True), "independent_split_copy",
+        d=lambda _index: multi_actual["n"],
         validate=lambda ledger, outcome, error, before: (
             "multi-bucket close did not release/count once"
             if error or ledger._health["retained_details"] != 0
-            or ledger._cumulative_rounds[SOURCE]["rounds"] != close_n else None))
+            or ledger._cumulative_rounds[SOURCE]["rounds"] != multi_actual["n"] else None))
     def multi_closed():
         ledger = multi()
         ledger.aggregation_snapshot(**_at(T+73*MINUTE))
@@ -1492,7 +1666,8 @@ def _scenario_specs(limit, samples, warmup):
             "cumulative_end": ledger._cumulative_end,
             "cumulative_rounds": copy.deepcopy(ledger._cumulative_rounds),
             "cumulative_rows": copy.deepcopy(ledger._cumulative_rows),
-            "candidate_records": {rid(i): copy.deepcopy(ledger._records[rid(i)]) for i in range(close_n)},
+            "candidate_records": {rid(i): copy.deepcopy(ledger._records[rid(i)])
+                                  for i in range(ledger._gate_detail_target_actual)},
         }
     def check_atomic(ledger, outcome, error, before):
         saved = ledger._gate_atomic_before
@@ -1500,7 +1675,8 @@ def _scenario_specs(limit, samples, warmup):
                "open": tuple(ledger._open_seq), "recent": ledger._recent_buckets,
                "health": ledger._health, "cumulative_end": ledger._cumulative_end,
                "cumulative_rounds": ledger._cumulative_rounds, "cumulative_rows": ledger._cumulative_rows,
-               "candidate_records": {rid(i): ledger._records[rid(i)] for i in range(close_n)}}
+               "candidate_records": {rid(i): ledger._records[rid(i)]
+                                     for i in range(ledger._gate_detail_target_actual)}}
         return None if type(error).__name__ == "CumulativeMergeFailureForTest" and saved == now else "merge failure changed published state"
     add("multi_bucket_close_merge_failure", _failure_provider(multi, "aggregation_snapshot",
         _at(T + 73 * MINUTE), arm_failure), "full_deepcopy",
@@ -1515,11 +1691,12 @@ def _scenario_specs(limit, samples, warmup):
         else:
             raise RuntimeError("merge failure injection did not fail")
     add("multi_bucket_close_retry", _failure_provider(multi, "aggregation_snapshot",
-        _at(T + 73 * MINUTE), consume_failure), "full_deepcopy", d=close_n,
+        _at(T + 73 * MINUTE), consume_failure), "full_deepcopy",
+        d=lambda _index: multi_actual["n"],
         validate=lambda ledger, outcome, error, before: (
             "retry did not close once"
             if error or ledger._health["retained_details"] != 0
-            or ledger._cumulative_rounds[SOURCE]["rounds"] != close_n else None))
+            or ledger._cumulative_rounds[SOURCE]["rounds"] != multi_actual["n"] else None))
     def multi_retried():
         ledger = multi()
         consume_failure(ledger, 0)
@@ -1531,8 +1708,14 @@ def _scenario_specs(limit, samples, warmup):
     add("reverse_cohort_register_tail", _tail_register_provider(limit, samples, warmup, reverse=True),
         "sequential_reprepared", "registered")
     cohort_sources = tuple(REGISTRY)
-    narrow_indices = {source: max((i for i in range(limit) if _reverse_source(i) == source),
-                                  default=None) for source in cohort_sources}
+    narrow_indices = {}
+    def reverse_base():
+        ledger = _reverse_base(limit)
+        actual = ledger._gate_fixture_n
+        narrow_indices.update({source: max((i for i in range(actual)
+                                            if _reverse_source(i) == source), default=None)
+                               for source in cohort_sources})
+        return ledger
     def empty_cohort_args(index):
         return dict(source=cohort_sources[index % len(cohort_sources)],
                     cohort_start=T+1, cohort_end=T+2, as_of=T+2, as_of_mono=T+2)
@@ -1548,9 +1731,9 @@ def _scenario_specs(limit, samples, warmup):
         expected_count = int(narrow_indices[outcome["source"]] is not None)
         return ("narrow cohort count" if outcome["registered_invocations"] != expected_count
                 else None)
-    add("reverse_cohort_empty", _repeat_provider(lambda: _reverse_base(limit), "cohort_snapshot",
+    add("reverse_cohort_empty", _repeat_provider(reverse_base, "cohort_snapshot",
         empty_cohort_args), "repeat")
-    add("reverse_cohort_narrow", _repeat_provider(lambda: _reverse_base(limit), "cohort_snapshot",
+    add("reverse_cohort_narrow", _repeat_provider(reverse_base, "cohort_snapshot",
         narrow_cohort_args), "repeat", k=lambda index: 1 if narrow_indices[
             cohort_sources[index % len(cohort_sources)]] is not None else 0,
         validate=check_narrow_cohort)
@@ -1582,13 +1765,24 @@ def _scenario_specs(limit, samples, warmup):
             _failure_provider(lambda: fill(limit, linked=1), method, kwargs, missing),
             "full_deepcopy", "post_close_unverified",
             validate=check_first_query_diagnostics)
-    add("open_end_cursor", _repeat_provider(lambda: fill(limit, finalized=close_n),
+    add("open_end_cursor", _repeat_provider(lambda: fill(limit),
         "contributions_open", dict(as_of=T, as_of_mono=T, after_seq=limit, limit=16)), "repeat",
         validate=lambda ledger, outcome, error, before: (
             "nonempty end cursor" if error or outcome["entries"] or outcome["next_seq"] is not None else None))
     cursor = {}
     def open_last_base():
-        ledger = fill(limit, finalized=min(DETAIL_CAP, limit - 1), unavailable_rest=True)
+        desired = min(DETAIL_CAP, limit - 1)
+        record_charge, detail_charge = _headroom_tariffs(need_detail=True)
+        available = _gate_resident_budget.get() - new_ledger(1).budget_state()["E"]
+        # Keep the original large-detail origin when its charges fit; a tight
+        # byte budget still needs one open entry to test the cursor boundary.
+        if desired * (record_charge + detail_charge + 1024) + detail_charge > available:
+            desired = 1
+        ledger = fill_with_headroom(limit, accepts=1, detail_accepts=1,
+                                    finalized=desired, unavailable_rest=True,
+                                    min_existing=desired)
+        if hasattr(ledger, "_gate_headroom_error"):
+            raise HeadroomUnverified(ledger._gate_headroom_error)
         last_open_seq = ledger._open_seq[-1]
         cursor.update(after_seq=last_open_seq, last_open_seq=last_open_seq)
         return ledger
@@ -1649,7 +1843,7 @@ def _scenario_specs(limit, samples, warmup):
             if rec["detail"] is not None}
     def check_wait_candidates(ledger, outcome, error, before):
         if (error or tuple(ledger._close_index.due(T+MINUTE)) != ledger._gate_wait_candidates
-                or len(ledger._gate_wait_candidates) != limit):
+                or len(ledger._gate_wait_candidates) != ledger._gate_fixture_n):
             return "A pending candidates changed"
         target_end = ((wait_as_of - 70 * MINUTE) // MINUTE) * MINUTE
         if ledger._cumulative_end != target_end:
@@ -1705,23 +1899,706 @@ def _normalize_adapter_row(row, samples, warmup):
     return row
 
 
+# S5a-4c fixtures use public transitions. Private storage is read only for the
+# identity and capacity audits; no fixture is manufactured by assigning fields.
+PRESSURE_NAMES = tuple(f"pressure_{track}_{kind}" for track in ("p0", "p1", "p2", "p3")
+                       for kind in ("short_ascii", "ascii128", "unicode128"))
+PRESSURE_AUX = ("pressure_unique_job_keys_byte_stop", "pressure_slot_first_small_limit")
+CHURN_NAMES = tuple(f"churn_{track}_{kind}" for track in ("most_finished", "most_unfinished")
+                    for kind in ("short_ascii", "ascii128", "unicode128")) + (
+    "churn_init_failed_most_finished_unicode128", "churn_init_failed_most_unfinished_unicode128",
+    "churn_burst_ascii128", "churn_burst_unicode128")
+
+
+def _fixture_id(index, kind, prefix="p"):
+    stem = f"{prefix}{index:08d}"
+    if kind == "short_ascii":
+        return stem
+    if kind == "ascii128":
+        return stem + "a" * (128 - len(stem))
+    # Mixed non-ASCII, exactly 128 UTF-8 bytes; its Python size differs from ASCII.
+    return stem + "한" + "a" * (125 - len(stem))
+
+
+def _register_fixture(ledger, invocation_id, source, wall, job_id=None, serial_job=False):
+    return ledger.register(epoch=EPOCH, invocation_id=invocation_id, source=source,
+                           started_wall=wall, started_mono=wall, received_at=wall,
+                           received_mono=wall, job_id=job_id, serial_job=serial_job)
+
+
+def _link_fixture(ledger, invocation_id, source, wall):
+    schema, contract = REGISTRY[source]
+    return ledger.link_round(epoch=EPOCH, invocation_id=invocation_id,
+                             round_id="round-" + invocation_id[:9],
+                             report_schema=schema, validity_contract=contract,
+                             received_at=wall, received_mono=wall)
+
+
+def _finish_fixture(ledger, invocation_id, source, wall):
+    schema, contract = REGISTRY[source]
+    return ledger.finish(epoch=EPOCH, invocation_id=invocation_id,
+                         round_id="round-" + invocation_id[:9],
+                         report_schema=schema, validity_contract=contract,
+                         finished_wall=wall, finished_mono=wall, selected_summary=SUMMARY,
+                         telemetry_error_present=False, received_at=wall, received_mono=wall)
+
+
+def _init_failed_fixture(ledger, invocation_id, wall):
+    return ledger.report_init_failed(epoch=EPOCH, invocation_id=invocation_id,
+                                     failed_wall=wall, failed_mono=wall,
+                                     received_at=wall, received_mono=wall)
+
+
+def _budget_checkpoint(ledger):
+    gc.collect()
+    budget = ledger.budget_state()
+    graph = owned_graph(ledger)
+    health = ledger._health
+    return {"F_4": budget["F_4"], "Q_4": budget["Q_4"], "D": budget["D"],
+            "A": budget["A"], "R": budget["R"], "T": budget["T"], "R_T": budget["R_T"],
+            "AR": budget["AR"], "TR": budget["TR"], "E": budget["E"], "B": budget["B"],
+            "G": graph["bytes"] if not graph["unknown_types"] else None,
+            "B_minus_E": budget["B"] - budget["E"],
+            "N_total": budget["N_total"], "N_live": budget["N_live"],
+            "N_tomb": budget["N_tomb"], "N_res": budget["N_res"],
+            "capacity": budget["capacity"], "rebuild_count": budget["rebuild_count"],
+            "unknown_types": graph["unknown_types"]}
+
+
+def _budget_checkpoint_without_graph(budget):
+    """Keep a pre-call public budget when no pre-call graph was captured."""
+    return {"F_4": budget["F_4"], "Q_4": budget["Q_4"], "D": budget["D"],
+            "A": budget["A"], "R": budget["R"], "T": budget["T"], "R_T": budget["R_T"],
+            "AR": budget["AR"], "TR": budget["TR"], "E": budget["E"], "B": budget["B"],
+            "G": None, "B_minus_E": budget["B"] - budget["E"],
+            "N_total": budget["N_total"], "N_live": budget["N_live"],
+            "N_tomb": budget["N_tomb"], "N_res": budget["N_res"],
+            "capacity": budget["capacity"], "rebuild_count": budget["rebuild_count"],
+            "unknown_types": ["pre_rejection_graph_not_captured"]}
+
+
+def _job_counts(counter):
+    return [{"source": s, "job_id": j, "registrations": n}
+            for (s, j), n in sorted(counter.items())]
+
+
+def _identity_absent(ledger, invocation_id):
+    if invocation_id in ledger._records or invocation_id in ledger._tombs or invocation_id in ledger._owned_ids:
+        return False
+    if invocation_id in ledger._seq.positions.values():
+        return False
+    if any(invocation_id == owner for owner in ledger._owners.values()):
+        return False
+    seq = ledger._health["N_total"] + 1
+    if any(seq in getattr(ledger, "_" + name + "_index").slots
+           for name in ("close", "overdue", "expiry", "prune")):
+        return False
+    if any(seq == pair[1] for index in ledger._cohort_index.values()
+           for block in index.blocks for pair in block):
+        return False
+    return True
+
+
+def _post_latch_existing_transitions(ledger, *, kind, n_last, wall, predecessor_id,
+                                     predecessor_job, candidate_index):
+    """Exercise existing identities on the latched origin through public APIs."""
+    transitions = {}
+    before_record = ledger.record(predecessor_id)
+    before_job = copy.deepcopy(ledger._previous_job.get((SOURCE, predecessor_job)))
+    serial_candidate = _fixture_id(candidate_index, kind)
+    serial_result = _register_fixture(ledger, serial_candidate, SOURCE, wall,
+                                      job_id=predecessor_job, serial_job=True)
+    after_record = ledger.record(predecessor_id)
+    after_job = ledger._previous_job.get((SOURCE, predecessor_job))
+    transitions["next_entry"] = (
+        "predecessor_unchanged" if before_record is not None and before_job is not None
+        and serial_result["classification"] == "admission_stopped"
+        and _identity_absent(ledger, serial_candidate)
+        and before_record["lifecycle"] == after_record["lifecycle"]
+        and before_record["exit_evidence"] == after_record["exit_evidence"]
+        and before_job == after_job else "predecessor_changed")
+
+    available = [invocation_id for invocation_id in reversed(tuple(ledger._records))
+                 if (rec := ledger.record(invocation_id)) is not None
+                 and rec["connection"] == "unbound"
+                 and rec["lifecycle"] in ("awaiting_report", "in_flight")]
+    if len(available) < 4:
+        return {key: transitions.get(key, "existing_id_unavailable") for key in (
+            "link_round", "report_init_failed", "wrapper_exited", "next_entry",
+            "overdue", "finish", "late_finish", "close", "post_close_duplicate")}
+    first_id, late_id, init_id, exit_id = available[:4]
+    transitions["link_round"] = _link_fixture(ledger, first_id, SOURCE, wall)["classification"]
+    _link_fixture(ledger, late_id, SOURCE, wall)
+    transitions["report_init_failed"] = _init_failed_fixture(ledger, init_id, wall)["classification"]
+    transitions["wrapper_exited"] = ledger.wrapper_exited(
+        epoch=EPOCH, invocation_id=exit_id, exited_wall=wall, exited_mono=wall,
+        received_at=wall, received_mono=wall)["classification"]
+
+    overdue_at = wall + 15 * MINUTE
+    ledger.aggregation_snapshot(as_of=overdue_at, as_of_mono=overdue_at)
+    overdue_record = ledger.record(late_id)
+    transitions["overdue"] = (overdue_record["lifecycle"] if overdue_record is not None
+                              else "existing_id_unavailable")
+    finish_at = wall + 71 * MINUTE
+    ledger.aggregation_snapshot(as_of=finish_at, as_of_mono=finish_at)
+    # An admission stop can leave less than a detail charge of free capacity.
+    # Existing unavailable transitions release their unused record reserve.
+    for invocation_id in available[4:]:
+        budget = ledger.budget_state()
+        if budget["B"] - budget["E"] >= 7_000:
+            break
+        _init_failed_fixture(ledger, invocation_id, finish_at)
+    transitions["finish"] = _finish_fixture(ledger, first_id, SOURCE, finish_at)["classification"]
+
+    close_at = finish_at + 71 * MINUTE
+    ledger.aggregation_snapshot(as_of=close_at, as_of_mono=close_at)
+    closed_record = ledger.record(first_id)
+    closed_tomb = ledger._tombs.get(first_id)
+    transitions["close"] = ("closed" if (closed_record is not None and closed_record["closed"])
+                            or (closed_tomb is not None and not closed_tomb.expired)
+                            else "not_closed")
+    schema, contract = REGISTRY[SOURCE]
+    transitions["post_close_duplicate"] = ledger.finish(
+        epoch=EPOCH, invocation_id=first_id, round_id="round-" + first_id[:9],
+        report_schema=schema, validity_contract=contract,
+        finished_wall=finish_at, finished_mono=finish_at, selected_summary=SUMMARY,
+        telemetry_error_present=False, received_at=close_at,
+        received_mono=close_at)["classification"]
+    transitions["late_finish"] = _finish_fixture(ledger, late_id, SOURCE, close_at)["classification"]
+    return transitions
+
+
+def _post_latch_job_predecessor(ledger, *, kind, n_last, wall, candidate_index):
+    """The byte-limited unique-key control preserves its previous job summary."""
+    predecessor_job = f"job{n_last - 1:08d}"
+    before = copy.deepcopy(ledger._previous_job.get((SOURCE, predecessor_job)))
+    candidate_id = _fixture_id(candidate_index, kind)
+    result = _register_fixture(ledger, candidate_id, SOURCE, wall,
+                               job_id=predecessor_job, serial_job=True)
+    unchanged = (before is not None and result["classification"] == "admission_stopped"
+                 and _identity_absent(ledger, candidate_id)
+                 and before == ledger._previous_job.get((SOURCE, predecessor_job)))
+    return {"next_entry": "predecessor_unchanged" if unchanged else "predecessor_changed"}
+
+
+def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
+                         fixture_detail_divisor=1, _capacity_observer=None,
+                         _stop_requested=None, _progress=None):
+    if name not in PRESSURE_NAMES + PRESSURE_AUX:
+        raise ValueError("unknown pressure fixture")
+    if not 1 <= limit <= CAP or fixture_detail_divisor < 1:
+        raise ValueError("invalid pressure fixture scale")
+    if name == "pressure_slot_first_small_limit":
+        fixture_limit, kind, track = min(limit, 128), "short_ascii", "slot_aux"
+        max_resident_bytes = 62_914_560
+    elif name == "pressure_unique_job_keys_byte_stop":
+        fixture_limit, kind, track = limit, "short_ascii", "job_aux"
+    else:
+        fixture_limit = limit
+        _, track, kind = name.split("_", 2)
+    requested = 512 if track == "p2" else 2048 if track == "p3" else 0
+    if requested and fixture_limit < 2:
+        raise ValueError("detail fixture needs a probe slot")
+    target = min((requested + fixture_detail_divisor - 1) // fixture_detail_divisor,
+                 DETAIL_CAP, fixture_limit - 1) if requested else 0
+    ledger = new_ledger(fixture_limit, max_resident_bytes)
+    states, sources, jobs = Counter(), Counter(), Counter()
+    failures = []
+    first, before, after, n_last, control = None, None, None, None, None
+    interrupted = False
+    # The unique-key input advances both clocks so retired identity does not
+    # masquerade as a slot limit. Each key is new, while the control reuses one.
+    for i in range(max(fixture_limit + 1, 100_000) if track == "job_aux" else fixture_limit + 1):
+        if _stop_requested is not None and _stop_requested():
+            interrupted = True
+            break
+        if _progress is not None and i and i % 1000 == 0:
+            _progress(i)
+        wall = T + i * 6 * 60 * MINUTE if track == "job_aux" else T
+        invocation_id = _fixture_id(i, kind)
+        job_id = f"job{i:08d}" if track == "job_aux" else "post_latch_probe" if i == 0 else None
+        kwargs = dict(epoch=EPOCH, invocation_id=invocation_id, source=SOURCE,
+                      started_wall=wall, started_mono=wall, received_at=wall,
+                      received_mono=wall, job_id=job_id, serial_job=job_id is not None)
+        # Capture the precise pre-rejection state; the control is a detached
+        # clone of the public-API-built history and does not alter the original.
+        pre_health = ledger._health.copy()
+        pre_budget = ledger.budget_state()
+        pre_job_absent = job_id is None or (SOURCE, job_id) not in ledger._previous_job
+        next_jobs = len(ledger._previous_job) + int(pre_job_absent and job_id is not None)
+        next_q = ledger._q_charge(pre_budget["N_res"] + 1, next_jobs)
+        possible_rejection = (pre_budget["N_res"] >= fixture_limit or
+                              pre_budget["B"] - pre_budget["E"] <=
+                              max(0, next_q - pre_budget["Q_4"]) + 64_000)
+        pre_identity_absent = _identity_absent(ledger, invocation_id) if possible_rejection else False
+        alternate = (clone_ledger(ledger) if track == "job_aux" and i > 0
+                     and possible_rejection else None)
+        if alternate is not None:
+            alternate.aggregation_snapshot(as_of=wall, as_of_mono=wall)
+            pre_health = alternate._health.copy()
+        pre_checkpoint = (_budget_checkpoint(alternate if alternate is not None else ledger)
+                          if possible_rejection else None)
+        result = ledger.register(**kwargs)
+        if result["classification"] == "admission_stopped":
+            n_last = pre_health["N_total"]
+            # The rejection changes health diagnostics, but not any identity index.
+            before = (pre_checkpoint if pre_checkpoint is not None else
+                      _budget_checkpoint_without_graph(pre_budget))
+            if pre_checkpoint is None:
+                failures.append({"index": i, "reason": "pre-rejection checkpoint not captured"})
+            after = _budget_checkpoint(ledger)
+            if _capacity_observer is not None and track != "job_aux":
+                _capacity_observer(ledger, name, "highwater", i)
+            slot = pre_health["N_res"] >= fixture_limit
+            cause = "slot" if slot else "byte"
+            if track == "job_aux" and alternate is not None:
+                old_job = "job00000000"
+                same = alternate.register(**dict(kwargs, job_id=old_job))
+                control = {"source": SOURCE, "job_id": old_job,
+                           "classification": same["classification"]}
+            first = {"candidate_id": invocation_id, "candidate_source": SOURCE,
+                     "candidate_job_id": job_id, "candidate_seq": n_last + 1,
+                     "received_at": wall, "received_mono": wall,
+                     "classification": result["classification"], "cause": cause,
+                     "simultaneous_causes": [cause],
+                     "diagnostics_codes": result["diagnostics"]["codes"],
+                     "admission_stopped_at": ledger._health["admission_stopped_at"],
+                    "no_insertion": (pre_checkpoint is not None and pre_identity_absent and pre_job_absent and
+                                     _identity_absent(ledger, invocation_id) and
+                                     (job_id is None or (SOURCE, job_id) not in ledger._previous_job) and
+                                      all(before[key] == after[key] for key in
+                                          ("F_4", "Q_4", "D", "A", "R", "T", "R_T", "AR", "TR", "E")))}
+            break
+        if result["classification"] != "registered":
+            failures.append({"index": i, "classification": result["classification"]})
+            break
+        states["unbound"] += 1
+        sources[SOURCE] += 1
+        if job_id is not None:
+            jobs[(SOURCE, job_id)] += 1
+        action = ("finished" if i < target else
+                  "linked" if track in ("p1", "p2", "p3") and i % 20 < 4 else
+                  "init_failed" if track in ("p1", "p2", "p3") and 4 <= i % 20 < 8 else None)
+        if action == "finished":
+            a = _link_fixture(ledger, invocation_id, SOURCE, wall)
+            b = _finish_fixture(ledger, invocation_id, SOURCE, wall) if a["classification"] == "linked" else a
+            good = a["classification"] == "linked" and b["classification"] == "finalized"
+        elif action == "linked":
+            good = _link_fixture(ledger, invocation_id, SOURCE, wall)["classification"] == "linked"
+        elif action == "init_failed":
+            good = _init_failed_fixture(ledger, invocation_id, wall)["classification"] == "report_init_failed"
+        else:
+            good = True
+        if not good:
+            failures.append({"index": i, "action": action})
+            break
+        if action:
+            states["unbound"] -= 1
+            states[action] += 1
+    if first is None and not interrupted:
+        failures.append({"reason": "no first admission stop"})
+    retained_at_stop = ledger._health["retained_details"]
+    stop_time = ledger._health["admission_stopped_at"]
+    post_result = ledger.register(**dict(kwargs, invocation_id=_fixture_id(i + 1, kind))) if first else None
+    predecessor_id = _fixture_id(0, kind)
+    predecessor_job = "post_latch_probe"
+    transitions = (_post_latch_existing_transitions(
+        ledger, kind=kind, n_last=n_last, wall=wall, predecessor_id=predecessor_id,
+        predecessor_job=predecessor_job, candidate_index=i + 3)
+        if first and n_last and track != "job_aux" else
+        _post_latch_job_predecessor(ledger, kind=kind, n_last=n_last, wall=wall,
+                                    candidate_index=i + 3)
+        if first and n_last else {})
+    released = False
+    if first and track != "job_aux":
+        later = wall + 6 * 60 * MINUTE
+        ledger.aggregation_snapshot(as_of=later, as_of_mono=later)
+        released = ledger.register(**dict(kwargs, invocation_id=_fixture_id(i + 2, kind),
+                                          started_wall=later, started_mono=later,
+                                          received_at=later, received_mono=later))["classification"] == "registered"
+    post = {"attempted": 2 + int(track != "job_aux"),
+            "all_rejected": post_result is not None and post_result["classification"] == "admission_stopped",
+            "first_stop_time_unchanged": ledger._health["admission_stopped_at"] == stop_time,
+            "resumed_after_release": released, "existing_id_transitions": transitions}
+    transition_ok = (transitions == {"next_entry": "predecessor_unchanged"}
+                     if track == "job_aux" else transitions == {
+        "link_round": "linked", "report_init_failed": "report_init_failed",
+        "wrapper_exited": "wrapper_exited", "next_entry": "predecessor_unchanged",
+        "overdue": "overdue", "finish": "finalized", "late_finish": "finalized",
+        "close": "closed", "post_close_duplicate": "post_close_duplicate"})
+    residency_ok = (before is not None and after is not None and
+                    before["N_total"] == after["N_total"] == n_last and
+                    (before["N_res"] < fixture_limit and after["N_res"] < fixture_limit
+                     if track == "job_aux" else
+                     before["N_res"] == after["N_res"] == n_last and
+                     before["N_tomb"] == after["N_tomb"] == 0))
+    valid = (not failures and first is not None and first["no_insertion"] and residency_ok and
+             sum(states.values()) == n_last and
+             not ledger._health["coverage_complete"] and
+             set(ledger._health["uncertain_sources"]) == set(REGISTRY) and
+             before["E"] <= before["B"] and before["G"] is not None and before["G"] <= before["E"] and
+             after["G"] is not None and after["G"] <= after["E"] <= after["B"] and
+             post["all_rejected"] and not post["resumed_after_release"] and post["first_stop_time_unchanged"] and
+             transition_ok and
+             (control is None or control["classification"] == "registered") and
+             (not requested or states["finished"] >= target))
+    detail_shortfall = bool(requested and states["finished"] < target)
+    result = {"name": name, "status": "UNVERIFIED" if interrupted else "PASS" if valid else "UNVERIFIED" if detail_shortfall else
+              "FAIL" if failures or first else "UNVERIFIED",
+              "id_kind": kind, "track": track, "fixture_limit": fixture_limit,
+              "source_registered": dict(sources), "job_key_counts": _job_counts(jobs),
+              "requested_detail_target": requested, "effective_detail_target": target,
+              "retained_details": retained_at_stop,
+              "state_counts": dict(states), "id_utf8_bytes": len(_fixture_id(0, kind).encode()),
+              "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind)),
+              "N_last_accepted": n_last, "first_rejection": first, "before": before,
+              "after": after, "post_latch": post, "sample_failures": failures,
+              "reason": "budget" if interrupted else None if valid else
+              "pressure fixture incomplete or invariant failed"}
+    if track == "job_aux":
+        result["control_existing_key"] = control
+    return result
+
+
+def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary):
+    snapshot = ledger.aggregation_snapshot(as_of=received_at, as_of_mono=received_at)
+    cursor = ledger.contributions_open(as_of=received_at, as_of_mono=received_at,
+                                       after_seq=0, limit=1)
+    h = ledger._health
+    budget = _budget_checkpoint(ledger)
+    return {"kind": kind, "minute_index": minute_index, "received_at": received_at,
+            "received_mono": received_at, "scheduled_registered": scheduled,
+            "auxiliary_registered": auxiliary, "N_total": h["N_total"],
+            "N_live": h["N_live"], "N_tomb": h["N_tomb"], "N_res": h["N_res"],
+            "retained_details": h["retained_details"], "budget": budget,
+            "last_received_at": h["last_received_at"], "last_received_mono": h["last_received_mono"],
+            "cumulative_end": snapshot.get("cumulative_end"), "cursor_after_seq": 0,
+            "cursor_next_seq": cursor.get("next_seq"),
+            "cohort_exact_from": h["cohort_exact_from"], "frozen_through": h["frozen_through"],
+            "coverage_complete": h["coverage_complete"], "uncertain_sources": list(h["uncertain_sources"]),
+            "admission_stopped": h["admission_stopped"], "admission_stopped_at": h["admission_stopped_at"],
+            "rebuild_count": budget["rebuild_count"],
+            "capacity_charged_bytes": budget["capacity"]["charged_bytes"]}
+
+
+def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
+                      churn_minutes=10_080, churn_stride_minutes=1,
+                      fixture_detail_divisor=1, _capacity_observer=None,
+                      _stop_requested=None, _progress=None):
+    if name not in CHURN_NAMES or not 1 <= limit <= CAP:
+        raise ValueError("unknown churn fixture or invalid limit")
+    if min(churn_minutes, churn_stride_minutes, fixture_detail_divisor) < 1:
+        raise ValueError("invalid churn scale")
+    burst = name.startswith("churn_burst_")
+    kind = "unicode128" if name.endswith("unicode128") else "ascii128" if name.endswith("ascii128") else "short_ascii"
+    track = "burst" if burst else "most_unfinished" if "most_unfinished" in name else "most_finished"
+    init_variant = name.startswith("churn_init_failed_")
+    if burst and limit < 2:
+        raise ValueError("burst needs a probe slot")
+    target = min((2048 + fixture_detail_divisor - 1) // fixture_detail_divisor,
+                 DETAIL_CAP, limit - 1) if burst else 0
+    ledger = new_ledger(limit, max_resident_bytes)
+    sources, jobs, classes = Counter(), Counter(), Counter()
+    checkpoints = []
+    def add_checkpoint(kind, minute_index, received_at):
+        cp = _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary)
+        checkpoints.append(cp)
+        if _capacity_observer is not None:
+            _capacity_observer(ledger, name, kind, minute_index)
+    auxiliary = scheduled = max_details = 0
+    failure = None
+    schedule_start = T
+    if burst:
+        for i in range(target):
+            if _stop_requested is not None and _stop_requested():
+                failure = {"phase": "budget"}
+                break
+            invocation_id = _fixture_id(i, kind, "b")
+            r = _register_fixture(ledger, invocation_id, SOURCE, T)
+            if r["classification"] != "registered":
+                failure = {"phase": "burst", "index": i, "classification": r["classification"]}
+                break
+            auxiliary += 1
+            sources[SOURCE] += 1
+            a = _link_fixture(ledger, invocation_id, SOURCE, T)
+            b = _finish_fixture(ledger, invocation_id, SOURCE, T) if a["classification"] == "linked" else a
+            if b["classification"] != "finalized":
+                failure = {"phase": "burst_finish", "index": i, "classification": b["classification"]}
+                break
+        max_details = ledger._health["retained_details"]
+        add_checkpoint("detail_open", -1, T)
+        if failure is None:
+            probe = _register_fixture(ledger, _fixture_id(target, kind, "b"), SOURCE, T)
+            if probe["classification"] == "registered":
+                auxiliary += 1
+                sources[SOURCE] += 1
+            else:
+                failure = {"phase": "probe", "classification": probe["classification"]}
+            if failure is None:
+                add_checkpoint("highwater", -1, T)
+        release_at = T + 71 * MINUTE
+        add_checkpoint("detail_released", -1, release_at)
+        schedule_start = T + 7 * 60 * MINUTE
+        ledger.aggregation_snapshot(as_of=schedule_start, as_of_mono=schedule_start)
+    offsets = (0, 7_500_000, 15_000_000, 22_500_000, 30_000_000,
+               37_500_000, 45_000_000, 52_500_000)
+    source_order = ("investing",) * 6 + ("bs", "citi")
+    job_by_source = {"investing": "task_investing", "bs": "task_bs", "citi": "task_citi"}
+    tail = None
+    last_observed_q = ledger._q_charge()
+    for minute in range(churn_minutes):
+        if failure:
+            break
+        if _stop_requested is not None and _stop_requested():
+            failure = {"phase": "budget", "minute": minute}
+            break
+        if _progress is not None and minute and minute % 60 == 0:
+            _progress(minute)
+        base = schedule_start + minute * churn_stride_minutes * MINUTE
+        ledger.aggregation_snapshot(as_of=base, as_of_mono=base)
+        for offset_index, (offset, source) in enumerate(zip(offsets, source_order)):
+            wall = base + offset
+            invocation_id = _fixture_id(scheduled, kind, "c")
+            job = job_by_source[source]
+            r = _register_fixture(ledger, invocation_id, source, wall, job)
+            classes[r["classification"]] += 1
+            if r["classification"] != "registered":
+                failure = {"minute": minute, "offset_index": offset_index,
+                           "classification": r["classification"]}
+                break
+            sources[source] += 1
+            jobs[(source, job)] += 1
+            position = scheduled % 20
+            scheduled += 1
+            finish_count = 4 if track == "most_unfinished" else 16
+            linked_count = 4 if track == "most_unfinished" else 2
+            if position < finish_count:
+                a = _link_fixture(ledger, invocation_id, source, wall)
+                b = _finish_fixture(ledger, invocation_id, source, wall) if a["classification"] == "linked" else a
+                if b["classification"] != "finalized":
+                    failure = {"minute": minute, "phase": "finish", "classification": b["classification"]}
+                    break
+            elif position < finish_count + linked_count:
+                a = _link_fixture(ledger, invocation_id, source, wall)
+                if a["classification"] != "linked":
+                    failure = {"minute": minute, "phase": "link", "classification": a["classification"]}
+                    break
+            elif init_variant and position == finish_count + linked_count:
+                a = _init_failed_fixture(ledger, invocation_id, wall)
+                if a["classification"] != "report_init_failed":
+                    failure = {"minute": minute, "phase": "init_failed", "classification": a["classification"]}
+                    break
+        if failure is None and ledger._q_charge() > last_observed_q:
+            add_checkpoint("highwater", minute, base + offsets[-1])
+            last_observed_q = ledger._q_charge()
+        next_base = schedule_start + (minute + 1) * churn_stride_minutes * MINUTE
+        hour = (base // (60 * MINUTE) + 1) * 60 * MINUTE
+        while hour <= next_base:
+            day_span = 24 * 60 * MINUTE
+            add_checkpoint("hour", minute, hour)
+            if (hour >= schedule_start + day_span and
+                    (hour - schedule_start) // day_span >
+                    (hour - 60 * MINUTE - schedule_start) // day_span):
+                add_checkpoint("day", minute, hour)
+            hour += 60 * MINUTE
+        max_details = max(max_details, ledger._health["retained_details"])
+    if failure is None:
+        tail_time = schedule_start + churn_minutes * churn_stride_minutes * MINUTE
+        full = churn_minutes == 10_080 and churn_stride_minutes == 1
+        add_checkpoint("tail_80640" if full else "tail_before", churn_minutes, tail_time)
+        tail = _register_fixture(ledger, _fixture_id(scheduled, kind, "c"), "investing",
+                                 tail_time, job_by_source["investing"])
+        classes[tail["classification"]] += 1
+        if tail["classification"] == "registered":
+            scheduled += 1
+            sources["investing"] += 1
+            jobs[("investing", job_by_source["investing"])] += 1
+        else:
+            failure = {"phase": "tail", "classification": tail["classification"]}
+        add_checkpoint("tail_80641" if full else "tail_after", churn_minutes, tail_time)
+    valid = (failure is None and scheduled == 8 * churn_minutes + 1 and
+             (not burst or max_details >= target) and
+             ledger._health["registered_records"] == ledger._health["N_total"] == ledger._seq.total and
+             all(cp["N_res"] == cp["N_live"] + cp["N_tomb"] <= limit and
+                 cp["N_total"] == cp["scheduled_registered"] + cp["auxiliary_registered"] and
+                 (churn_stride_minutes != 1 or cp["N_res"] <= 2880 + auxiliary) and
+                 not cp["admission_stopped"] and cp["budget"]["G"] is not None and
+                 cp["budget"]["G"] <= cp["budget"]["E"] <= cp["budget"]["B"]
+                 for cp in checkpoints))
+    return {"name": name, "status": "PASS" if valid else "UNVERIFIED" if failure and
+            failure.get("phase") == "budget" else "FAIL", "id_kind": kind,
+            "state_track": track + ("_init_failed" if init_variant else ""),
+            "job_key_counts": _job_counts(jobs), "id_utf8_bytes": len(_fixture_id(0, kind, "c").encode()),
+            "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, "c")),
+            "minute_batches": churn_minutes, "stride_minutes": churn_stride_minutes,
+            "scheduled_target": 8 * churn_minutes + 1, "scheduled_registered": scheduled,
+            "auxiliary_registered": auxiliary, "N_total_at_tail": ledger._health["N_total"] if tail else None,
+            "source_registered": dict(sources), "requested_detail_target": 2048 if burst else 0,
+            "effective_detail_target": target, "max_retained_details_observed": max_details,
+            "tail_classification": tail["classification"] if tail else None,
+            "checkpoints": checkpoints, "classification_counts": dict(classes),
+            "first_failure": failure, "reason": None if valid else "budget" if failure and
+            failure.get("phase") == "budget" else "churn admission or checkpoint invariant failed"}
+
+
+def _capacity_containers(ledger):
+    items = [("records", ledger._records), ("tombs", ledger._tombs),
+             ("seq.positions", ledger._seq.positions), ("owners", ledger._owners),
+             ("owned_ids", ledger._owned_ids), ("previous_job", ledger._previous_job),
+             ("open_seq", ledger._open_seq), ("recent_buckets", ledger._recent_buckets)]
+    for name in ("close", "overdue", "expiry", "prune"):
+        index = getattr(ledger, "_" + name + "_index")
+        for field in ("data", "seqs", "slots", "free"):
+            items.append((name + "." + field, getattr(index, field)))
+    for source, index in ledger._cohort_index.items():
+        items.extend((("cohort." + source + ".blocks", index.blocks),
+                      ("cohort." + source + ".maxes", index.maxes)))
+        items.extend((f"cohort.{source}.block.{i}", block) for i, block in enumerate(index.blocks))
+    for key, value in ledger._recent_buckets.items():
+        if isinstance(value, (list, dict, set)):
+            items.append((f"recent.{key}", value))
+    for i, (key, summary) in enumerate(ledger._previous_job.items()):
+        items.append((f"previous_job.key.{i}", key))
+        items.append((f"previous_job.summary.{i}", summary))
+    return items
+
+
+def _capacity_point(ledger, baseline_sizes, fixture_name, kind, minute_index):
+    budget = _budget_checkpoint(ledger)
+    seen = set()
+    backings = []
+    actual = 0
+    for name, obj in _capacity_containers(ledger):
+        marker = id(obj)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        size = sys.getsizeof(obj)
+        # Initial fixed allocations belong to F_4. Dynamic growth belongs to
+        # Q_4, including dict dummy slots that persist after deletion.
+        fixed = baseline_sizes.get(name, 0)
+        attributed = max(0, size - fixed)
+        actual += attributed
+        backings.append({"name": name, "object_id": marker, "getsizeof_bytes": size,
+                         "header_accounted_elsewhere_bytes": fixed,
+                         "Q_attributed_bytes": attributed,
+                         "charged_limit_bytes": budget["Q_4"],
+                         "includes_deleted_dummy": isinstance(obj, dict)})
+    h = ledger._health
+    jobs = len(ledger._previous_job)
+    covered = (actual <= budget["Q_4"] and budget["G"] is not None
+               and budget["G"] <= budget["E"] <= budget["B"])
+    return {"fixture_name": fixture_name, "kind": kind, "minute_index": minute_index,
+            "N_total": h["N_total"], "N_res": h["N_res"],
+            "H_res": ledger._q_highwater, "H_job": ledger._job_highwater,
+            "Q_4_bytes": budget["Q_4"], "Q_actual_bytes": actual,
+            "G_bytes": budget["G"], "E_bytes": budget["E"], "B_bytes": budget["B"],
+            "capacity_covered": covered, "resident_covered": budget["G"] is not None and
+            budget["G"] <= budget["E"] <= budget["B"],
+            "container_backings": backings}
+
+
+def _capacity_proof(points):
+    qcap = _budget_q(CAP) + 512 * CAP + 1536 * 12
+    observed = max((p["Q_4_bytes"] for p in points), default=None)
+    actual = max((p["Q_actual_bytes"] for p in points), default=None)
+    status = ("PASS" if points and all(p["capacity_covered"] and p["H_job"] <= 12 for p in points)
+              and observed <= qcap else "UNVERIFIED" if not points else "FAIL")
+    return {"status": status, "formula": "_budget_q(131072)+512*131072+1536*12",
+            "job_key_limit": 12, "H_res": max((p["N_res"] for p in points), default=None),
+            "H_job": max((p["H_job"] for p in points), default=None),
+            "Q_cap_bytes": qcap, "Q_obs_bytes": observed,
+            "Q_actual_max_bytes": actual, "checkpoints": points,
+            "unknown_ownership": [] if all(p["G_bytes"] is not None for p in points) else ["owned_graph"],
+            "reason": None if status == "PASS" else "capacity witness missing or exceeded"}
+
+
+def _calibration_eta(observations, budget_seconds):
+    required = {"legacy_repeat", "pressure", "churn_normal", "churn_burst",
+                "capacity", "resident", "adapter"}
+    available = {item["class_name"] for item in observations
+                 if item["completed_units"] > 0 and item["projected_full_seconds"] > 0}
+    result = {"seconds": None, "uncertainty_seconds": None, "basis": "none",
+              "budget_seconds": budget_seconds, "decision": "unknown", "assumptions": []}
+    if not required <= available:
+        return result
+    seconds = sum(item["projected_full_seconds"] for item in observations)
+    # The reduced fixture's rate is a rough extrapolation. Capacity calls are
+    # also inside pressure/churn elapsed time, so retaining them is conservative.
+    uncertainty = seconds * 0.5
+    result.update(seconds=seconds, uncertainty_seconds=uncertainty,
+                  basis="calibration",
+                  decision="agreement_required" if seconds > 14_400 else "within_budget",
+                  assumptions=["linear projection of each completed small-run fixture to its full unit count",
+                               "capacity observation time is counted separately and within pressure/churn elapsed time",
+                               "50% model uncertainty; same host and runtime are assumed"])
+    return result
+
+
 def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
              budget_seconds=14400, clock=time.perf_counter_ns, wall=time.monotonic,
-             progress=sys.stderr, rows=None):
+             progress=sys.stderr, rows=None, max_resident_bytes=None,
+             pressure_names=None, churn_names=None, churn_minutes=10_080,
+             churn_stride_minutes=1, fixture_detail_divisor=1, calibration=False,
+             budget_agreement_ref=None):
     """Measure the plan; selected scenario rows form a small, non-accepting run."""
     if not 1 <= limit <= CAP or samples < 1 or warmup < 0 or budget_seconds < 0:
         raise ValueError("invalid gate parameter")
+    if quick and calibration or min(churn_minutes, churn_stride_minutes, fixture_detail_divisor) < 1:
+        raise ValueError("invalid mode or fixture scale")
+    default_b = 62_914_560
+    resident_b = default_b if max_resident_bytes is None else max_resident_bytes
+    fixed = new_ledger(1).budget_state()["F_4"]
+    if type(resident_b) is not int or not fixed <= resident_b <= default_b:
+        raise ValueError("invalid resident budget")
     chosen = None if rows is None else tuple(rows)
     if chosen is not None and (not chosen or len(chosen) != len(set(chosen))):
         raise ValueError("rows must be distinct scenario names")
-    if chosen is not None and not quick and (limit, samples, warmup) == (CAP, 1000, 100):
-        raise ValueError("selected rows require small gate parameters")
+    selected_pressure = None if pressure_names is None else tuple(pressure_names)
+    selected_churn = None if churn_names is None else tuple(churn_names)
+    for selected, available in ((selected_pressure, PRESSURE_NAMES + PRESSURE_AUX),
+                                (selected_churn, CHURN_NAMES)):
+        if selected is not None and (not selected or len(selected) != len(set(selected))
+                                     or set(selected) - set(available)):
+            raise ValueError("invalid fixture selection")
+    selected_any = any(x is not None for x in (chosen, selected_pressure, selected_churn))
     if quick and (limit, samples, warmup) == (CAP, 1000, 100):
         limit, samples, warmup = 96, 8, 2
-    mode = ("full_small" if chosen is not None else "quick" if quick else "full"
-            if (limit, samples, warmup) == (CAP, 1000, 100) else "full_small")
+    if quick and (churn_minutes, churn_stride_minutes, fixture_detail_divisor) == (10_080, 1, 1):
+        churn_minutes, churn_stride_minutes, fixture_detail_divisor = 25, 60, 256
+    default_scale = ((limit, samples, warmup, resident_b, churn_minutes, churn_stride_minutes,
+                      fixture_detail_divisor) == (CAP, 1000, 100, default_b, 10_080, 1, 1))
+    if selected_any and default_scale and not quick and not calibration:
+        raise ValueError("selected full run requires a reduced scale")
+    if calibration and default_scale and not selected_any:
+        raise ValueError("calibration requires a selection or reduced scale")
+    mode = "quick" if quick else "calibration" if calibration else "full" if default_scale and not selected_any else "full_small"
+    if mode == "full" and budget_seconds > 14_400 and (
+            not isinstance(budget_agreement_ref, str) or not budget_agreement_ref.strip()):
+        raise ValueError("extended full budget requires agreement reference")
+    budget_token = _gate_resident_budget.set(resident_b)
     started = wall()
     deadline = started + budget_seconds
+    calibration_observations = []
+
+    def note_calibration(class_name, fixture_name, completed_units, projected_full_units,
+                         elapsed_seconds, *, prepare_seconds=0.0, clone_seconds=0.0,
+                         call_seconds=0.0, gc_seconds=0.0, owned_graph_seconds=0.0):
+        if not calibration or completed_units <= 0:
+            return
+        projected_full_units = max(completed_units, projected_full_units)
+        projected = (elapsed_seconds * projected_full_units / completed_units
+                     if completed_units else 0.0)
+        calibration_observations.append({"class_name": class_name, "fixture_name": fixture_name,
+                                         "completed_units": completed_units,
+                                         "elapsed_seconds": elapsed_seconds,
+                                         "prepare_seconds": prepare_seconds,
+                                         "clone_seconds": clone_seconds,
+                                         "call_seconds": call_seconds,
+                                         "gc_seconds": gc_seconds,
+                                         "owned_graph_seconds": owned_graph_seconds,
+                                         "projected_full_units": projected_full_units,
+                                         "projected_full_seconds": projected})
     env = environment()
     env["load_before"] = _load_average()
     audit = audit_record_access()
@@ -1744,6 +2621,12 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             raise ValueError("rows must name scenario measurements")
         specs = [item for item in specs if item[0] in chosen]
         names = [item[0] for item in specs]
+    elif selected_any:
+        specs = []
+        names = []
+    pressure_plan = (PRESSURE_NAMES + PRESSURE_AUX if not selected_any else
+                     selected_pressure or ())
+    churn_plan = CHURN_NAMES if not selected_any else selected_churn or ()
     rows = []
     aborted = "prerequisite" if mode == "full" and not all(prereq.values()) else None
     for name, provider, plan, classification, d, k, validate, exception, full_cohort in specs:
@@ -1758,6 +2641,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         else:
             target_count = 2 + warmup + 2*n
         print(f"start {name} 0/{target_count} gc=setup prepare=0s clone=0s call=0s eta=unknown", file=progress)
+        calibration_start = wall() if calibration else None
         row = _measure_row(name, provider, plan=plan, expected=classification, expected_d=d,
                            expected_k=k, samples=n, warmup=warmup, clock=clock,
                            wall=wall, deadline=deadline, full_cohort=full_cohort,
@@ -1767,6 +2651,13 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             if hasattr(provider, field):
                 row[field] = getattr(provider, field).copy()
         rows.append(row)
+        if calibration:
+            note_calibration("legacy_repeat", name, row["sample_checks"]["checked"],
+                             2 + 100 + 2 * (100 if name == "mass_overdue" else 1000),
+                             wall() - calibration_start,
+                             prepare_seconds=row.get("prepare_seconds", 0.0),
+                             clone_seconds=row.get("clone_seconds", 0.0),
+                             call_seconds=row.get("call_seconds", 0.0))
         print(f"end {name} {row['status']} {row['sample_checks']['checked']}/{target_count} "
               f"gc=done prepare={row['prepare_seconds']:.3f}s clone={row['clone_seconds']:.3f}s "
               f"call={row['call_seconds']:.3f}s eta=0s", file=progress)
@@ -1804,6 +2695,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                 aborted = "budget"
                 break
             print(f"start {name}", file=progress)
+            resident_start = wall() if calibration else None
             try:
                 row = memory_state(name, limit, detail_count=detail_count,
                                    release=release, reject=reject, quick=quick)
@@ -1813,11 +2705,15 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                 row = _empty_row(name, "FAIL")
                 row["reason"] = f"{type(exc).__name__}: {exc}"
             rows.append(row)
+            if calibration and row.get("fixture_n", 0):
+                note_calibration("resident", name, row["fixture_n"], CAP,
+                                 wall() - resident_start)
             print(f"end {name} {row['status']}", file=progress)
     adapter = {"status": "UNVERIFIED", "reason": "not started"}
     if chosen is None and aborted is None and wall() < deadline:
         for name in adapter_names:
             print(f"start {name}", file=progress)
+        adapter_start = wall() if calibration else None
         try:
             adapter, adapter_rows = adapter_status(limit=limit, demand=2 + warmup + 2*samples,
                                                    warmup=warmup, samples=samples,
@@ -1831,8 +2727,100 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             row = indexed.get(name, _empty_row(name))
             rows.append(row)
             print(f"end {name} {row['status']}", file=progress)
+        if calibration:
+            measured = sum(row.get("timed_calls", 0) for row in indexed.values())
+            note_calibration("adapter", "adapter_all", measured,
+                             len(adapter_names) * (2 + 100 + 2 * 1000),
+                             wall() - adapter_start)
     elif chosen is None and aborted is None:
         aborted = "budget"
+    pressure_fixtures, churn_fixtures, capacity_points = [], [], []
+    rebuild_seen = False
+    rebuild_events = []
+    capacity_seconds = 0.0
+    baseline_sizes = {name: sys.getsizeof(obj) for name, obj in
+                      _capacity_containers(new_ledger(limit))}
+
+    def observe_capacity(ledger, fixture_name, kind, minute_index):
+        nonlocal rebuild_seen, capacity_seconds
+        observed_at = wall() if calibration else None
+        rebuild_seen |= bool(ledger._rebuild_count)
+        if ledger._rebuild_count:
+            b = _budget_checkpoint(ledger)
+            rebuild_events.append({"checkpoint_kind": "after", "rebuild_count": ledger._rebuild_count,
+                                   "old_bytes": b["capacity"]["rebuild_old_bytes"],
+                                   "new_bytes": b["capacity"]["rebuild_new_bytes"],
+                                   "budget": b, "temporary_peak_minus_current_before_bytes": None,
+                                   "status": "UNVERIFIED", "reason": "during-backings witness missing"})
+        capacity_points.append(_capacity_point(ledger, baseline_sizes, fixture_name,
+                                               kind if kind in ("hour", "day", "prune", "highwater")
+                                               else "tail", minute_index))
+        if calibration:
+            capacity_seconds += wall() - observed_at
+
+    def summary_row(name, kind, status, reason):
+        return {"name": name, "kind": kind, "status": status, "reason": reason,
+                "partial_acceptance_applicable": False}
+
+    for name in pressure_plan:
+        if aborted is not None or wall() >= deadline:
+            aborted = aborted or "budget"
+            break
+        print(f"start {name}", file=progress)
+        calibration_start = wall() if calibration else None
+        fixture = run_pressure_fixture(name, limit=limit, max_resident_bytes=resident_b,
+                                       fixture_detail_divisor=fixture_detail_divisor,
+                                       _capacity_observer=observe_capacity,
+                                       _stop_requested=lambda: wall() >= deadline,
+                                       _progress=lambda count: print(f"progress {name} accepted={count}", file=progress))
+        pressure_fixtures.append(fixture)
+        if calibration:
+            note_calibration("pressure", name, fixture["N_last_accepted"] or 0,
+                             CAP, wall() - calibration_start)
+        rows.append(summary_row(name, "pressure", fixture["status"], fixture["reason"]))
+        print(f"end {name} {fixture['status']}", file=progress)
+        if fixture["reason"] == "budget":
+            aborted = "budget"
+    for name in churn_plan:
+        if aborted is not None or wall() >= deadline:
+            aborted = aborted or "budget"
+            break
+        print(f"start {name}", file=progress)
+        calibration_start = wall() if calibration else None
+        fixture = run_churn_fixture(name, limit=limit, max_resident_bytes=resident_b,
+                                    churn_minutes=churn_minutes,
+                                    churn_stride_minutes=churn_stride_minutes,
+                                    fixture_detail_divisor=fixture_detail_divisor,
+                                    _capacity_observer=observe_capacity,
+                                    _stop_requested=lambda: wall() >= deadline,
+                                    _progress=lambda count: print(f"progress {name} batches={count}", file=progress))
+        churn_fixtures.append(fixture)
+        if calibration:
+            note_calibration("churn_burst" if name.startswith("churn_burst") else "churn_normal",
+                             name, fixture["scheduled_registered"], 80_641,
+                             wall() - calibration_start)
+        rows.append(summary_row(name, "churn", fixture["status"], fixture["reason"]))
+        print(f"end {name} {fixture['status']}", file=progress)
+        if fixture["reason"] == "budget":
+            aborted = "budget"
+    capacity = _capacity_proof(capacity_points)
+    if calibration and capacity_points:
+        note_calibration("capacity", "capacity_all", len(capacity_points),
+                         len(CHURN_NAMES) * (168 + 7 + 2) + len(PRESSURE_NAMES),
+                         capacity_seconds, owned_graph_seconds=capacity_seconds)
+    if rebuild_seen:
+        capacity["status"] = "UNVERIFIED"
+        capacity["reason"] = "rebuild observed without during-backings witness"
+    if churn_plan:
+        rows.append(summary_row("capacity_highwater", "capacity", capacity["status"], capacity["reason"]))
+        rows.append(summary_row("rebuild_double_backing", "rebuild",
+                                "UNVERIFIED" if rebuild_seen else "N/A",
+                                "during-backings witness missing" if rebuild_seen else
+                                "N/A (no rebuild in this implementation)"))
+        print("start capacity_highwater", file=progress)
+        print(f"end capacity_highwater {capacity['status']}", file=progress)
+        print("start rebuild_double_backing", file=progress)
+        print(f"end rebuild_double_backing {'UNVERIFIED' if rebuild_seen else 'N/A'}", file=progress)
     if len(rows) < len(names):
         existing = {row["name"] for row in rows}
         rows.extend(_empty_row(name) for name in names if name not in existing)
@@ -1840,17 +2828,88 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         adapter = {**adapter, "status": "UNVERIFIED", "reason": "environment prerequisites"}
     overall = overall_status(rows, adapter_status=adapter["status"], mode=mode)
     partial = partial_acceptance(rows, adapter_status=adapter["status"], mode=mode)
+    if aborted is not None:
+        partial["eligible"] = False
     if aborted is not None and overall != "FAIL":
         overall = "UNVERIFIED"
     env["load_after"] = _load_average()
     elapsed = wall() - started
-    return {"contract": "slice5a_contract_r2.md S5a.4 + addendumB B1-B7",
+    slot_rows, unreachable = [], []
+    for row in rows:
+        if (limit == CAP and row.get("fixture_stop") in ("byte", "byte_headroom")
+                and row.get("fixture_n") is not None):
+            unreachable.append({"original_name": row["name"] + "_131072_slots",
+                                "fixture_name": row["name"],
+                                "reason": "N/A (unreachable by byte policy)",
+                                "observed_N": row["fixture_n"],
+                                "replacement_name": row["name"]})
+    for fixture in pressure_fixtures:
+        if fixture["name"] in PRESSURE_AUX:
+            continue
+        rejection = fixture["first_rejection"]
+        cause = rejection["cause"] if rejection else None
+        status = "PASS" if cause == "slot" and limit == CAP else "N/A" if cause == "byte" else "UNVERIFIED"
+        slot_rows.append({"name": fixture["name"], "status": status,
+                          "N_stop": fixture["N_last_accepted"],
+                          "reason": "N/A (byte stop)" if status == "N/A" else None})
+        if status == "N/A":
+            unreachable.append({"original_name": fixture["name"] + "_131072_slots",
+                                "fixture_name": fixture["name"],
+                                "reason": "N/A (unreachable by byte policy)",
+                                "observed_N": fixture["N_last_accepted"],
+                                "replacement_name": fixture["name"]})
+    verdicts = {key: "UNVERIFIED" for key in ("slice5a2_partial", "slice5a3", "slice5a4")}
+    reasons = {key: ["full evidence incomplete"] for key in verdicts}
+    if mode == "full":
+        legacy_fail = bool(partial["failing_rows"] or adapter["status"] == "FAIL")
+        resident_fail = any(r["status"] == "FAIL" for r in rows if r["name"].startswith("resident_"))
+        pressure_fail = any(p["status"] == "FAIL" for p in pressure_fixtures)
+        scale_fail = any(c["status"] == "FAIL" for c in churn_fixtures) or capacity["status"] == "FAIL"
+        if legacy_fail:
+            verdicts["slice5a2_partial"] = "FAIL"
+            reasons["slice5a2_partial"] = ["legacy measured row or adapter failed"]
+        elif partial["eligible"]:
+            verdicts["slice5a2_partial"] = "PASS"
+            reasons["slice5a2_partial"] = []
+        if legacy_fail or resident_fail or pressure_fail:
+            verdicts["slice5a3"] = "FAIL"
+            reasons["slice5a3"] = ["own pressure, resident, or legacy condition failed"]
+        elif overall == "PASS" and aborted is None:
+            verdicts["slice5a3"] = "PASS"
+            reasons["slice5a3"] = []
+        elif overall == "FAIL":
+            reasons["slice5a3"] = ["global overall failed outside 5a-3 own conditions"]
+        if legacy_fail or resident_fail or pressure_fail or scale_fail:
+            verdicts["slice5a4"] = "FAIL"
+            reasons["slice5a4"] = ["own pressure, churn, capacity, resident, or legacy condition failed"]
+        elif overall == "PASS" and aborted is None:
+            verdicts["slice5a4"] = "PASS"
+            reasons["slice5a4"] = []
+    calibration_result = {"status": "not_run", "observations": [], "reason": None}
+    if calibration:
+        calibration_result = {"status": "complete" if aborted is None else "incomplete",
+                              "observations": calibration_observations, "reason": aborted}
+    eta = (_calibration_eta(calibration_observations, budget_seconds)
+           if calibration and aborted is None else
+           {"seconds": None, "uncertainty_seconds": None, "basis": "none",
+            "budget_seconds": budget_seconds, "decision": "unknown", "assumptions": []})
+    _gate_resident_budget.reset(budget_token)
+    return {"contract": "slice5a4c_contract_r2.md C-prime + slice5a_contract_r2.md S5a.4 B1-B7",
             "mode": mode, "complete": aborted is None, "aborted_reason": aborted,
             "overall": overall, "summary": summarize(rows), "scenarios": rows,
             "adapter": adapter, "partial_acceptance": partial,
-            "limits": {"max_records": CAP, "max_retained_details": DETAIL_CAP,
+            "limits": {"max_records": limit, "contract_max_records": CAP,
+                       "max_resident_bytes": resident_b, "churn_minutes": churn_minutes,
+                       "churn_stride_minutes": churn_stride_minutes,
+                       "fixture_detail_divisor": fixture_detail_divisor,
+                       "max_retained_details": min(DETAIL_CAP, limit),
                        "max_detail_bytes": 4096, "owned_bytes": OWNED_LIMIT,
                        "temporary_bytes": TEMP_LIMIT},
+            "pressure_fixtures": pressure_fixtures, "churn_fixtures": churn_fixtures,
+            "capacity_proof": capacity, "rebuild_events": rebuild_events,
+            "131072_slots": {"by_fixture": slot_rows}, "unreachable_rows": unreachable,
+            "verdicts": verdicts, "verdict_reasons": reasons,
+            "calibration": calibration_result, "eta": eta,
             "environment": env, "prerequisites": prereq,
             "record_access_audit_findings": audit,
             "total_elapsed_seconds": round(elapsed, 6),
@@ -1864,9 +2923,24 @@ def main():
     parser.add_argument("--samples", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--budget-seconds", type=float, default=14400)
+    parser.add_argument("--max-resident-bytes", type=int)
+    parser.add_argument("--pressure-name", action="append", dest="pressure_names")
+    parser.add_argument("--churn-name", action="append", dest="churn_names")
+    parser.add_argument("--churn-minutes", type=int, default=10_080)
+    parser.add_argument("--churn-stride-minutes", type=int, default=1)
+    parser.add_argument("--fixture-detail-divisor", type=int, default=1)
+    parser.add_argument("--calibration", action="store_true")
+    parser.add_argument("--budget-agreement-ref")
     args = parser.parse_args()
     report = run_gate(limit=args.limit, samples=args.samples, warmup=args.warmup,
-                      quick=args.quick, budget_seconds=args.budget_seconds)
+                      quick=args.quick, budget_seconds=args.budget_seconds,
+                      max_resident_bytes=args.max_resident_bytes,
+                      pressure_names=args.pressure_names, churn_names=args.churn_names,
+                      churn_minutes=args.churn_minutes,
+                      churn_stride_minutes=args.churn_stride_minutes,
+                      fixture_detail_divisor=args.fixture_detail_divisor,
+                      calibration=args.calibration,
+                      budget_agreement_ref=args.budget_agreement_ref)
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
 
 

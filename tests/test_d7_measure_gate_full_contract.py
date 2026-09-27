@@ -23,7 +23,8 @@ TIME_VALUES = {"PASS", "FAIL", "UNVERIFIED", "N/A"}
 PLANS = {"repeat", "sequential", "sequential_reprepared", "independent", "independent_split_copy", "full_deepcopy"}
 ROW_FIELDS = {"name", "status", "visit_gate", "temporary_gate", "time_gate", "sample_plan", "samples", "sample_checks",
               "D_observed", "K_observed", "sample_exception", "prepare_seconds", "timed_calls"}
-SMALL = dict(limit=128, samples=3, warmup=1)
+SMALL = dict(limit=128, samples=3, warmup=1, churn_minutes=25,
+             churn_stride_minutes=60, fixture_detail_divisor=256)  # I4: 동형 소형 churn 전이
 
 # 부록 B4 (a)~(g) 와 B1 표의 행 이름(B8 — 시험이 고정한다)
 ADDED_ROWS = {
@@ -185,6 +186,13 @@ def test_small_full_report_shape(small):
     for row in report["scenarios"]:
         if row["name"] == "record_baseline" or row["name"].startswith("resident_"):
             continue
+        if row.get("kind") in {"pressure", "churn", "capacity", "rebuild"}:
+            # I4: 신규 요약 행은 반복 표본 대신 독립 fixture/capacity 원자료에 연결한다.
+            assert row["partial_acceptance_applicable"] is False
+            assert row["status"] in {"PASS", "FAIL", "UNVERIFIED", "N/A"}
+            assert row["name"] in {x["name"] for x in report["pressure_fixtures"] + report["churn_fixtures"]} | {
+                "capacity_highwater", "rebuild_double_backing"}
+            continue
         assert ROW_FIELDS <= set(row), (row["name"], ROW_FIELDS - set(row))
         assert row["time_gate"] in TIME_VALUES, row["name"]
         assert row["sample_plan"] in PLANS, row["name"]
@@ -285,7 +293,9 @@ def test_gate_observes_d_from_ledger_not_declaration(gate, monkeypatch):
 
     NoClose.__module__ = base.__module__
     monkeypatch.setattr(gate, "RoundLedger", NoClose)
-    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(), **SMALL)
+    # D 관찰 단언은 close_boundary_exact 행만 사용하므로 다른 행과 압력·churn은 생략한다.
+    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(),
+                           rows=["close_boundary_exact"], **SMALL)
     row = rows_by_name(report)["close_boundary_exact"]
     assert row["status"] == "FAIL"
     assert row["sample_checks"]["failures"], row["sample_checks"]
@@ -296,7 +306,9 @@ def test_gate_observes_d_from_ledger_not_declaration(gate, monkeypatch):
 # ───────── B7 CLI: stdout 은 JSON 하나 ─────────
 
 def test_cli_small_full_writes_single_json_object():
-    done = subprocess.run([sys.executable, str(GATE_PATH), "--limit", "64", "--samples", "2", "--warmup", "1"],
+    done = subprocess.run([sys.executable, str(GATE_PATH), "--limit", "64", "--samples", "2", "--warmup", "1",
+                           "--churn-minutes", "25", "--churn-stride-minutes", "60",
+                           "--fixture-detail-divisor", "256"],  # I4: CLI에도 같은 소형 churn 축소
                           cwd=str(ROOT), capture_output=True, text=True, timeout=600,
                           env={"PYTHONHASHSEED": "0", "PYTHONDONTWRITEBYTECODE": "1", "PATH": "/usr/bin:/bin"})
     assert done.returncode == 0, done.stderr[-2000:]
@@ -327,7 +339,9 @@ def test_gate_checks_k_against_ledger_output(gate, monkeypatch):
 
     DropEntries.__module__ = base.__module__
     monkeypatch.setattr(gate, "RoundLedger", DropEntries)
-    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(), **SMALL)
+    # K 불일치 단언은 contributions_first_page 행만 사용하므로 다른 범주는 생략한다.
+    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(),
+                           rows=["contributions_first_page"], **SMALL)
     row = rows_by_name(report)["contributions_first_page"]
     assert row["status"] == "FAIL"
     assert any("K:" in f["reason"] for f in row["sample_checks"]["failures"]), row["sample_checks"]
@@ -344,7 +358,9 @@ def test_gate_checks_classification(gate, monkeypatch):
 
     OddLink.__module__ = base.__module__
     monkeypatch.setattr(gate, "RoundLedger", OddLink)
-    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(), **SMALL)
+    # 분류 단언은 link_round_accept 행만 사용하므로 다른 범주는 생략한다.
+    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(),
+                           rows=["link_round_accept"], **SMALL)
     row = rows_by_name(report)["link_round_accept"]
     assert row["status"] == "FAIL"
     assert any("classification:" in f["reason"] for f in row["sample_checks"]["failures"])
@@ -360,7 +376,9 @@ def test_split_copy_that_later_mutates_original_is_caught(gate, monkeypatch):
         return real(base, mutable_ids) if calls["n"] == 1 else base
 
     monkeypatch.setattr(gate, "_split_clone", flaky)
-    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(), **SMALL)
+    # 반복 분리 복제의 원본 변이 단언은 large_clock_jump 행에서 성립하므로 다른 범주는 생략한다.
+    report = gate.run_gate(quick=False, budget_seconds=3600, progress=io.StringIO(),
+                           rows=["large_clock_jump"], **SMALL)
     caught = [row["name"] for row in report["scenarios"]
               if any("mutated" in f["reason"] for f in row.get("sample_checks", {}).get("failures", []))]
     assert caught, "원본 변이가 어느 행에서도 드러나지 않았다"
@@ -393,11 +411,14 @@ def test_budget_stops_inside_a_row(gate):
     """G7: 예산은 행 사이만이 아니라 행 안의 표본 경계에서도 확인한다."""
     probe_wall = FakeWall()
     probe = MarkProgress(probe_wall)
-    gate.run_gate(quick=False, budget_seconds=10 ** 9, wall=probe_wall, progress=probe, **SMALL)
+    # 두 실행 모두 첫 행 내부의 예산 경계만 단언하므로 close_boundary_exact 외 범주는 생략한다.
+    gate.run_gate(quick=False, budget_seconds=10 ** 9, wall=probe_wall, progress=probe,
+                  rows=["close_boundary_exact"], **SMALL)
     assert probe.first_start is not None
     wall = FakeWall()
+    # 실제 예산 중단 단언도 같은 첫 행의 표본 경계만 사용하므로 나머지 범주는 생략한다.
     report = gate.run_gate(quick=False, budget_seconds=probe.first_start + 4, wall=wall,
-                           progress=io.StringIO(), **SMALL)
+                           progress=io.StringIO(), rows=["close_boundary_exact"], **SMALL)
     assert report["complete"] is False and report["aborted_reason"] == "budget"
     planned = 2 + SMALL["warmup"] + 2 * SMALL["samples"]
     started = [row for row in report["scenarios"] if row.get("sample_checks", {}).get("checked", 0) > 0]
