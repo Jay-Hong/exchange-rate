@@ -2577,7 +2577,18 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         return False
 
     def replay_result():
-        return {"compared_steps": compared_steps, "mismatch": replay_mismatch,
+        if failure and failure.get("phase") == "budget":
+            stop_reason, mismatch = "budget", None
+        elif replay_mismatch:
+            stop_reason, mismatch = "mismatch", replay_mismatch
+        elif compared_steps - 1 == _replay_stop:
+            stop_reason, mismatch = "last_selected", None
+        else:
+            stop_reason = "mismatch"
+            mismatch = ("replay: burst ended early" if burst and scheduled == 0 else
+                        "replay: stopped before selected seq")
+        return {"compared_steps": compared_steps, "mismatch": mismatch,
+                "stop_reason": stop_reason,
                 "stopped_after_seq": compared_steps - 1,
                 "seconds": time.perf_counter() - pass_start, "checkpoints": checkpoints}
 
@@ -2621,7 +2632,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             if failure:
                 break
         if replaying and failure:
-            return dict(replay_result(), mismatch=replay_mismatch or "replay: burst ended early")
+            return replay_result()
         max_details = ledger._health["retained_details"]
         add_checkpoint("detail_open", -1, T)
         if failure is None:
@@ -2722,9 +2733,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             return replay_result()
         add_checkpoint("tail_80641" if full else "tail_after", churn_minutes, tail_time)
     if replaying:
-        return dict(replay_result(), mismatch=replay_mismatch or
-                    ("budget" if failure and failure.get("phase") == "budget" else
-                     "replay: stopped before selected seq"))
+        return replay_result()
     pass1_seconds = time.perf_counter() - pass_start
     selected_kinds = {ch["register_seq"]: "highwater" for ch in highwater["checks"]
                       if ch["preserved"]}
@@ -2733,7 +2742,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         selected_kinds[violation["register_seq"]] = "violation"
     selected_seqs = sorted(selected_kinds)
     replay = {"performed": False, "stopped_after_seq": None, "compared_steps": 0,
-              "mismatch": None, "pass1_seconds": pass1_seconds, "pass2_seconds": 0.0}
+              "mismatch": None, "stop_reason": None,
+              "pass1_seconds": pass1_seconds, "pass2_seconds": 0.0}
     if selected_seqs and failure is None:
         replayed = run_churn_fixture(
             name, limit=limit, max_resident_bytes=max_resident_bytes,
@@ -2745,7 +2755,10 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         publish_replay_pairs(replayed)
         replay.update(performed=True, stopped_after_seq=replayed["stopped_after_seq"],
                       compared_steps=replayed["compared_steps"], mismatch=replayed["mismatch"],
+                      stop_reason=replayed["stop_reason"],
                       pass2_seconds=replayed["seconds"])
+        if replayed["stop_reason"] == "budget":
+            failure = {"phase": "budget", "pass": 2}
     highwater["replay"] = replay
     checkpoint_gaps = churn_checkpoint_gaps(checkpoints, minute_batches=churn_minutes,
                                             stride_minutes=churn_stride_minutes)
@@ -2783,7 +2796,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
               replay["mismatch"] or (failure and failure.get("phase") == "budget") else "FAIL")
     if highwater["violations"]:
         status = "FAIL"
-    if replay["mismatch"] or unknown_ownership:
+    elif replay["mismatch"] or unknown_ownership:
         status = "UNVERIFIED"
     return {"name": name, "status": status, "id_kind": kind,
             "state_track": track + ("_init_failed" if init_variant else ""),
@@ -2858,19 +2871,57 @@ def _capacity_point(ledger, baseline_sizes, fixture_name, kind, minute_index, *,
             "container_backings": backings}
 
 
-def _capacity_proof(points):
+def _capacity_proof(points, churn_fixtures=(), required_churn_names=()):
     qcap = _budget_q(CAP) + 512 * CAP + 1536 * 12
     observed = max((p["Q_4_bytes"] for p in points), default=None)
     actual = max((p["Q_actual_bytes"] for p in points), default=None)
-    status = ("PASS" if points and all(p["capacity_covered"] and p["H_job"] <= 12 for p in points)
-              and observed <= qcap else "UNVERIFIED" if not points else "FAIL")
+    required = Counter()
+    for fixture in churn_fixtures:
+        highwater = fixture["highwater_checks"]
+        selected = [(check, "highwater") for check in highwater["checks"] if check["preserved"]]
+        violation = highwater["first_violation"]
+        if violation is not None and violation["register_seq"] not in {
+                check["register_seq"] for check, _ in selected}:
+            selected.append((violation, "violation"))
+        for check, kind in selected:
+            for side, n_key in (("before", "N_total_before"), ("after", "N_total_after")):
+                required[(fixture["name"], f"{kind}_{side}", check["minute_index"],
+                          check[n_key])] += 1
+    seen = Counter((point["fixture_name"], point["kind"], point["minute_index"],
+                    point["N_total"]) for point in points)
+    missing = required - seen
+    unrun = set(required_churn_names) - {fixture["name"] for fixture in churn_fixtures}
+    interrupted = any((fixture["first_failure"] or {}).get("phase") == "budget"
+                      for fixture in churn_fixtures)
+    unknown_ownership = any(point["G_bytes"] is None for point in points)
+    observed_failure = bool(points) and (
+        any(point["Q_actual_bytes"] > point["Q_4_bytes"] or
+            point["E_bytes"] > point["B_bytes"] or
+            (point["G_bytes"] is not None and point["G_bytes"] > point["E_bytes"]) or
+            point["H_job"] > 12 for point in points)
+        or observed > qcap)
+    status = ("FAIL" if observed_failure else "UNVERIFIED" if
+              not points or missing or unrun or interrupted or unknown_ownership else "PASS")
+    reasons = []
+    if observed_failure:
+        reasons.append("capacity witness exceeded")
+    if not points:
+        reasons.append("capacity witness missing")
+    if missing:
+        reasons.append(f"{sum(missing.values())} required capacity observation(s) missing")
+    if unrun:
+        reasons.append("churn fixture(s) not run: " + ", ".join(sorted(unrun)))
+    if interrupted:
+        reasons.append("churn budget interrupted capacity evidence")
+    if unknown_ownership:
+        reasons.append("owned graph unverified")
     return {"status": status, "formula": "_budget_q(131072)+512*131072+1536*12",
             "job_key_limit": 12, "H_res": max((p["N_res"] for p in points), default=None),
             "H_job": max((p["H_job"] for p in points), default=None),
             "Q_cap_bytes": qcap, "Q_obs_bytes": observed,
             "Q_actual_max_bytes": actual, "checkpoints": points,
-            "unknown_ownership": [] if all(p["G_bytes"] is not None for p in points) else ["owned_graph"],
-            "reason": None if status == "PASS" else "capacity witness missing or exceeded"}
+            "unknown_ownership": ["owned_graph"] if unknown_ownership else [],
+            "reason": "; ".join(reasons) or None}
 
 
 def _calibration_eta(observations, budget_seconds):
@@ -3189,7 +3240,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         print(f"end {name} {fixture['status']}", file=progress)
         if fixture["first_failure"] and fixture["first_failure"].get("phase") == "budget":
             aborted = "budget"
-    capacity = _capacity_proof(capacity_points)
+    capacity = _capacity_proof(capacity_points, churn_fixtures, churn_plan)
     if calibration and capacity_points:
         note_calibration("capacity", "capacity_all", len(capacity_points),
                          len(CHURN_NAMES) * (168 + 7 + 2) + len(PRESSURE_NAMES),

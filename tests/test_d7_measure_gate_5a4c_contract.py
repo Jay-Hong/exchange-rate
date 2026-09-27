@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import gc
 import importlib.util
+import io
 import math
 import sys
 from pathlib import Path
@@ -527,7 +528,8 @@ def test_churn_status_requires_complete_checkpoints(monkeypatch):
 # --- highwater 선택 보존 (addendum slice5a4c_addendum_highwater.md, C′2 교체) ---------------------------
 HW_KEYS = {"events", "resident_events", "job_events", "both_events", "backing_changes", "preserved_pairs",
            "violations", "first_violation", "unverified_events", "first_unverified", "checks", "replay"}
-REPLAY_KEYS = {"performed", "stopped_after_seq", "compared_steps", "mismatch", "pass1_seconds", "pass2_seconds"}
+REPLAY_KEYS = {"performed", "stopped_after_seq", "compared_steps", "mismatch", "pass1_seconds", "pass2_seconds",
+               "stop_reason"}
 HW_SIDE_KEYS = {"H_res", "H_job", "Q_4", "E", "B", "Q_actual"}
 
 
@@ -657,6 +659,7 @@ def test_replay_stops_after_last_selected_event_and_matches():
     selected = [ch["register_seq"] for ch in hw["checks"] if ch["preserved"]]
     assert selected and rp["performed"] is True and rp["mismatch"] is None
     assert rp["stopped_after_seq"] == max(selected)
+    assert rp["stop_reason"] == "last_selected"
     assert rp["compared_steps"] == rp["stopped_after_seq"] + 1
     assert calls == list(range(rp["stopped_after_seq"] + 1))        # 2차는 마지막 선택 순번에서 멈춘다
     assert rp["pass1_seconds"] >= 0 and rp["pass2_seconds"] >= 0
@@ -786,3 +789,77 @@ def test_first_violation_on_non_event_call_is_preserved(monkeypatch):
     shifted = [dict(cp, received_at=cp["received_at"] + 1) if cp["kind"] == "violation_before" else cp
                for cp in c["checkpoints"]]
     assert gate.highwater_pair_gaps(hw, shifted)
+
+
+
+# --- full run 3 에서 드러난 결함 D1~D4 (codex_5a4c_run3_review_req.md + Codex 판정) -----------------------
+@pytest.mark.parametrize("name", ["churn_most_finished_short_ascii", "churn_burst_ascii128"])
+def test_budget_stop_during_replay_is_budget_not_mismatch(name):
+    state = {"stop": False}
+
+    def hook(seq, led, wall):                                         # 2차에서만 불린다 → 2차 도중 예산 소진
+        if seq == 3:
+            state["stop"] = True
+    c = gate.run_churn_fixture(name, limit=128, **SMALL_CHURN, _replay_hook=hook,
+                               _stop_requested=lambda: state["stop"])
+    hw = c["highwater_checks"]
+    rp = hw["replay"]
+    selected = [ch["register_seq"] for ch in hw["checks"] if ch["preserved"]]
+    assert rp["stopped_after_seq"] < max(selected)                     # 비공허: 마지막 선택 전에 멈췄다
+    assert rp["mismatch"] is None and rp["stop_reason"] == "budget"    # D1: 예산 정지는 불일치가 아니다
+    assert c["status"] == "UNVERIFIED" and (c["first_failure"] or {}).get("phase") == "budget"
+
+
+def _replay_budget_run(monkeypatch):
+    state = {"pass2": False}
+    original = gate.run_churn_fixture
+
+    def spy(*a, **kw):
+        if kw.get("_replay_expected") is not None:
+            state["pass2"] = True
+        return original(*a, **kw)
+    monkeypatch.setattr(gate, "run_churn_fixture", spy)
+    tick = [0.0]
+
+    def wall():                                                       # 2차가 시작되면 시계가 예산을 넘긴다
+        tick[0] += 1e-3
+        return tick[0] + (10 ** 7 if state["pass2"] else 0.0)
+    return gate.run_gate(limit=128, samples=3, warmup=1, churn_names=["churn_burst_ascii128"], wall=wall,
+                         budget_seconds=3600, progress=io.StringIO(), **SMALL_CHURN)
+
+
+def test_budget_stop_inside_final_fixture_marks_run_incomplete(monkeypatch):
+    r = _replay_budget_run(monkeypatch)
+    assert r["complete"] is False and r["aborted_reason"] == "budget"   # D2
+
+
+def test_capacity_not_pass_when_required_pairs_missing(monkeypatch):
+    r = _replay_budget_run(monkeypatch)
+    fx = r["churn_fixtures"][0]
+    assert fx["highwater_checks"]["preserved_pairs"] < sum(ch["preserved"] for ch in fx["highwater_checks"]["checks"])
+    assert r["capacity_proof"]["status"] != "PASS"                     # D3: 필수 관측점 누락은 PASS 불가
+    row = next(x for x in r["scenarios"] if x["name"] == "capacity_highwater")
+    assert row["status"] != "PASS"
+
+
+def test_fail_wins_over_replay_mismatch(monkeypatch):
+    monkeypatch.setattr(lg.RoundLedger, "_q_charge", lambda self, resident=None, jobs=None: 0)
+    c = gate.run_churn_fixture(
+        "churn_most_finished_short_ascii", limit=128, **SMALL_CHURN,
+        _replay_hook=_perturb_at(1, lambda led, wall: gate._register_fixture(led, "zz-perturb", "investing", wall)))
+    hw = c["highwater_checks"]
+    assert hw["violations"] > 0 and hw["replay"]["mismatch"]           # 비공허: 둘 다 있다
+    assert c["status"] == "FAIL"                                       # D4: 발견한 FAIL 이 우선
+
+
+def test_capacity_proof_requires_each_preserved_pair_point():
+    # 중단 없이도 필수 관측점 하나가 빠지면 PASS 가 아니다(D3 의 missing 조건을 interrupted 와 분리해 잠근다).
+    r = gate.run_gate(limit=128, samples=3, warmup=1, churn_names=["churn_most_finished_short_ascii"],
+                      **SMALL_CHURN)
+    points, fixtures = r["capacity_proof"]["checkpoints"], r["churn_fixtures"]
+    assert r["capacity_proof"]["status"] == "PASS"                     # 비공허: 완전하면 PASS
+    whole = gate._capacity_proof(points, fixtures, ["churn_most_finished_short_ascii"])
+    assert whole["status"] == "PASS"
+    drop = next(i for i, p in enumerate(points) if p["kind"] == "highwater_after")
+    partial = gate._capacity_proof(points[:drop] + points[drop + 1:], fixtures, ["churn_most_finished_short_ascii"])
+    assert partial["status"] == "UNVERIFIED" and "missing" in (partial["reason"] or "")
