@@ -418,3 +418,34 @@ def test_calibration_over_all_categories_produces_eta():
     assert eta["basis"] == "calibration" and eta["seconds"] is not None and eta["seconds"] > 0
     assert eta["decision"] == ("agreement_required" if eta["seconds"] > 14_400 else "within_budget")
     assert eta["budget_seconds"] == 14400 and eta["assumptions"]
+
+
+# ───────── full 1회차 중단 원인(09-27): 원본 구축이 등록마다 budget_state() 를 불러 O(N²) ─────────
+
+def _count_budget_state(monkeypatch):
+    calls = {"n": 0}
+    original = lg.RoundLedger.budget_state
+
+    def counting(self):
+        calls["n"] += 1
+        return original(self)
+
+    monkeypatch.setattr(lg.RoundLedger, "budget_state", counting)
+    return calls
+
+
+def test_headroom_fixture_does_not_call_budget_state_per_registration(monkeypatch):
+    calls = _count_budget_state(monkeypatch)
+    ledger = gate.fill_with_headroom(4096, accepts=1)
+    n = ledger._gate_fixture_n
+    assert n > 1000                                                                          # 실제로 많이 쌓였다
+    assert calls["n"] <= 16, calls["n"]                                                      # 건수에 비례하지 않는다
+    b = ledger.budget_state()
+    assert b["B"] - b["E"] == ledger._gate_headroom_bytes or ledger._gate_fixture_stop == "limit"
+
+
+def test_pressure_fixture_does_not_call_budget_state_per_registration(monkeypatch):
+    calls = _count_budget_state(monkeypatch)
+    p = gate.run_pressure_fixture("pressure_p0_short_ascii", limit=4096, max_resident_bytes=F4 + 1_000_000)
+    assert p["N_last_accepted"] > 200 and p["status"] == "PASS"
+    assert calls["n"] <= 64, calls["n"]

@@ -250,6 +250,18 @@ def _headroom_tariffs(summary=SUMMARY, *, reverse=False, need_detail=False):
     return record_charge, detail_charge
 
 
+def _fixture_budget_e(ledger, fixed):
+    """Use the ledger's incremental admission charges between public checkpoints."""
+    return fixed + ledger._q_charge() + ledger._budget_d + ledger._budget_ar + ledger._budget_t
+
+
+def _check_fixture_budget_e(ledger, fixed):
+    budget = ledger.budget_state()
+    if budget["E"] != _fixture_budget_e(ledger, fixed):
+        raise RuntimeError("fixture incremental budget disagrees with public budget")
+    return budget
+
+
 def fill_with_headroom(limit, *, accepts, detail_accepts=0, linked=0,
                        finalized=0, unavailable_rest=False, summary=SUMMARY,
                        reserve_slots=0, reverse=False, min_existing=0):
@@ -259,16 +271,19 @@ def fill_with_headroom(limit, *, accepts, detail_accepts=0, linked=0,
     record_charge, detail_charge = _headroom_tariffs(
         summary, reverse=reverse, need_detail=bool(detail_accepts or finalized))
     ledger = new_ledger(limit)
+    fixed = ledger.budget_state()["F_4"]
+    budget_limit = ledger._limits["max_resident_bytes"]
     target = max(0, limit - reserve_slots)
     for i in range(target):
-        budget = ledger.budget_state()
+        charge = _fixture_budget_e(ledger, fixed)
         # Include the next fixture insertion as well as every later measured
         # acceptance; otherwise the last fixture insertion spends a probe's room.
         planned = min(limit, i + accepts + 1)
-        future_q = _budget_q(planned) + 512 * planned - budget["Q_4"]
+        future_q = _budget_q(planned) + 512 * planned - ledger._q_charge()
         required = (record_charge * (accepts + 1) + max(0, future_q)
                     + detail_charge * detail_accepts)
-        if budget["B"] - budget["E"] < required:
+        if budget_limit - charge < required:
+            budget = _check_fixture_budget_e(ledger, fixed)
             ledger._gate_fixture_n = i
             ledger._gate_fixture_stop = "byte_headroom"
             ledger._gate_headroom_bytes = budget["B"] - budget["E"]
@@ -280,9 +295,10 @@ def fill_with_headroom(limit, *, accepts, detail_accepts=0, linked=0,
             kwargs["started_wall"] = T - i
         result = ledger.register(**kwargs)
         if result["classification"] == "admission_stopped":
+            _check_fixture_budget_e(ledger, fixed)
             ledger._gate_fixture_n = i
             ledger._gate_fixture_stop = "byte_headroom"
-            ledger._gate_headroom_bytes = budget["B"] - budget["E"]
+            ledger._gate_headroom_bytes = budget_limit - charge
             ledger._gate_headroom_error = "registration rejected before planned headroom stop"
             return ledger
         if result["classification"] != "registered":
@@ -303,8 +319,10 @@ def fill_with_headroom(limit, *, accepts, detail_accepts=0, linked=0,
                                                received_at=T, received_mono=T)
             if result["classification"] != "report_init_failed":
                 raise RuntimeError(f"headroom fixture unavailable {i}: {result['classification']}")
+    budget = _check_fixture_budget_e(ledger, fixed)
     ledger._gate_fixture_n = target
     ledger._gate_fixture_stop = "limit"
+    ledger._gate_headroom_bytes = budget["B"] - budget["E"]
     if target < min_existing:
         raise HeadroomUnverified("slot limit below required existing identities")
     return ledger
@@ -2102,6 +2120,7 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     target = min((requested + fixture_detail_divisor - 1) // fixture_detail_divisor,
                  DETAIL_CAP, fixture_limit - 1) if requested else 0
     ledger = new_ledger(fixture_limit, max_resident_bytes)
+    fixed = ledger.budget_state()["F_4"]
     states, sources, jobs = Counter(), Counter(), Counter()
     failures = []
     first, before, after, n_last, control = None, None, None, None, None
@@ -2123,13 +2142,13 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         # Capture the precise pre-rejection state; the control is a detached
         # clone of the public-API-built history and does not alter the original.
         pre_health = ledger._health.copy()
-        pre_budget = ledger.budget_state()
         pre_job_absent = job_id is None or (SOURCE, job_id) not in ledger._previous_job
         next_jobs = len(ledger._previous_job) + int(pre_job_absent and job_id is not None)
-        next_q = ledger._q_charge(pre_budget["N_res"] + 1, next_jobs)
-        possible_rejection = (pre_budget["N_res"] >= fixture_limit or
-                              pre_budget["B"] - pre_budget["E"] <=
-                              max(0, next_q - pre_budget["Q_4"]) + 64_000)
+        current_q = ledger._q_charge()
+        next_q = ledger._q_charge(pre_health["N_res"] + 1, next_jobs)
+        possible_rejection = (pre_health["N_res"] >= fixture_limit or
+                              max_resident_bytes - _fixture_budget_e(ledger, fixed) <=
+                              max(0, next_q - current_q) + 64_000)
         pre_identity_absent = _identity_absent(ledger, invocation_id) if possible_rejection else False
         alternate = (clone_ledger(ledger) if track == "job_aux" and i > 0
                      and possible_rejection else None)
@@ -2143,7 +2162,7 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             n_last = pre_health["N_total"]
             # The rejection changes health diagnostics, but not any identity index.
             before = (pre_checkpoint if pre_checkpoint is not None else
-                      _budget_checkpoint_without_graph(pre_budget))
+                      _budget_checkpoint_without_graph(ledger.budget_state()))
             if pre_checkpoint is None:
                 failures.append({"index": i, "reason": "pre-rejection checkpoint not captured"})
             after = _budget_checkpoint(ledger)
@@ -2195,6 +2214,7 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if action:
             states["unbound"] -= 1
             states[action] += 1
+    _check_fixture_budget_e(ledger, fixed)
     if first is None and not interrupted:
         failures.append({"reason": "no first admission stop"})
     retained_at_stop = ledger._health["retained_details"]
