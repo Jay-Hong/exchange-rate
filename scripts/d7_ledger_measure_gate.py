@@ -2280,20 +2280,28 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     return result
 
 
-def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary):
-    snapshot = ledger.aggregation_snapshot(as_of=received_at, as_of_mono=received_at)
-    cursor = ledger.contributions_open(as_of=received_at, as_of_mono=received_at,
-                                       after_seq=0, limit=1)
+def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary,
+                      *, readonly=False, graph=True):
+    if readonly:
+        # A pre-register witness must not advance the ledger to the call's time.
+        cumulative_end = ledger._cumulative_end
+        cursor_next_seq = ledger._open_seq[0] if len(ledger._open_seq) > 1 else None
+    else:
+        snapshot = ledger.aggregation_snapshot(as_of=received_at, as_of_mono=received_at)
+        cursor = ledger.contributions_open(as_of=received_at, as_of_mono=received_at,
+                                           after_seq=0, limit=1)
+        cumulative_end = snapshot.get("cumulative_end")
+        cursor_next_seq = cursor.get("next_seq")
     h = ledger._health
-    budget = _budget_checkpoint(ledger)
+    budget = _budget_checkpoint(ledger) if graph else _budget_checkpoint_without_graph(ledger.budget_state())
     return {"kind": kind, "minute_index": minute_index, "received_at": received_at,
             "received_mono": received_at, "scheduled_registered": scheduled,
             "auxiliary_registered": auxiliary, "N_total": h["N_total"],
             "N_live": h["N_live"], "N_tomb": h["N_tomb"], "N_res": h["N_res"],
             "retained_details": h["retained_details"], "budget": budget,
             "last_received_at": h["last_received_at"], "last_received_mono": h["last_received_mono"],
-            "cumulative_end": snapshot.get("cumulative_end"), "cursor_after_seq": 0,
-            "cursor_next_seq": cursor.get("next_seq"),
+            "cumulative_end": cumulative_end, "cursor_after_seq": 0,
+            "cursor_next_seq": cursor_next_seq,
             "cohort_exact_from": h["cohort_exact_from"], "frozen_through": h["frozen_through"],
             "coverage_complete": h["coverage_complete"], "uncertain_sources": list(h["uncertain_sources"]),
             "admission_stopped": h["admission_stopped"], "admission_stopped_at": h["admission_stopped_at"],
@@ -2301,10 +2309,142 @@ def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxili
             "capacity_charged_bytes": budget["capacity"]["charged_bytes"]}
 
 
+def churn_checkpoint_gaps(checkpoints, *, minute_batches, stride_minutes) -> list[str]:
+    """Check schedule-relative hour/day boundaries and both tail observations."""
+    if min(minute_batches, stride_minutes) < 1:
+        raise ValueError("invalid churn scale")
+    span_minutes = minute_batches * stride_minutes
+    full = minute_batches == 10_080 and stride_minutes == 1
+    before_kind, after_kind = (("tail_80640", "tail_80641") if full else
+                               ("tail_before", "tail_after"))
+    gaps = []
+    tails = {kind: [cp.get("received_at") for cp in checkpoints if cp.get("kind") == kind]
+             for kind in (before_kind, after_kind)}
+    for kind, times in tails.items():
+        if len(times) != 1:
+            gaps.append(f"{kind}: expected one checkpoint, found {len(times)}")
+    anchor = next((times[0] for times in tails.values() if times), None)
+    if not isinstance(anchor, int):
+        return gaps + ["tail time missing; hour/day boundaries cannot be verified"]
+    if tails[after_kind] and tails[after_kind][0] != anchor:
+        gaps.append(f"{after_kind}: expected received_at {anchor}, found {tails[after_kind][0]}")
+
+    schedule_start = anchor - span_minutes * MINUTE
+    for kind, step_minutes in (("hour", 60), ("day", 1440)):
+        expected = Counter(schedule_start + k * step_minutes * MINUTE
+                           for k in range(1, span_minutes // step_minutes + 1))
+        actual = Counter(cp.get("received_at") for cp in checkpoints if cp.get("kind") == kind)
+        for label, difference in (("missing", expected - actual), ("unexpected", actual - expected)):
+            if difference:
+                examples = ", ".join(f"{at!r} ({count})" for at, count in
+                                     sorted(difference.items(), key=lambda item: str(item[0]))[:3])
+                gaps.append(f"{kind} {label}: {sum(difference.values())} checkpoint(s); "
+                            f"received_at {examples}")
+    return gaps
+
+
+def _highwater_measure(ledger, baseline_sizes, fixed):
+    """Read the charged backing layout without a full budget or owned graph walk."""
+    seen = {}
+    layout = []
+    actual = 0
+    for name, obj in _capacity_containers(ledger):
+        size = sys.getsizeof(obj)
+        marker = id(obj)
+        owner = seen.get(marker)
+        if owner is None:
+            seen[marker] = name
+            actual += max(0, size - baseline_sizes.get(name, 0))
+            owner = name
+        # The owner path represents sharing; an identity replacement by itself
+        # does not constitute a backing change.
+        layout.append((name, size, owner))
+    return ({"H_res": ledger._q_highwater, "H_job": ledger._job_highwater,
+             "Q_4": ledger._q_charge(), "E": _fixture_budget_e(ledger, fixed),
+             "B": ledger._limits["max_resident_bytes"], "Q_actual": actual},
+            tuple(layout))
+
+
+def _replay_step_digest(step):
+    """Hash the ordered observation without retaining its two backing layouts."""
+    canonical = json.dumps(step, sort_keys=True, separators=(",", ":"),
+                           ensure_ascii=False, allow_nan=False)
+    return hashlib.blake2b(canonical.encode("utf-8"), digest_size=16).digest()
+
+
+def highwater_pair_gaps(highwater_checks, checkpoints) -> list[str]:
+    """Reconcile selected high-water and first-violation checkpoint pairs."""
+    gaps = []
+    checks = highwater_checks.get("checks", [])
+    events = highwater_checks.get("events")
+    if events != len(checks):
+        gaps.append(f"highwater events: {events} != checks {len(checks)}")
+    resident = sum(ch.get("after", {}).get("H_res", -1) >
+                   ch.get("before", {}).get("H_res", -1) for ch in checks)
+    jobs = sum(ch.get("after", {}).get("H_job", -1) >
+               ch.get("before", {}).get("H_job", -1) for ch in checks)
+    both = sum(ch.get("after", {}).get("H_res", -1) >
+               ch.get("before", {}).get("H_res", -1) and
+               ch.get("after", {}).get("H_job", -1) >
+               ch.get("before", {}).get("H_job", -1) for ch in checks)
+    for key, actual in (("resident_events", resident), ("job_events", jobs),
+                        ("both_events", both), ("backing_changes",
+                         sum(bool(ch.get("backing_changed")) for ch in checks)),
+                        ("preserved_pairs", sum(ch.get("preserved") is True for ch in checks))):
+        if highwater_checks.get(key) != actual:
+            gaps.append(f"highwater {key}: {highwater_checks.get(key)} != {actual}")
+    if resident + jobs - both != len(checks):
+        gaps.append("highwater category sum does not cover events")
+    pairs = [cp for cp in checkpoints if cp.get("kind") in
+             ("highwater_before", "highwater_after")]
+    selected = [ch for ch in checks if ch.get("preserved")]
+    if len(pairs) != 2 * len(selected):
+        gaps.append(f"highwater pairs: {len(pairs)} checkpoint(s) for {len(selected)} selected event(s)")
+    for index, ch in enumerate(selected):
+        pair = pairs[2 * index:2 * index + 2]
+        if len(pair) != 2 or [cp.get("kind") for cp in pair] != ["highwater_before", "highwater_after"]:
+            gaps.append(f"highwater pair {index}: missing or out of order")
+            continue
+        for cp, expected_n in zip(pair, (ch.get("N_total_before"), ch.get("N_total_after"))):
+            if (cp.get("received_at") != ch.get("received_at") or
+                    cp.get("received_mono") != ch.get("received_mono") or
+                    cp.get("minute_index") != ch.get("minute_index") or
+                    cp.get("N_total") != expected_n):
+                gaps.append(f"highwater pair {index}: time, minute, or N_total mismatch")
+    violation = highwater_checks.get("first_violation")
+    violation_pairs = [cp for cp in checkpoints if cp.get("kind") in
+                       ("violation_before", "violation_after")]
+    if violation is None or any(ch.get("register_seq") == violation.get("register_seq")
+                                for ch in checks):
+        if violation_pairs:
+            gaps.append(f"violation pair: unexpected {len(violation_pairs)} checkpoint(s)")
+        if violation is not None and violation.get("preserved") is not True:
+            gaps.append("first violation: selected highwater event not preserved")
+    else:
+        if (len(violation_pairs) != 2 or
+                [cp.get("kind") for cp in violation_pairs] !=
+                ["violation_before", "violation_after"]):
+            gaps.append("violation pair: missing or out of order")
+        else:
+            for cp, expected_n in zip(violation_pairs,
+                                      (violation.get("N_total_before"),
+                                       violation.get("N_total_after"))):
+                if (cp.get("received_at") != violation.get("received_at") or
+                        cp.get("received_mono") != violation.get("received_mono") or
+                        cp.get("minute_index") != violation.get("minute_index") or
+                        cp.get("N_total") != expected_n):
+                    gaps.append("violation pair: time, minute, or N_total mismatch")
+                    break
+        if violation.get("preserved") is not True:
+            gaps.append("first violation: not preserved")
+    return gaps
+
+
 def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                       churn_minutes=10_080, churn_stride_minutes=1,
                       fixture_detail_divisor=1, _capacity_observer=None,
-                      _stop_requested=None, _progress=None):
+                      _stop_requested=None, _progress=None, _replay_hook=None,
+                      _replay_expected=None, _replay_stop=None, _replay_selected=None):
     if name not in CHURN_NAMES or not 1 <= limit <= CAP:
         raise ValueError("unknown churn fixture or invalid limit")
     if min(churn_minutes, churn_stride_minutes, fixture_detail_divisor) < 1:
@@ -2318,14 +2458,144 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     target = min((2048 + fixture_detail_divisor - 1) // fixture_detail_divisor,
                  DETAIL_CAP, limit - 1) if burst else 0
     ledger = new_ledger(limit, max_resident_bytes)
+    baseline = new_ledger(limit, max_resident_bytes)
+    baseline_sizes = {path: sys.getsizeof(obj) for path, obj in _capacity_containers(baseline)}
+    fixed = baseline.budget_state()["F_4"]
+    replaying = _replay_expected is not None
+    pass_start = time.perf_counter()
     sources, jobs, classes = Counter(), Counter(), Counter()
     checkpoints = []
+    steps = []
+    compared_steps = 0
+    replay_mismatch = None
+    pending = None
+    highwater = {"events": 0, "resident_events": 0, "job_events": 0,
+                 "both_events": 0, "backing_changes": 0, "preserved_pairs": 0,
+                 "violations": 0, "first_violation": None, "unverified_events": 0,
+                 "first_unverified": None, "checks": []}
     def add_checkpoint(kind, minute_index, received_at):
-        cp = _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary)
-        checkpoints.append(cp)
-        if _capacity_observer is not None:
+        cp = _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary,
+                               graph=not replaying)
+        if not replaying:
+            checkpoints.append(cp)
+        if not replaying and _capacity_observer is not None:
             _capacity_observer(ledger, name, kind, minute_index, budget=cp["budget"])
     auxiliary = scheduled = max_details = 0
+    def register_checked(invocation_id, source, wall, minute_index, job_id=None, *, auxiliary_call=False):
+        nonlocal pending, replay_mismatch
+        seq = compared_steps if replaying else len(steps)
+        if replaying and _replay_hook is not None:
+            _replay_hook(seq, ledger, wall)
+        before, before_layout = _highwater_measure(ledger, baseline_sizes, fixed)
+        before_counts = tuple(ledger._health[key] for key in ("N_total", "N_live", "N_tomb", "N_res"))
+        selected_kind = _replay_selected.get(seq) if replaying else None
+        pre_cp = pre_point = None
+        if selected_kind:
+            before_kind = f"{selected_kind}_before"
+            pre_cp = _churn_checkpoint(ledger, before_kind, minute_index, wall,
+                                       scheduled, auxiliary, readonly=True)
+            pre_point = _capacity_point(ledger, baseline_sizes, name,
+                                        before_kind, minute_index, budget=pre_cp["budget"])
+            if (before, before_layout) != _highwater_measure(ledger, baseline_sizes, fixed):
+                replay_mismatch = replay_mismatch or f"replay seq {seq}: pre-capture changed trajectory"
+        result = _register_fixture(ledger, invocation_id, source, wall, job_id)
+        pending = {"seq": seq, "input": (invocation_id, source, wall, minute_index, job_id,
+                                           auxiliary_call), "classification": result["classification"],
+                   "before": before, "before_layout": before_layout,
+                   "before_counts": before_counts, "pre_cp": pre_cp, "pre_point": pre_point}
+        return result
+
+    def finish_step():
+        nonlocal pending, compared_steps, replay_mismatch
+        p = pending
+        pending = None
+        seq = p["seq"]
+        after, after_layout = _highwater_measure(ledger, baseline_sizes, fixed)
+        after_counts = tuple(ledger._health[key] for key in ("N_total", "N_live", "N_tomb", "N_res"))
+        before, before_layout = p["before"], p["before_layout"]
+        res_up = after["H_res"] > before["H_res"]
+        job_up = after["H_job"] > before["H_job"]
+        backing_changed = before_layout != after_layout or before["Q_actual"] != after["Q_actual"]
+        bad = any(side["Q_actual"] > side["Q_4"] or side["E"] > side["B"]
+                  for side in (before, after))
+        event = p["classification"] == "registered" and (res_up or job_up)
+        preserved = event and (backing_changed or job_up or bad)
+        step = {"input": p["input"], "classification": p["classification"],
+                "before_counts": p["before_counts"], "after_counts": after_counts,
+                "before": before, "after": after, "before_layout": before_layout,
+                "after_layout": after_layout, "event": event, "preserved": preserved}
+        if replaying:
+            if seq >= len(_replay_expected) or _replay_step_digest(step) != _replay_expected[seq]:
+                replay_mismatch = replay_mismatch or f"replay seq {seq}: input or state differs"
+            compared_steps += 1
+            if p["pre_cp"] is not None:
+                before_kind = p["pre_cp"]["kind"]
+                after_kind = before_kind.removesuffix("_before") + "_after"
+                post_cp = _churn_checkpoint(ledger, after_kind, p["input"][3],
+                                            p["input"][2], scheduled, auxiliary, readonly=True)
+                if (after, after_layout) != _highwater_measure(ledger, baseline_sizes, fixed):
+                    replay_mismatch = replay_mismatch or f"replay seq {seq}: post-capture changed trajectory"
+                checkpoints.extend((p["pre_cp"], post_cp))
+                if _capacity_observer is not None:
+                    ledger._gate_capacity_pre_point = p["pre_point"]
+                    try:
+                        _capacity_observer(ledger, name, before_kind, p["input"][3],
+                                           budget=p["pre_cp"]["budget"])
+                    finally:
+                        del ledger._gate_capacity_pre_point
+                    _capacity_observer(ledger, name, after_kind, p["input"][3],
+                                       budget=post_cp["budget"])
+            return replay_mismatch is not None or seq == _replay_stop
+        steps.append(_replay_step_digest(step))
+        if not event:
+            if bad:
+                highwater["violations"] += 1
+                if highwater["first_violation"] is None:
+                    highwater["first_violation"] = {
+                        "register_seq": seq, "minute_index": p["input"][3],
+                        "received_at": p["input"][2], "received_mono": p["input"][2],
+                        "N_total_before": p["before_counts"][0],
+                        "N_total_after": after_counts[0], "before": before,
+                        "after": after, "preserved": True}
+            return False
+        minute_index, wall = p["input"][3], p["input"][2]
+        check = {"register_seq": seq, "minute_index": minute_index,
+                 "received_at": wall, "received_mono": wall,
+                 "N_total_before": p["before_counts"][0], "N_total_after": after_counts[0],
+                 "before": before, "after": after, "backing_changed": backing_changed,
+                 "preserved": preserved}
+        highwater["checks"].append(check)
+        highwater["events"] += 1
+        highwater["resident_events"] += int(res_up)
+        highwater["job_events"] += int(job_up)
+        highwater["both_events"] += int(res_up and job_up)
+        highwater["backing_changes"] += int(backing_changed)
+        if bad:
+            highwater["violations"] += 1
+            if highwater["first_violation"] is None:
+                highwater["first_violation"] = check
+        return False
+
+    def replay_result():
+        return {"compared_steps": compared_steps, "mismatch": replay_mismatch,
+                "stopped_after_seq": compared_steps - 1,
+                "seconds": time.perf_counter() - pass_start, "checkpoints": checkpoints}
+
+    def publish_replay_pairs(replayed):
+        pairs = iter(replayed["checkpoints"])
+        checks_by_seq = {ch["register_seq"]: ch for ch in highwater["checks"]}
+        for seq in selected_seqs:
+            pre_cp, post_cp = next(pairs, None), next(pairs, None)
+            if pre_cp is None or post_cp is None:
+                if seq in checks_by_seq:
+                    highwater["unverified_events"] += 1
+                    if highwater["first_unverified"] is None:
+                        highwater["first_unverified"] = checks_by_seq[seq]
+                continue
+            checkpoints.extend((pre_cp, post_cp))
+            if seq in checks_by_seq:
+                highwater["preserved_pairs"] += 1
+
     failure = None
     schedule_start = T
     if burst:
@@ -2334,26 +2604,36 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 failure = {"phase": "budget"}
                 break
             invocation_id = _fixture_id(i, kind, "b")
-            r = _register_fixture(ledger, invocation_id, SOURCE, T)
+            r = register_checked(invocation_id, SOURCE, T, -1, auxiliary_call=True)
             if r["classification"] != "registered":
                 failure = {"phase": "burst", "index": i, "classification": r["classification"]}
+                if finish_step() and replaying:
+                    return replay_result()
                 break
             auxiliary += 1
             sources[SOURCE] += 1
+            if finish_step() and replaying:
+                return replay_result()
             a = _link_fixture(ledger, invocation_id, SOURCE, T)
             b = _finish_fixture(ledger, invocation_id, SOURCE, T) if a["classification"] == "linked" else a
             if b["classification"] != "finalized":
                 failure = {"phase": "burst_finish", "index": i, "classification": b["classification"]}
+            if failure:
                 break
+        if replaying and failure:
+            return dict(replay_result(), mismatch=replay_mismatch or "replay: burst ended early")
         max_details = ledger._health["retained_details"]
         add_checkpoint("detail_open", -1, T)
         if failure is None:
-            probe = _register_fixture(ledger, _fixture_id(target, kind, "b"), SOURCE, T)
+            probe = register_checked(_fixture_id(target, kind, "b"), SOURCE, T,
+                                     -1, auxiliary_call=True)
             if probe["classification"] == "registered":
                 auxiliary += 1
                 sources[SOURCE] += 1
             else:
                 failure = {"phase": "probe", "classification": probe["classification"]}
+            if finish_step() and replaying:
+                return replay_result()
             if failure is None:
                 add_checkpoint("highwater", -1, T)
         release_at = T + 71 * MINUTE
@@ -2377,19 +2657,26 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         base = schedule_start + minute * churn_stride_minutes * MINUTE
         ledger.aggregation_snapshot(as_of=base, as_of_mono=base)
         for offset_index, (offset, source) in enumerate(zip(offsets, source_order)):
+            if _stop_requested is not None and _stop_requested():
+                failure = {"phase": "budget", "minute": minute}
+                break
             wall = base + offset
             invocation_id = _fixture_id(scheduled, kind, "c")
             job = job_by_source[source]
-            r = _register_fixture(ledger, invocation_id, source, wall, job)
+            r = register_checked(invocation_id, source, wall, minute, job)
             classes[r["classification"]] += 1
             if r["classification"] != "registered":
                 failure = {"minute": minute, "offset_index": offset_index,
                            "classification": r["classification"]}
+                if finish_step() and replaying:
+                    return replay_result()
                 break
             sources[source] += 1
             jobs[(source, job)] += 1
             position = scheduled % 20
             scheduled += 1
+            if finish_step() and replaying:
+                return replay_result()
             finish_count = 4 if track == "most_unfinished" else 16
             linked_count = 4 if track == "most_unfinished" else 2
             if position < finish_count:
@@ -2397,37 +2684,33 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 b = _finish_fixture(ledger, invocation_id, source, wall) if a["classification"] == "linked" else a
                 if b["classification"] != "finalized":
                     failure = {"minute": minute, "phase": "finish", "classification": b["classification"]}
-                    break
             elif position < finish_count + linked_count:
                 a = _link_fixture(ledger, invocation_id, source, wall)
                 if a["classification"] != "linked":
                     failure = {"minute": minute, "phase": "link", "classification": a["classification"]}
-                    break
             elif init_variant and position == finish_count + linked_count:
                 a = _init_failed_fixture(ledger, invocation_id, wall)
                 if a["classification"] != "report_init_failed":
                     failure = {"minute": minute, "phase": "init_failed", "classification": a["classification"]}
-                    break
+            if failure:
+                break
         if failure is None and ledger._q_charge() > last_observed_q:
             add_checkpoint("highwater", minute, base + offsets[-1])
             last_observed_q = ledger._q_charge()
-        next_base = schedule_start + (minute + 1) * churn_stride_minutes * MINUTE
-        hour = (base // (60 * MINUTE) + 1) * 60 * MINUTE
-        while hour <= next_base:
-            day_span = 24 * 60 * MINUTE
-            add_checkpoint("hour", minute, hour)
-            if (hour >= schedule_start + day_span and
-                    (hour - schedule_start) // day_span >
-                    (hour - 60 * MINUTE - schedule_start) // day_span):
-                add_checkpoint("day", minute, hour)
-            hour += 60 * MINUTE
+        first_hour = minute * churn_stride_minutes // 60 + 1
+        last_hour = (minute + 1) * churn_stride_minutes // 60
+        for hour_index in range(first_hour, last_hour + 1):
+            boundary = schedule_start + hour_index * 60 * MINUTE
+            add_checkpoint("hour", minute, boundary)
+            if hour_index % 24 == 0:
+                add_checkpoint("day", minute, boundary)
         max_details = max(max_details, ledger._health["retained_details"])
     if failure is None:
         tail_time = schedule_start + churn_minutes * churn_stride_minutes * MINUTE
         full = churn_minutes == 10_080 and churn_stride_minutes == 1
         add_checkpoint("tail_80640" if full else "tail_before", churn_minutes, tail_time)
-        tail = _register_fixture(ledger, _fixture_id(scheduled, kind, "c"), "investing",
-                                 tail_time, job_by_source["investing"])
+        tail = register_checked(_fixture_id(scheduled, kind, "c"), "investing",
+                                tail_time, churn_minutes, job_by_source["investing"])
         classes[tail["classification"]] += 1
         if tail["classification"] == "registered":
             scheduled += 1
@@ -2435,8 +2718,45 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             jobs[("investing", job_by_source["investing"])] += 1
         else:
             failure = {"phase": "tail", "classification": tail["classification"]}
+        if finish_step() and replaying:
+            return replay_result()
         add_checkpoint("tail_80641" if full else "tail_after", churn_minutes, tail_time)
-    valid = (failure is None and scheduled == 8 * churn_minutes + 1 and
+    if replaying:
+        return dict(replay_result(), mismatch=replay_mismatch or
+                    ("budget" if failure and failure.get("phase") == "budget" else
+                     "replay: stopped before selected seq"))
+    pass1_seconds = time.perf_counter() - pass_start
+    selected_kinds = {ch["register_seq"]: "highwater" for ch in highwater["checks"]
+                      if ch["preserved"]}
+    violation = highwater["first_violation"]
+    if violation is not None and violation["register_seq"] not in selected_kinds:
+        selected_kinds[violation["register_seq"]] = "violation"
+    selected_seqs = sorted(selected_kinds)
+    replay = {"performed": False, "stopped_after_seq": None, "compared_steps": 0,
+              "mismatch": None, "pass1_seconds": pass1_seconds, "pass2_seconds": 0.0}
+    if selected_seqs and failure is None:
+        replayed = run_churn_fixture(
+            name, limit=limit, max_resident_bytes=max_resident_bytes,
+            churn_minutes=churn_minutes, churn_stride_minutes=churn_stride_minutes,
+            fixture_detail_divisor=fixture_detail_divisor, _capacity_observer=_capacity_observer,
+            _stop_requested=_stop_requested, _progress=_progress, _replay_hook=_replay_hook,
+            _replay_expected=steps, _replay_stop=selected_seqs[-1],
+            _replay_selected=selected_kinds)
+        publish_replay_pairs(replayed)
+        replay.update(performed=True, stopped_after_seq=replayed["stopped_after_seq"],
+                      compared_steps=replayed["compared_steps"], mismatch=replayed["mismatch"],
+                      pass2_seconds=replayed["seconds"])
+    highwater["replay"] = replay
+    checkpoint_gaps = churn_checkpoint_gaps(checkpoints, minute_batches=churn_minutes,
+                                            stride_minutes=churn_stride_minutes)
+    highwater_gaps = highwater_pair_gaps(highwater, checkpoints)
+    unknown_ownership = any(cp["budget"]["G"] is None or cp["budget"]["unknown_types"]
+                            for cp in checkpoints)
+    valid = (failure is None and replay["mismatch"] is None and
+             (not selected_seqs or replay["performed"]) and
+             not checkpoint_gaps and not highwater_gaps and
+             not highwater["violations"] and not highwater["unverified_events"] and
+             scheduled == 8 * churn_minutes + 1 and
              (not burst or max_details >= target) and
              ledger._health["registered_records"] == ledger._health["N_total"] == ledger._seq.total and
              all(cp["N_res"] == cp["N_live"] + cp["N_tomb"] <= limit and
@@ -2445,8 +2765,27 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                  not cp["admission_stopped"] and cp["budget"]["G"] is not None and
                  cp["budget"]["G"] <= cp["budget"]["E"] <= cp["budget"]["B"]
                  for cp in checkpoints))
-    return {"name": name, "status": "PASS" if valid else "UNVERIFIED" if failure and
-            failure.get("phase") == "budget" else "FAIL", "id_kind": kind,
+    reason = (None if valid else "budget" if failure and failure.get("phase") == "budget"
+              else "churn admission or checkpoint invariant failed")
+    if checkpoint_gaps:
+        reason = (f"{reason}; " if reason else "") + "checkpoint gaps: " + "; ".join(checkpoint_gaps)
+    if highwater_gaps or highwater["unverified_events"]:
+        reason = (f"{reason}; " if reason else "") + "highwater gaps: " + "; ".join(
+            highwater_gaps or [f"{highwater['unverified_events']} unverified event(s)"])
+    if highwater["violations"]:
+        reason = (f"{reason}; " if reason else "") + "highwater Q_actual or E limit exceeded"
+    if unknown_ownership:
+        reason = (f"{reason}; " if reason else "") + "owned graph or baseline unverified"
+    if replay["mismatch"]:
+        reason = (f"{reason}; " if reason else "") + replay["mismatch"]
+    status = ("PASS" if valid else "UNVERIFIED" if checkpoint_gaps or
+              highwater_gaps or highwater["unverified_events"] or
+              replay["mismatch"] or (failure and failure.get("phase") == "budget") else "FAIL")
+    if highwater["violations"]:
+        status = "FAIL"
+    if replay["mismatch"] or unknown_ownership:
+        status = "UNVERIFIED"
+    return {"name": name, "status": status, "id_kind": kind,
             "state_track": track + ("_init_failed" if init_variant else ""),
             "job_key_counts": _job_counts(jobs), "id_utf8_bytes": len(_fixture_id(0, kind, "c").encode()),
             "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, "c")),
@@ -2456,9 +2795,9 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             "source_registered": dict(sources), "requested_detail_target": 2048 if burst else 0,
             "effective_detail_target": target, "max_retained_details_observed": max_details,
             "tail_classification": tail["classification"] if tail else None,
-            "checkpoints": checkpoints, "classification_counts": dict(classes),
-            "first_failure": failure, "reason": None if valid else "budget" if failure and
-            failure.get("phase") == "budget" else "churn admission or checkpoint invariant failed"}
+            "checkpoints": checkpoints, "highwater_checks": highwater,
+            "classification_counts": dict(classes),
+            "first_failure": failure, "reason": reason}
 
 
 def _capacity_containers(ledger):
@@ -2551,6 +2890,7 @@ def _calibration_eta(observations, budget_seconds):
                   basis="calibration",
                   decision="agreement_required" if seconds > 14_400 else "within_budget",
                   assumptions=["linear projection of each completed small-run fixture to its full unit count",
+                               "churn pass 1 scales with scheduled calls; pass 2 uses the observed selected prefix and resident growth, with quadratic allowance for larger graph captures",
                                "capacity observation time is counted separately and within pressure/churn elapsed time",
                                "50% model uncertainty; same host and runtime are assumed"])
     return result
@@ -2604,12 +2944,13 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
 
     def note_calibration(class_name, fixture_name, completed_units, projected_full_units,
                          elapsed_seconds, *, prepare_seconds=0.0, clone_seconds=0.0,
-                         call_seconds=0.0, gc_seconds=0.0, owned_graph_seconds=0.0):
+                         call_seconds=0.0, gc_seconds=0.0, owned_graph_seconds=0.0,
+                         projected_override=None, replay_projection=None):
         if not calibration or completed_units <= 0:
             return
         projected_full_units = max(completed_units, projected_full_units)
-        projected = (elapsed_seconds * projected_full_units / completed_units
-                     if completed_units else 0.0)
+        projected = (projected_override if projected_override is not None else
+                     elapsed_seconds * projected_full_units / completed_units)
         calibration_observations.append({"class_name": class_name, "fixture_name": fixture_name,
                                          "completed_units": completed_units,
                                          "elapsed_seconds": elapsed_seconds,
@@ -2618,6 +2959,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                                          "call_seconds": call_seconds,
                                          "gc_seconds": gc_seconds,
                                          "owned_graph_seconds": owned_graph_seconds,
+                                         "replay_projection": replay_projection,
                                          "projected_full_units": projected_full_units,
                                          "projected_full_seconds": projected})
     env = environment()
@@ -2773,9 +3115,13 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                                    "new_bytes": b["capacity"]["rebuild_new_bytes"],
                                    "budget": b, "temporary_peak_minus_current_before_bytes": None,
                                    "status": "UNVERIFIED", "reason": "during-backings witness missing"})
-        capacity_points.append(_capacity_point(ledger, baseline_sizes, fixture_name,
-                                               kind if kind in ("hour", "day", "prune", "highwater")
-                                               else "tail", minute_index, budget=budget))
+        if kind in ("highwater_before", "violation_before") and hasattr(ledger, "_gate_capacity_pre_point"):
+            capacity_points.append(ledger._gate_capacity_pre_point)
+        else:
+            capacity_points.append(_capacity_point(ledger, baseline_sizes, fixture_name,
+                                                   kind if kind in ("hour", "day", "prune", "highwater",
+                                                                    "highwater_after", "violation_after") else "tail",
+                                                   minute_index, budget=budget))
         if calibration:
             capacity_seconds += wall() - observed_at
 
@@ -2817,12 +3163,31 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                                     _progress=lambda count: print(f"progress {name} batches={count}", file=progress))
         churn_fixtures.append(fixture)
         if calibration:
+            rp = fixture["highwater_checks"]["replay"]
+            full_ratio = 80_641 / max(1, fixture["scheduled_registered"])
+            observed_hres = max((ch["after"]["H_res"] for ch in
+                                 fixture["highwater_checks"]["checks"]), default=1)
+            resident_ratio = min(full_ratio, max(1, (2880 + fixture["auxiliary_registered"]) /
+                                                max(1, observed_hres)))
+            # High-water selection is concentrated while resident backing grows;
+            # the replay ends at the last selected step, not at day seven.
+            projected_pass1 = rp["pass1_seconds"] * full_ratio
+            projected_pass2 = rp["pass2_seconds"] * resident_ratio**2
+            replay_projection = {"pass1_seconds": rp["pass1_seconds"],
+                                 "pass2_seconds": rp["pass2_seconds"],
+                                 "selected_pairs": fixture["highwater_checks"]["preserved_pairs"],
+                                 "compared_steps": rp["compared_steps"],
+                                 "resident_scale": resident_ratio,
+                                 "projected_pass1_seconds": projected_pass1,
+                                 "projected_pass2_seconds": projected_pass2}
             note_calibration("churn_burst" if name.startswith("churn_burst") else "churn_normal",
                              name, fixture["scheduled_registered"], 80_641,
-                             wall() - calibration_start)
+                             wall() - calibration_start,
+                             projected_override=projected_pass1 + projected_pass2,
+                             replay_projection=replay_projection)
         rows.append(summary_row(name, "churn", fixture["status"], fixture["reason"]))
         print(f"end {name} {fixture['status']}", file=progress)
-        if fixture["reason"] == "budget":
+        if fixture["first_failure"] and fixture["first_failure"].get("phase") == "budget":
             aborted = "budget"
     capacity = _capacity_proof(capacity_points)
     if calibration and capacity_points:

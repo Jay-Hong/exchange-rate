@@ -9,6 +9,7 @@ Codex 작성, Claude 검토 R1~R4 반영·합의). 이름·모양: `slice5a4c_in
 """
 from __future__ import annotations
 
+import copy
 import importlib.util
 import math
 import sys
@@ -29,9 +30,20 @@ CHURN = [
     "churn_init_failed_most_finished_unicode128", "churn_init_failed_most_unfinished_unicode128",
     "churn_burst_ascii128", "churn_burst_unicode128",
 ]
+MIN = 60 * 10 ** 6                                                                       # 1분(µs)
 F4 = lg.RoundLedger("E1", aggregation_started_at=0).budget_state()["F_4"]      # 공개 관측으로만
 B_DEFAULT = 62_914_560
 SMALL_CHURN = dict(churn_minutes=25, churn_stride_minutes=60, fixture_detail_divisor=256)
+
+
+_DEFAULT_CHURN = []
+
+
+def _default_churn():
+    """패치 없는 기본 소형 churn 은 한 번만 돌리고 사본을 준다(CI 비용). 패치·hook 을 쓰는 시험은 직접 돌린다."""
+    if not _DEFAULT_CHURN:
+        _DEFAULT_CHURN.append(gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN))
+    return copy.deepcopy(_DEFAULT_CHURN[0])
 CHECKPOINT_KEYS = {"F_4", "Q_4", "D", "A", "R", "T", "R_T", "AR", "TR", "E", "B", "G", "B_minus_E", "N_total", "N_live",
                    "N_tomb", "N_res", "capacity", "rebuild_count", "unknown_types"}
 FIRST_REJECTION_KEYS = {"candidate_id", "candidate_source", "candidate_job_id", "candidate_seq", "received_at", "received_mono", "classification", "cause",
@@ -46,7 +58,8 @@ CHURN_KEYS = {"name", "status", "id_kind", "state_track", "job_key_counts", "id_
               "minute_batches", "stride_minutes", "scheduled_target",
               "scheduled_registered", "auxiliary_registered", "N_total_at_tail", "source_registered",
               "requested_detail_target", "effective_detail_target", "max_retained_details_observed",
-              "tail_classification", "checkpoints", "classification_counts", "first_failure", "reason"}
+              "tail_classification", "checkpoints", "classification_counts", "first_failure", "reason",
+              "highwater_checks"}
 CHURN_CP_KEYS = {"kind", "minute_index", "received_at", "received_mono", "scheduled_registered", "auxiliary_registered",
                  "N_total", "N_live", "N_tomb", "N_res", "retained_details", "budget", "last_received_at",
                  "last_received_mono", "cumulative_end", "cursor_after_seq", "cursor_next_seq", "cohort_exact_from",
@@ -226,7 +239,7 @@ def test_small_churn_registers_every_scheduled_call(name):
 
 
 def test_small_churn_actually_retires_and_prunes():
-    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    c = _default_churn()
     last = c["checkpoints"][-1]
     assert last["N_total"] > last["N_res"]                                                   # 누적 > 상주
     assert last["frozen_through"] is not None and last["cohort_exact_from"] > 0
@@ -449,3 +462,314 @@ def test_pressure_fixture_does_not_call_budget_state_per_registration(monkeypatc
     p = gate.run_pressure_fixture("pressure_p0_short_ascii", limit=4096, max_resident_bytes=F4 + 1_000_000)
     assert p["N_last_accepted"] > 200 and p["status"] == "PASS"
     assert calls["n"] <= 64, calls["n"]
+
+
+# ───────── full 2회차 HOLD(09-27): churn 경계 체크포인트가 시작 기준이 아니고 day 하나가 빠짐 ─────────
+
+@pytest.mark.parametrize("name", ["churn_most_finished_short_ascii", "churn_burst_unicode128"])
+def test_churn_boundaries_are_exact_from_schedule_start(name):
+    c = gate.run_churn_fixture(name, limit=128, **SMALL_CHURN)
+    cps = c["checkpoints"]
+    tail = next(cp for cp in cps if cp["kind"] == "tail_before")["received_at"]
+    span = 25 * 60 * MIN
+    start = tail - span
+    hours = sorted(cp["received_at"] for cp in cps if cp["kind"] == "hour")
+    days = sorted(cp["received_at"] for cp in cps if cp["kind"] == "day")
+    assert hours == [start + k * 60 * MIN for k in range(1, 26)]                             # 시작 기준, tail 과 같은 경계 포함
+    assert days == [start + 24 * 60 * MIN]
+    assert gate.churn_checkpoint_gaps(cps, minute_batches=25, stride_minutes=60) == []
+    assert c["status"] == "PASS"
+
+
+def test_churn_checkpoint_gaps_detects_missing_and_shifted():
+    c = _default_churn()
+    cps = c["checkpoints"]
+    without_day = [cp for cp in cps if cp["kind"] != "day"]
+    assert gate.churn_checkpoint_gaps(without_day, minute_batches=25, stride_minutes=60)
+    without_tail = [cp for cp in cps if cp["kind"] != "tail_after"]
+    assert gate.churn_checkpoint_gaps(without_tail, minute_batches=25, stride_minutes=60)
+    shifted = [dict(cp, received_at=cp["received_at"] + 1) if cp["kind"] == "hour" else cp for cp in cps]
+    assert gate.churn_checkpoint_gaps(shifted, minute_batches=25, stride_minutes=60)
+    one_hour_less = list(cps)
+    one_hour_less.remove(next(cp for cp in cps if cp["kind"] == "hour"))
+    assert gate.churn_checkpoint_gaps(one_hour_less, minute_batches=25, stride_minutes=60)
+    assert gate.churn_checkpoint_gaps(cps, minute_batches=25, stride_minutes=60) == []
+    duplicated_hour = cps + [next(cp for cp in cps if cp["kind"] == "hour")]
+    gaps = gate.churn_checkpoint_gaps(duplicated_hour, minute_batches=25, stride_minutes=60)
+    assert any(g.startswith("hour unexpected") for g in gaps)
+    shifted_after_tail = [dict(cp, received_at=cp["received_at"] + 1) if cp["kind"] == "tail_after" else cp
+                          for cp in cps]
+    gaps = gate.churn_checkpoint_gaps(shifted_after_tail, minute_batches=25, stride_minutes=60)
+    assert any(g.startswith("tail_after: expected received_at") for g in gaps)
+
+
+def test_churn_status_requires_complete_checkpoints(monkeypatch):
+    original = gate.churn_checkpoint_gaps
+    monkeypatch.setattr(gate, "churn_checkpoint_gaps", lambda *a, **k: ["day 1 missing"])
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    assert c["status"] == "UNVERIFIED" and "day 1 missing" in (c["reason"] or "")
+    monkeypatch.setattr(gate, "churn_checkpoint_gaps", original)
+
+
+# --- highwater 선택 보존 (addendum slice5a4c_addendum_highwater.md, C′2 교체) ---------------------------
+HW_KEYS = {"events", "resident_events", "job_events", "both_events", "backing_changes", "preserved_pairs",
+           "violations", "first_violation", "unverified_events", "first_unverified", "checks", "replay"}
+REPLAY_KEYS = {"performed", "stopped_after_seq", "compared_steps", "mismatch", "pass1_seconds", "pass2_seconds"}
+HW_SIDE_KEYS = {"H_res", "H_job", "Q_4", "E", "B", "Q_actual"}
+
+
+def _run_with_register_spy(monkeypatch, name, **kw):
+    """게이트와 무관하게 register 호출 전후 H_res/H_job 증가를 직접 센다."""
+    seen = []
+    original = lg.RoundLedger.register
+
+    def spy(self, **kwargs):
+        before = (self._q_highwater, self._job_highwater)
+        out = original(self, **kwargs)
+        after = (self._q_highwater, self._job_highwater)
+        if out.get("classification") == "registered" and after != before:
+            seen.append((id(self), kwargs["received_at"], after[0] > before[0], after[1] > before[1]))
+        return out
+
+    monkeypatch.setattr(lg.RoundLedger, "register", spy)
+    points = []
+    c = gate.run_churn_fixture(name, limit=128, _capacity_observer=lambda led, fx, kind, m, *, budget=None:
+                               points.append((kind, m)), **SMALL_CHURN, **kw)
+    first = seen[0][0] if seen else None                              # 1차 원장만 센다(2차 재실행은 제외)
+    return c, [row[1:] for row in seen if row[0] == first], points
+
+
+@pytest.mark.parametrize("name", ["churn_most_finished_short_ascii", "churn_burst_ascii128"])
+def test_highwater_checks_cover_every_register_increase(monkeypatch, name):
+    c, seen, _ = _run_with_register_spy(monkeypatch, name)
+    hw = c["highwater_checks"]
+    assert set(hw) == HW_KEYS
+    assert hw["events"] == len(hw["checks"]) == len(seen) > 0
+    assert hw["resident_events"] == sum(r for _, r, _ in seen)
+    assert hw["job_events"] == sum(j for _, _, j in seen)
+    assert hw["both_events"] == sum(r and j for _, r, j in seen)
+    assert [ch["received_at"] for ch in hw["checks"]] == [at for at, _, _ in seen]
+    assert hw["violations"] == 0 and hw["first_violation"] is None
+    assert hw["unverified_events"] == 0 and hw["first_unverified"] is None
+    assert c["status"] == "PASS"
+
+
+def test_highwater_check_records_before_after_and_limits():
+    c = _default_churn()
+    for ch in c["highwater_checks"]["checks"]:
+        assert {"minute_index", "received_at", "received_mono", "N_total_before", "N_total_after",
+                "before", "after", "preserved"} <= set(ch)
+        assert ch["N_total_after"] == ch["N_total_before"] + 1
+        assert set(ch["before"]) >= HW_SIDE_KEYS and set(ch["after"]) >= HW_SIDE_KEYS
+        b, a = ch["before"], ch["after"]
+        assert a["H_res"] > b["H_res"] or a["H_job"] > b["H_job"]
+        for side in (b, a):
+            assert side["Q_actual"] <= side["Q_4"] and side["E"] <= side["B"]
+
+
+def test_highwater_preserves_pairs_only_on_backing_or_job_change():
+    c = _default_churn()
+    hw = c["highwater_checks"]
+    for ch in hw["checks"]:
+        b, a = ch["before"], ch["after"]
+        if a["H_job"] > b["H_job"] or a["Q_actual"] != b["Q_actual"]:
+            assert ch["preserved"] is True
+        if not ch["preserved"]:
+            assert a["Q_actual"] == b["Q_actual"] and a["H_job"] == b["H_job"]
+    preserved = [ch for ch in hw["checks"] if ch["preserved"]]
+    assert hw["preserved_pairs"] == len(preserved) >= hw["job_events"]
+    assert hw["backing_changes"] <= hw["preserved_pairs"] <= hw["events"]
+    befores = [cp for cp in c["checkpoints"] if cp["kind"] == "highwater_before"]
+    afters = [cp for cp in c["checkpoints"] if cp["kind"] == "highwater_after"]
+    assert len(befores) == len(afters) == len(preserved)
+    for ch, cb, ca in zip(preserved, befores, afters):
+        assert cb["received_at"] == ca["received_at"] == ch["received_at"]
+        assert cb["minute_index"] == ca["minute_index"] == ch["minute_index"]
+        assert cb["N_total"] == ch["N_total_before"] and ca["N_total"] == ch["N_total_after"]
+    assert gate.highwater_pair_gaps(hw, c["checkpoints"]) == []
+
+
+def test_highwater_capacity_observer_gets_same_pairs():
+    points = []
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128,
+                               _capacity_observer=lambda led, fx, kind, m, *, budget=None: points.append((kind, m)),
+                               **SMALL_CHURN)
+    churn_pairs = [(cp["kind"], cp["minute_index"]) for cp in c["checkpoints"]
+                   if cp["kind"] in ("highwater_before", "highwater_after")]
+    observed = [p for p in points if p[0] in ("highwater_before", "highwater_after")]
+    assert observed == churn_pairs and len(observed) == 2 * c["highwater_checks"]["preserved_pairs"]
+
+
+def test_highwater_pair_gaps_detect_mismatch():
+    c = _default_churn()
+    hw, cps = c["highwater_checks"], c["checkpoints"]
+    drop_after = list(cps)
+    drop_after.remove(next(cp for cp in cps if cp["kind"] == "highwater_after"))
+    assert gate.highwater_pair_gaps(hw, drop_after)
+    shifted = [dict(cp, received_at=cp["received_at"] + 1) if cp["kind"] == "highwater_before" else cp
+               for cp in cps]
+    assert gate.highwater_pair_gaps(hw, shifted)
+    fewer_checks = dict(hw, checks=hw["checks"][:-1])
+    assert gate.highwater_pair_gaps(fewer_checks, cps)
+    unpreserved = dict(hw, checks=[dict(ch, preserved=False) for ch in hw["checks"]])
+    assert gate.highwater_pair_gaps(unpreserved, cps)
+
+
+def test_highwater_gaps_make_fixture_unverified(monkeypatch):
+    monkeypatch.setattr(gate, "highwater_pair_gaps", lambda *a, **k: ["pair 3 missing"])
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    assert c["status"] == "UNVERIFIED" and "pair 3 missing" in (c["reason"] or "")
+
+
+def test_highwater_violation_fails_fixture(monkeypatch):
+    monkeypatch.setattr(lg.RoundLedger, "_q_charge", lambda self, resident=None, jobs=None: 0)
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    hw = c["highwater_checks"]
+    assert hw["violations"] > 0 and hw["first_violation"] is not None
+    assert hw["first_violation"]["after"]["Q_actual"] > hw["first_violation"]["after"]["Q_4"] or \
+        hw["first_violation"]["before"]["Q_actual"] > hw["first_violation"]["before"]["Q_4"]
+    assert c["status"] == "FAIL"
+
+
+# --- 2-pass 재실행 (addendum slice5a4c_addendum_highwater_2pass.md) -------------------------------------
+def test_replay_stops_after_last_selected_event_and_matches():
+    calls = []
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN,
+                               _replay_hook=lambda seq, led, wall: calls.append(seq))
+    hw = c["highwater_checks"]
+    rp = hw["replay"]
+    assert set(rp) == REPLAY_KEYS
+    seqs = [ch["register_seq"] for ch in hw["checks"]]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs) and min(seqs) >= 0
+    selected = [ch["register_seq"] for ch in hw["checks"] if ch["preserved"]]
+    assert selected and rp["performed"] is True and rp["mismatch"] is None
+    assert rp["stopped_after_seq"] == max(selected)
+    assert rp["compared_steps"] == rp["stopped_after_seq"] + 1
+    assert calls == list(range(rp["stopped_after_seq"] + 1))        # 2차는 마지막 선택 순번에서 멈춘다
+    assert rp["pass1_seconds"] >= 0 and rp["pass2_seconds"] >= 0
+    assert c["status"] == "PASS"
+
+
+def test_replay_hook_is_pass2_only(monkeypatch):
+    seen = []
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN,
+                               _replay_hook=lambda seq, led, wall: seen.append(id(led)))
+    assert len(set(seen)) == 1                                         # 한 원장(2차)에서만 불린다
+    assert c["highwater_checks"]["replay"]["mismatch"] is None
+
+
+def _perturb_at(target, action):
+    def hook(seq, led, wall):
+        if seq == target:
+            action(led, wall)
+    return hook
+
+
+def test_replay_detects_extra_registration_before_last_selected():
+    c = gate.run_churn_fixture(
+        "churn_most_finished_short_ascii", limit=128, **SMALL_CHURN,
+        _replay_hook=_perturb_at(1, lambda led, wall: gate._register_fixture(led, "zz-perturb", "investing", wall)))
+    rp = c["highwater_checks"]["replay"]
+    assert rp["mismatch"] and c["status"] == "UNVERIFIED" and rp["mismatch"] in (c["reason"] or "")
+
+
+def test_replay_detects_state_change_without_new_record():
+    def bump(led, wall):
+        led._job_highwater += 1
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN,
+                               _replay_hook=_perturb_at(0, bump))
+    assert c["highwater_checks"]["replay"]["mismatch"] and c["status"] == "UNVERIFIED"
+
+
+def test_replay_ignores_changes_after_stop():
+    c0 = _default_churn()
+    stop = c0["highwater_checks"]["replay"]["stopped_after_seq"]
+    c = gate.run_churn_fixture(
+        "churn_most_finished_short_ascii", limit=128, **SMALL_CHURN,
+        _replay_hook=_perturb_at(stop + 1, lambda led, wall: gate._register_fixture(led, "zz-late", "investing", wall)))
+    assert c["highwater_checks"]["replay"]["mismatch"] is None and c["status"] == "PASS"
+
+
+def test_full_graph_walks_not_proportional_to_events(monkeypatch):
+    walks = []
+    original = gate.owned_graph
+    monkeypatch.setattr(gate, "owned_graph", lambda root: walks.append(1) or original(root))
+    c = gate.run_churn_fixture("churn_most_unfinished_ascii128", limit=4096,
+                               churn_minutes=40, churn_stride_minutes=1, fixture_detail_divisor=256)
+    hw = c["highwater_checks"]
+    assert hw["events"] > 2 * len(c["checkpoints"])                  # 비공허: 사건이 체크포인트보다 훨씬 많다
+    assert len(walks) <= len(c["checkpoints"])                        # 저장된 체크포인트마다 많아야 1회
+    assert c["status"] == "PASS"
+
+
+# --- 배터리 생존 변이 보강(G19·G22·G23): 조건 하나만 다르게 만드는 주입 ----------------------------------
+def test_job_highwater_preserved_without_backing_change(monkeypatch):
+    monkeypatch.setattr(gate, "_capacity_containers", lambda led: [])   # backing 관측을 비워 H_job 규칙만 남긴다
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    job_checks = [ch for ch in c["highwater_checks"]["checks"] if ch["after"]["H_job"] > ch["before"]["H_job"]]
+    assert any(not ch["backing_changed"] for ch in job_checks)       # 비공허: backing 변화 없는 H_job 경신이 있다
+    assert all(ch["preserved"] for ch in job_checks)
+
+
+def test_replay_detects_after_layout_only_difference(monkeypatch):
+    c0 = _default_churn()
+    stop = c0["highwater_checks"]["replay"]["stopped_after_seq"]
+    original = gate._capacity_containers
+    monkeypatch.setattr(gate, "_capacity_containers", lambda led: original(led) + (
+        [("alias.records", led._records)] if getattr(led, "_test_alias", False) else []))
+
+    def arm(seq, led, wall):                                          # 마지막 선택 순번의 register 직후부터만 경로가 늘어난다
+        if seq == stop:
+            real = led.register
+            def register(**kw):
+                out = real(**kw)
+                led._test_alias = True
+                return out
+            led.register = register
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN, _replay_hook=arm)
+    rp = c["highwater_checks"]["replay"]
+    assert rp["mismatch"] and f"seq {stop}" in rp["mismatch"] and c["status"] == "UNVERIFIED"
+
+
+@pytest.mark.parametrize("kind,label", [("highwater_before", "pre-capture"), ("highwater_after", "post-capture")])
+def test_replay_detects_capture_that_changes_state(monkeypatch, kind, label):
+    original = gate._churn_checkpoint
+
+    def capture(ledger, k, *a, **kw):
+        out = original(ledger, k, *a, **kw)
+        if k == kind:
+            ledger._job_highwater += 1                                # 캡처가 원장 상태를 바꾸는 결함
+        return out
+    monkeypatch.setattr(gate, "_churn_checkpoint", capture)
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    rp = c["highwater_checks"]["replay"]
+    assert rp["mismatch"] and label in rp["mismatch"] and c["status"] == "UNVERIFIED"
+
+
+
+# --- 경신이 아닌 호출의 첫 위반도 전후 원자료를 보존한다 (addendum_highwater_2pass §1 '첫 위반') ----------------
+def test_first_violation_on_non_event_call_is_preserved(monkeypatch):
+    original = gate._highwater_measure
+
+    def inflated(ledger, baseline_sizes, fixed):                     # 상주가 high-water 아래일 때만 위반을 만든다
+        side, layout = original(ledger, baseline_sizes, fixed)
+        if ledger._health["N_res"] < ledger._q_highwater:
+            side = dict(side, Q_actual=side["Q_4"] + 1)
+        return side, layout
+    monkeypatch.setattr(gate, "_highwater_measure", inflated)
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    hw = c["highwater_checks"]
+    fv = hw["first_violation"]
+    assert hw["violations"] > 0 and fv is not None and c["status"] == "FAIL"
+    assert fv["register_seq"] not in {ch["register_seq"] for ch in hw["checks"]}   # 비공허: 경신이 아닌 호출
+    assert fv["preserved"] is True
+    pair = [cp for cp in c["checkpoints"] if cp["kind"] in ("violation_before", "violation_after")]
+    assert [cp["kind"] for cp in pair] == ["violation_before", "violation_after"]
+    assert all(cp["received_at"] == fv["received_at"] for cp in pair)
+    assert pair[0]["N_total"] == fv["N_total_before"] and pair[1]["N_total"] == fv["N_total_after"]
+    assert gate.highwater_pair_gaps(hw, c["checkpoints"]) == []
+    no_after = [cp for cp in c["checkpoints"] if cp["kind"] != "violation_after"]
+    assert gate.highwater_pair_gaps(hw, no_after)
+    shifted = [dict(cp, received_at=cp["received_at"] + 1) if cp["kind"] == "violation_before" else cp
+               for cp in c["checkpoints"]]
+    assert gate.highwater_pair_gaps(hw, shifted)
