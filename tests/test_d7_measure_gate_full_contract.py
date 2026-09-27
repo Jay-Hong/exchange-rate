@@ -79,7 +79,10 @@ class SpyClock:
 def small(gate):
     spy = SpyClock()
     progress = io.StringIO()
-    report = gate.run_gate(quick=False, budget_seconds=3600, clock=spy, progress=progress, **SMALL)
+    # Keep every scenario while making the small run reach its byte stops promptly.
+    resident_budget = gate.new_ledger(1).budget_state()["F_4"] + 1_500_000
+    report = gate.run_gate(quick=False, budget_seconds=3600, clock=spy, progress=progress,
+                           max_resident_bytes=resident_budget, **SMALL)
     return report, spy, progress.getvalue()
 
 
@@ -307,6 +310,7 @@ def test_gate_observes_d_from_ledger_not_declaration(gate, monkeypatch):
 
 def test_cli_small_full_writes_single_json_object():
     done = subprocess.run([sys.executable, str(GATE_PATH), "--limit", "64", "--samples", "2", "--warmup", "1",
+                           "--row", "close_boundary_exact",
                            "--churn-minutes", "25", "--churn-stride-minutes", "60",
                            "--fixture-detail-divisor", "256"],  # I4: CLI에도 같은 소형 churn 축소
                           cwd=str(ROOT), capture_output=True, text=True, timeout=600,
@@ -314,7 +318,11 @@ def test_cli_small_full_writes_single_json_object():
     assert done.returncode == 0, done.stderr[-2000:]
     report = json.loads(done.stdout)
     assert isinstance(report, dict) and report["mode"] == "full_small"
+    assert {"pressure_fixtures", "churn_fixtures", "capacity_proof", "rebuild_events", "131072_slots",
+            "unreachable_rows", "verdicts", "verdict_reasons", "calibration", "eta"} <= set(report)
+    assert [row["name"] for row in report["scenarios"]] == ["close_boundary_exact"]
     assert any(l.startswith("start ") for l in done.stderr.splitlines())
+    assert any(l.startswith("end ") for l in done.stderr.splitlines())
 
 
 # ───────── 변이 배터리 생존 보강(시험 잠금 뒤 추가 — Codex 재승인 대상) ─────────

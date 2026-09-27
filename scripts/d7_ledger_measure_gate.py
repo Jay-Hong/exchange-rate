@@ -2148,7 +2148,7 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 failures.append({"index": i, "reason": "pre-rejection checkpoint not captured"})
             after = _budget_checkpoint(ledger)
             if _capacity_observer is not None and track != "job_aux":
-                _capacity_observer(ledger, name, "highwater", i)
+                _capacity_observer(ledger, name, "highwater", i, budget=after)
             slot = pre_health["N_res"] >= fixture_limit
             cause = "slot" if slot else "byte"
             if track == "job_aux" and alternate is not None:
@@ -2304,7 +2304,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         cp = _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary)
         checkpoints.append(cp)
         if _capacity_observer is not None:
-            _capacity_observer(ledger, name, kind, minute_index)
+            _capacity_observer(ledger, name, kind, minute_index, budget=cp["budget"])
     auxiliary = scheduled = max_details = 0
     failure = None
     schedule_start = T
@@ -2463,8 +2463,9 @@ def _capacity_containers(ledger):
     return items
 
 
-def _capacity_point(ledger, baseline_sizes, fixture_name, kind, minute_index):
-    budget = _budget_checkpoint(ledger)
+def _capacity_point(ledger, baseline_sizes, fixture_name, kind, minute_index, *, budget=None):
+    if budget is None:
+        budget = _budget_checkpoint(ledger)
     seen = set()
     backings = []
     actual = 0
@@ -2741,7 +2742,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
     baseline_sizes = {name: sys.getsizeof(obj) for name, obj in
                       _capacity_containers(new_ledger(limit))}
 
-    def observe_capacity(ledger, fixture_name, kind, minute_index):
+    def observe_capacity(ledger, fixture_name, kind, minute_index, *, budget=None):
         nonlocal rebuild_seen, capacity_seconds
         observed_at = wall() if calibration else None
         rebuild_seen |= bool(ledger._rebuild_count)
@@ -2754,7 +2755,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                                    "status": "UNVERIFIED", "reason": "during-backings witness missing"})
         capacity_points.append(_capacity_point(ledger, baseline_sizes, fixture_name,
                                                kind if kind in ("hour", "day", "prune", "highwater")
-                                               else "tail", minute_index))
+                                               else "tail", minute_index, budget=budget))
         if calibration:
             capacity_seconds += wall() - observed_at
 
@@ -2924,6 +2925,7 @@ def main():
     parser.add_argument("--warmup", type=int, default=100)
     parser.add_argument("--budget-seconds", type=float, default=14400)
     parser.add_argument("--max-resident-bytes", type=int)
+    parser.add_argument("--row", action="append", dest="rows")
     parser.add_argument("--pressure-name", action="append", dest="pressure_names")
     parser.add_argument("--churn-name", action="append", dest="churn_names")
     parser.add_argument("--churn-minutes", type=int, default=10_080)
@@ -2934,6 +2936,7 @@ def main():
     args = parser.parse_args()
     report = run_gate(limit=args.limit, samples=args.samples, warmup=args.warmup,
                       quick=args.quick, budget_seconds=args.budget_seconds,
+                      rows=args.rows,
                       max_resident_bytes=args.max_resident_bytes,
                       pressure_names=args.pressure_names, churn_names=args.churn_names,
                       churn_minutes=args.churn_minutes,

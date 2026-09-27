@@ -405,7 +405,9 @@ def test_close_and_reverse_bases_do_not_crash_at_byte_stop(name):
 
 
 def test_calibration_over_all_categories_produces_eta():
-    r = gate.run_gate(calibration=True, limit=128, samples=2, warmup=0, **SMALL_CHURN)
+    # 일곱 측정 유형을 모두 관측하는 최소 규모(CI 비용 — Codex 제안, 같은 단언 유지)
+    r = gate.run_gate(calibration=True, limit=32, samples=1, warmup=0, max_resident_bytes=F4 + 1_000_000,
+                      churn_minutes=1, churn_stride_minutes=60, fixture_detail_divisor=4096)
     assert r["mode"] == "calibration" and r["overall"] != "PASS"
     cal, eta = r["calibration"], r["eta"]
     assert cal["status"] == "complete"
