@@ -10,6 +10,7 @@ Codex 작성, Claude 검토 R1~R4 반영·합의). 이름·모양: `slice5a4c_in
 from __future__ import annotations
 
 import copy
+import gc
 import importlib.util
 import math
 import sys
@@ -18,6 +19,18 @@ from pathlib import Path
 import pytest
 
 from app import d7_round_ledger as lg
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _freeze_preexisting_heap():
+    """게이트는 체크포인트마다 gc.collect() 를 부른다. 스위트 전체를 한 프로세스로 돌리면 앞선 시험이 남긴
+    객체까지 매번 훑어 CI 가 20분을 넘겼다(2751c84 CI 취소, 같은 소형 churn 이 힙 300만 객체에서 0.27 s→19 s).
+    이 모듈이 시작될 때 이미 있는 객체만 영구 세대로 옮기고 끝나면 되돌린다. 측정 대상 원장은 그 뒤에 생성된다."""
+    gc.collect()
+    gc.freeze()
+    yield
+    gc.unfreeze()
+
 
 ROOT = Path(__file__).resolve().parents[1]
 GATE_PATH = ROOT / "scripts" / "d7_ledger_measure_gate.py"
