@@ -11,6 +11,7 @@ import argparse
 import ast
 import copy
 import gc
+import gzip
 import hashlib
 import heapq
 import importlib
@@ -19,13 +20,14 @@ import json
 import os
 import platform
 import resource
+import math
 import statistics
 import subprocess
 import sys
 import threading
 import time
 import tracemalloc
-from collections import Counter
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -3662,6 +3664,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             "budget_seconds": budget_seconds, "decision": "unknown", "assumptions": []})
     _gate_resident_budget.reset(budget_token)
     return {"contract": "slice5a4c_contract_r2.md C-prime + slice5a_contract_r2.md S5a.4 B1-B7",
+            "acceptance_stage": "provisional",
             "mode": mode, "complete": aborted is None, "aborted_reason": aborted,
             "overall": overall, "summary": summarize(rows), "scenarios": rows,
             "adapter": adapter, "partial_acceptance": partial,
@@ -3683,7 +3686,2672 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             "exit_code": 0, "reproduce": " ".join(sys.argv)}
 
 
+EVIDENCE_ROW_IDS = (tuple(f"A{i:02d}" for i in range(1, 13))
+                    + tuple(f"B{i:02d}" for i in range(1, 24))
+                    + tuple(f"C{i:02d}" for i in range(1, 11)))
+ROW_IDS = EVIDENCE_ROW_IDS + tuple(f"D{i:02d}" for i in range(1, 6))
+_finalize_cache = ContextVar("d7_finalize_cache", default=None)
+_INDEX_PATHS = frozenset(("live", "tomb", "seq", "owner", "owned_id", "previous_job",
+                          "cohort", "open", "recent", "close", "overdue", "expiry", "prune"))
+_EXISTING_TRANSITION_CLASSES = {
+    "link_round": "linked", "report_init_failed": "report_init_failed",
+    "wrapper_exited": "wrapper_exited", "next_entry": "predecessor_unchanged",
+    "overdue": "overdue", "finish": "finalized", "late_finish": "finalized",
+    "close": "closed", "post_close_duplicate": "post_close_duplicate",
+}
+
+
+class _EvidenceMissing(Exception):
+    pass
+
+
+class _EvidenceViolation(Exception):
+    pass
+
+
+def _need(value, *path):
+    for key in path:
+        try:
+            value = value[key]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise _EvidenceMissing("missing " + ".".join(map(str, path))) from exc
+    return value
+
+
+def _integer(value):
+    if type(value) is not int:
+        raise _EvidenceMissing("integer evidence missing or malformed")
+    return value
+
+
+def _items(value, minimum=1):
+    if not isinstance(value, list) or len(value) < minimum:
+        raise _EvidenceMissing("event list missing or incomplete")
+    return value
+
+
+def _names(value, label):
+    names = _items(value)
+    if not all(isinstance(name, str) and name for name in names):
+        raise _EvidenceMissing(f"{label} name missing or malformed")
+    _assert(len(set(names)) == len(names), f"{label} names duplicated")
+    return names
+
+
+def _unique_named(rows, key, label):
+    names = [_need(row, key) for row in _items(rows)]
+    return _names(names, label)
+
+
+def _trace_projection(trace, transitions):
+    _eq(len(trace), len(transitions), "transition trace length differs")
+    for call, item in zip(trace, transitions):
+        for a, b in (("action", "action"), ("classification", "classification"),
+                     ("detail_charge_bytes", "detail_charge_bytes"), ("registered_seq", "seq")):
+            _eq(_need(call, a), _need(item, b))
+
+
+def _registered_calls(trace):
+    return [step for step in trace if _need(step, "action") == "register" and
+            _need(step, "classification") == "registered"]
+
+
+def _eq(actual, expected, reason="recorded value disagrees with source evidence"):
+    def bool_for_integer(a, b):
+        if (type(a) is bool and type(b) is int) or (type(a) is int and type(b) is bool):
+            return True
+        if isinstance(a, dict) and isinstance(b, dict):
+            return any(key in b and bool_for_integer(value, b[key]) for key, value in a.items())
+        if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+            return any(bool_for_integer(x, y) for x, y in zip(a, b))
+        return False
+    if bool_for_integer(actual, expected):
+        raise _EvidenceMissing("JSON bool cannot stand for integer evidence")
+    if actual != expected:
+        raise _EvidenceViolation(reason)
+
+
+def _assert(condition, reason="measured predicate violated"):
+    if not condition:
+        raise _EvidenceViolation(reason)
+
+
+def _first_fixture(report, key):
+    return _items(_need(report, key))[0]
+
+
+def _index_audit(audit):
+    before, after = _need(audit, "before"), _need(audit, "after")
+    for point in (before, after):
+        paths = _need(point, "paths")
+        if not isinstance(paths, dict) or set(paths) != _INDEX_PATHS:
+            raise _EvidenceMissing("candidate index path audit incomplete")
+        _assert(all(v is False for v in paths.values()), "candidate inserted into an index")
+    _eq(_need(audit, "absent_paths"), sorted(_INDEX_PATHS))
+    for key in ("N_total", "last_seq"):
+        _eq(_integer(_need(before, key)), _integer(_need(after, key)))
+    owned = _need(audit, "owned_bytes")
+    _eq(_need(owned, "candidate_before"), 0)
+    _eq(_need(owned, "candidate_after"), 0)
+
+
+def _budget_order(point):
+    g, e, b = (_integer(_need(point, key)) for key in ("G", "E", "B"))
+    _assert(0 <= g <= e <= b, "G≤E≤B violated")
+
+
+def _observed_timing(scenario):
+    d, k = _integer(_need(scenario, "D")), _integer(_need(scenario, "K"))
+    visits = _integer(_need(scenario, "visits"))
+    limit = 64 + 3 * (d + k)
+    _eq(_integer(_need(scenario, "visit_limit")), limit)
+    _assert(visits <= limit, "visit bound exceeded")
+    timing = _need(scenario, "timing")
+    for kind in ("gc_disabled", "gc_enabled"):
+        sample = _need(timing, kind)
+        raw = _items(_need(sample, "raw_ns"))
+        _eq(_integer(_need(sample, "n")), len(raw))
+        _assert(all(type(n) is int and n >= 0 for n in raw), "invalid duration")
+        ordered = sorted(raw)
+        rank = max(1, math.ceil(len(raw) * .99))
+        _eq(_need(sample, "p99_us"), round(ordered[rank - 1] / 1000, 3))
+        _eq(_need(sample, "max_us"), round(ordered[-1] / 1000, 3))
+        full_cohort = (scenario.get("name") == "cohort_all" and
+                       scenario.get("fixture_stop") != "byte" and d + k == CAP)
+        if kind == "gc_disabled" and (d + k <= DETAIL_CAP or full_cohort):
+            p_limit, max_limit = ((20_000, 100_000) if d + k == 0 else
+                                  (250_000, 1_000_000) if d + k <= DETAIL_CAP else
+                                  (2_000_000, 5_000_000))
+            _assert(_need(sample, "p99_us") <= p_limit and
+                    _need(sample, "max_us") <= max_limit, "time limit exceeded")
+
+
+def _measured_time_gate(scenario, *, required_n):
+    """Check a time N/A against the measured D/K and both GC distributions."""
+    d, k = _integer(_need(scenario, "D")), _integer(_need(scenario, "K"))
+    gate = _need(scenario, "time_gate")
+    full_cohort = (scenario.get("name") == "cohort_all" and
+                   scenario.get("fixture_stop") != "byte" and d + k == CAP)
+    if gate == "N/A":
+        if d + k <= DETAIL_CAP or full_cohort:
+            raise _EvidenceMissing("time N/A lacks an over-2048 D/K reason")
+        for key in ("D_observed", "K_observed"):
+            values = _items(_need(scenario, key), 2)
+            _eq(len(values), 2)
+            _eq(max(_integer(v) for v in values), d if key == "D_observed" else k)
+        exception = scenario.get("sample_exception")
+        if exception is not None:
+            _eq(_need(scenario, "name"), "mass_overdue")
+            _eq(exception, "mass_overdue_report_only_100_per_gc")
+            _eq(_need(scenario, "original_required_n"), 1000)
+            _assert("exceeds 2048" in _need(scenario, "sample_exception_reason"))
+            required_n = 100
+        for kind in ("gc_disabled", "gc_enabled"):
+            if _integer(_need(scenario, "timing", kind, "n")) < required_n:
+                raise _EvidenceMissing("GC distribution too small")
+        return
+    if gate != "PASS":
+        raise _EvidenceMissing("time gate has no supported verdict")
+    if d + k > DETAIL_CAP and not full_cohort:
+        raise _EvidenceMissing("over-2048 time PASS lacks a full cohort reason")
+    for kind in ("gc_disabled", "gc_enabled"):
+        if _integer(_need(scenario, "timing", kind, "n")) < required_n:
+            raise _EvidenceMissing("GC distribution too small")
+
+
+def _temporary(scenario):
+    tm = _need(scenario, "tracemalloc")
+    before, peak = _integer(_need(tm, "current_before")), _integer(_need(tm, "peak"))
+    _integer(_need(tm, "current_after"))
+    _assert(peak >= before, "tracemalloc peak before current")
+    delta = peak - before
+    _assert(delta <= 262144, "temporary allocation limit exceeded")
+    return delta
+
+
+def _evaluate_a(row, report):
+    unit = report.get("mode") == "predicate_unit"
+    if row == "A01":
+        limits = _need(report, "limits")
+        names = ("max_records", "max_retained_details", "max_detail_bytes",
+                 "max_resident_bytes", "owned_bytes", "temporary_bytes",
+                 "churn_minutes", "churn_stride_minutes", "fixture_detail_divisor")
+        expected = (131072, 2048, 4096, 62914560, 67108864, 262144, 10080, 1, 1)
+        for name, value in zip(names, expected):
+            _eq(_integer(_need(limits, name)), value, f"default limit {name} changed")
+        if not unit:
+            _assert(_need(report, "complete") is True and
+                    _need(report, "aborted_reason") is None, "full run not complete")
+    elif row == "A02":
+        seen = set()
+        for fixture in _items(_need(report, "pressure_fixtures")) + _need(report, "churn_fixtures") if not unit else _items(_need(report, "pressure_fixtures")):
+            trace = _items(_need(fixture, "fixture_provenance", "api_trace"))
+            registers = _registered_calls(trace)
+            _eq([_integer(_need(step, "call_index")) for step in trace], list(range(len(trace))))
+            ids = [_need(step, "id") for step in registers]
+            if not all(isinstance(i, str) for i in ids):
+                raise _EvidenceMissing("registered ID missing or malformed")
+            _assert(len(set(ids)) == len(ids) and not seen.intersection(ids), "ID collision")
+            seen.update(ids)
+            _eq(_need(fixture, "id_utf8_bytes"), sum(len(i.encode()) for i in ids))
+            _eq(_need(fixture, "id_getsizeof_bytes"), sum(sys.getsizeof(i) for i in ids))
+            _eq(_need(fixture, "source_registered"),
+                dict(Counter(_need(step, "source") for step in registers)))
+            _eq(_need(fixture, "job_key_counts"),
+                dict(Counter(f"{_need(step, 'source')}:{_need(step, 'job_id')}" for step in registers)))
+            _eq(_integer(_need(fixture, "state_counts", "registered")), len(registers))
+            _eq(_need(fixture, "state_registration_counts"),
+                dict(Counter(_need(step, "source") for step in registers)))
+            for step in trace:
+                _integer(_need(step, "registered_seq"))
+                _integer(_need(step, "detail_charge_bytes"))
+                if _need(step, "action") == "register":
+                    _assert(_need(step, "classification") in ("registered", "admission_stopped"),
+                            "register classification invalid")
+                    if step["classification"] == "registered":
+                        _eq(_need(step, "state_before"), "absent")
+                        _eq(_need(step, "state_after"), "live")
+            if not unit:
+                required = ("call_index", "action", "id", "source", "job_id", "received_at",
+                            "received_mono", "started_at", "started_mono", "classification",
+                            "registered_seq", "detail_charge_bytes", "state_before", "state_after")
+                for step in trace:
+                    for key in required: _need(step, key)
+                _trace_projection(trace, _items(_need(fixture, "transition_trace")))
+            _eq(_need(fixture, "fixture_provenance", "detail_charged_bytes"),
+                sum(step.get("detail_charge_bytes", 0) for step in trace))
+            clone = _need(fixture, "fixture_provenance", "clone_equivalence")
+            if _need(clone, "used"):
+                for key in ("original_before_sha256", "original_after_sha256", "clone_replay_sha256"):
+                    digest = _need(clone, key)
+                    if not isinstance(digest, str) or len(digest) != 64:
+                        raise _EvidenceMissing("clone digest missing or malformed")
+                _eq(_need(clone, "original_before_sha256"), _need(clone, "original_after_sha256"))
+                _eq(_need(clone, "original_before_sha256"), _need(clone, "clone_replay_sha256"))
+            else:
+                for key in ("original_before_sha256", "original_after_sha256", "clone_replay_sha256"):
+                    _eq(_need(clone, key), None)
+    elif row == "A03":
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        for fixture in (fixtures if unit else
+                        [p for p in fixtures if p.get("name") in PRESSURE_NAMES +
+                         ("pressure_slot_first_small_limit",)]):
+            inv = _need(fixture, "receipt_invariants")
+            trace = _items(_need(fixture, "fixture_provenance", "api_trace"))
+            steps = _items(_need(inv, "checked_steps"))
+            _eq(len(steps), len(trace))
+            clock_pairs = set()
+            for receipt, call in zip(steps, trace):
+                for key in ("call_index", "received_at", "received_mono", "started_at", "started_mono"):
+                    _eq(_need(receipt, key), _need(call, key))
+                _assert(_need(receipt, "received_at") == _need(receipt, "received_mono") ==
+                        _need(receipt, "started_at") == _need(receipt, "started_mono"), "stale receipt clock")
+                _eq(_need(receipt, "N_res"), _need(receipt, "N_total"))
+                _eq(_need(receipt, "N_tomb"), 0)
+                _eq(_need(receipt, "retire_eligible"), 0)
+                clock_pairs.add((_need(receipt, "received_at"), _need(receipt, "received_mono")))
+            _eq(len(clock_pairs), 1)
+            _assert(all(_need(inv, key) is True for key in
+                        ("same_pair", "fresh_starts", "no_retirement")))
+            _eq(_need(fixture, "first_rejection", "received_at"), _need(steps[0], "received_at"))
+            _eq(_need(fixture, "first_rejection", "received_mono"), _need(steps[0], "received_mono"))
+            _eq(_need(fixture, "before", "N_total"), _need(fixture, "before", "N_res"))
+            _eq(_need(fixture, "after", "N_total"), _need(fixture, "after", "N_res"))
+            _eq(_integer(_need(fixture, "before", "N_tomb")), 0)
+            _eq(_integer(_need(fixture, "after", "N_tomb")), 0)
+            rejection = _need(fixture, "first_rejection")
+            rejected = [call for call in trace if call.get("action") == "register" and
+                        call.get("classification") == "admission_stopped"]
+            if not rejected:
+                raise _EvidenceMissing("first rejection trace missing")
+            _eq(_integer(_need(rejection, "trace_call_index")),
+                _integer(_need(rejected[0], "call_index")))
+            _eq(_need(rejection, "received_at"), _need(rejected[0], "received_at"))
+            _eq(_need(rejection, "received_mono"), _need(rejected[0], "received_mono"))
+            _eq(_need(rejected[0], "received_mono"), _need(steps[0], "received_mono"))
+            _eq(_integer(_need(steps[trace.index(rejected[0])], "N_tomb")), 0)
+    elif row == "A04":
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+        kinds = _need(report, "test_scale", "id_kinds") if unit else ("short_ascii", "ascii128", "unicode128")
+        tracks = _need(report, "test_scale", "tracks") if unit else ("p0", "p1", "p2", "p3")
+        primary = fixtures if unit else [p for p in fixtures if p.get("name") in PRESSURE_NAMES]
+        if not unit:
+            _eq(len(primary), len(PRESSURE_NAMES))
+            _eq({p.get("name") for p in primary}, set(PRESSURE_NAMES))
+        _eq({(p.get("id_kind"), p.get("track")) for p in primary},
+            {(kind, track) for kind in kinds for track in tracks})
+        for p in primary:
+            if not unit:
+                _eq(_need(p, "name"), f"pressure_{_need(p, 'track')}_{_need(p, 'id_kind')}")
+            target = (0 if p["track"].lower() in ("p0", "p1") else
+                      512 if p["track"].lower() == "p2" else 2048)
+            _eq(_need(p, "requested_detail_target"), target)
+            _eq(_need(p, "effective_detail_target"), target)
+            _eq(_need(p, "status"), "PASS")
+            _eq(_need(scenarios, _need(p, "name"), "status"), "PASS")
+    elif row == "A05":
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        for p in (fixtures if unit else [p for p in fixtures if p.get("name") in PRESSURE_NAMES]):
+            trace = _items(_need(p, "fixture_provenance", "api_trace"))
+            trans = _items(_need(p, "transition_trace"))
+            _trace_projection(trace, trans)
+            _eq(_need(p, "fixture_provenance", "detail_charged_bytes"),
+                sum(_need(s, "detail_charge_bytes") for s in trans))
+            target = _need(report, "test_scale", "detail_target") if unit else _need(p, "requested_detail_target")
+            _eq(_need(p, "retained_details"), target)
+            _eq(_need(p, "effective_detail_target"), target)
+            tracks = ("P0", "P1", "P2", "P3") if unit else ("p0", "p1", "p2", "p3")
+            _assert(_need(p, "track") in tracks)
+            track = p["track"].lower()
+            register_positions = [i for i, call in enumerate(trace)
+                                  if call.get("action") == "register" and call.get("classification") == "registered"]
+            all_register_positions = [i for i, call in enumerate(trace) if call.get("action") == "register"]
+            if not register_positions:
+                raise _EvidenceMissing("pressure register trace missing")
+            for index, start in enumerate(register_positions):
+                stop = next((pos for pos in all_register_positions if pos > start), len(trace))
+                calls = trace[start:stop]
+                seq = _integer(_need(calls[0], "registered_seq"))
+                _eq(_need(calls[0], "classification"), "registered")
+                _eq(_integer(_need(calls[0], "detail_charge_bytes")), 0)
+                prefix = track in ("p2", "p3") and index < target
+                if prefix:
+                    expected = (("register", "registered", 0), ("link_round", "linked", 0),
+                                ("finish", "finalized", 4096))
+                elif track == "p0":
+                    expected = (("register", "registered", 0),)
+                else:
+                    phase = index % 20
+                    suffix = (("link_round", "linked", 0),) if phase < 4 else (
+                        (("report_init_failed", "report_init_failed", 0),) if phase < 8 else ())
+                    expected = (("register", "registered", 0),) + suffix
+                for call, (action, classification, charge) in zip(calls, expected):
+                    _eq(_need(call, "registered_seq"), seq)
+                    _eq(_need(call, "action"), action)
+                    _eq(_need(call, "classification"), classification)
+                    _eq(_integer(_need(call, "detail_charge_bytes")), charge)
+                if len(calls) < len(expected):
+                    raise _EvidenceMissing("pressure cycle trace incomplete")
+                _eq(len(calls), len(expected), "unexpected pressure cycle transition")
+    elif row == "A06":
+        for p in _items(_need(report, "pressure_fixtures")):
+            r = _need(p, "first_rejection")
+            before, after = _need(p, "before"), _need(p, "after")
+            slot, byte = _need(r, "slot_test"), _need(r, "byte_precheck")
+            _eq(_integer(_need(r, "candidate_seq")), _integer(_need(p, "N_last_accepted")) + 1)
+            _eq(_need(slot, "candidate_N_res"), _integer(_need(before, "N_res")) + 1)
+            causes = []
+            if _need(slot, "would_exceed") is True: causes.append("slot")
+            if _need(byte, "would_exceed") is True: causes.append("byte")
+            fixture_limit = (_need(p, "fixture_limit") if not unit else
+                             p.get("fixture_limit", _need(report, "limits", "max_records")))
+            _eq(_need(slot, "would_exceed"), _need(slot, "candidate_N_res") >
+                _integer(fixture_limit))
+            _eq(_need(byte, "would_exceed"), _need(byte, "candidate_E") > _need(before, "B"))
+            _eq(_need(r, "precedence"), "slot_then_byte")
+            _eq(_need(r, "simultaneous_causes"), causes)
+            _eq(_need(r, "cause"), causes[0] if causes else None)
+            _eq(_need(r, "classification"), "admission_stopped")
+            _eq(_need(r, "admission_stopped_at"), _need(r, "received_at"))
+            _eq(_need(after, "N_total"), _need(before, "N_total"))
+            _eq(_need(after, "N_res"), _need(before, "N_res"))
+            _eq(_need(r, "health_after", "admission_stopped_at"), _need(r, "received_at"))
+            hb, ha = _need(r, "health_before"), _need(r, "health_after")
+            for key in ("N_total", "last_seq"):
+                _eq(_integer(_need(hb, key)), _integer(_need(ha, key)))
+            _eq(_need(hb, "N_total"), _need(before, "N_total"))
+            _eq(_need(ha, "N_total"), _need(after, "N_total"))
+            _eq(_need(hb, "last_seq"), _need(p, "N_last_accepted"))
+            _assert(_need(hb, "admission_stopped") is False)
+            _assert(_need(ha, "admission_stopped") is True)
+            rejected = [call for call in _items(_need(p, "fixture_provenance", "api_trace"))
+                        if call.get("action") == "register" and
+                        call.get("classification") == "admission_stopped"]
+            if len(rejected) != 1:
+                raise _EvidenceMissing("first rejection API call missing or ambiguous")
+            call = rejected[0]
+            for left, right in (("candidate_id", "id"), ("candidate_source", "source"),
+                                ("candidate_job_id", "job_id"), ("received_at", "received_at"),
+                                ("received_mono", "received_mono")):
+                _eq(_need(r, left), _need(call, right))
+    elif row == "A07":
+        for p in _items(_need(report, "pressure_fixtures")):
+            r = _need(p, "first_rejection")
+            _assert(_need(r, "no_insertion") is True)
+            _index_audit(_need(r, "index_audit"))
+    elif row == "A08":
+        sources = _need(report, "test_scale", "sources") if unit else ("investing", "bs", "citi")
+        for p in _items(_need(report, "pressure_fixtures")):
+            r = _need(p, "first_rejection")
+            post = _need(p, "post_latch")
+            _index_audit(_need(r, "index_audit"))
+            _assert(_integer(_need(post, "attempted")) >= len(sources))
+            _assert(_need(post, "all_rejected") is True)
+            _assert(_need(post, "first_stop_time_unchanged") is True)
+            _assert(_need(post, "resumed_after_release") is False, "admission latch reopened")
+            for source in sources:
+                coverage = _need(post, "coverage_by_source", source)
+                _assert(_need(coverage, "uncertain") is True)
+                _assert("aggregation_capacity" in _need(coverage, "diagnostic_codes"))
+            diag = _need(post, "g_diagnostic")
+            _assert(_need(diag, "measured") is True)
+            _assert(_need(diag, "G") <= _need(diag, "E"))
+            prune = _need(post, "prune_after_release")
+            _assert(_need(prune, "N_res_after") < _need(prune, "N_res_before"))
+            _eq(_need(prune, "attempt_classification"), "admission_stopped")
+            _eq(_need(prune, "stop_time"), _need(r, "admission_stopped_at"))
+            calls = _items(_need(post, "api_trace"))
+            _eq(_integer(_need(post, "attempted")), len(calls))
+            _assert(all(_need(call, "classification") == "admission_stopped" for call in calls),
+                    "post-latch call accepted")
+            _assert(set(_need(call, "source") for call in calls) >= set(sources),
+                    "post-latch source not attempted")
+    elif row == "A09":
+        kinds = _need(report, "test_scale", "existing_transitions") if unit else None
+        for p in _items(_need(report, "pressure_fixtures")):
+            post = _need(p, "post_latch")
+            transitions = _need(post, "existing_id_transitions")
+            budgets = _items(_need(post, "existing_id_budget"))
+            trace = _items(_need(p, "fixture_provenance", "api_trace"))
+            for kind in kinds or transitions:
+                expected = _need(transitions, kind)
+                if kind not in _EXISTING_TRANSITION_CLASSES:
+                    raise _EvidenceMissing("existing transition kind unknown")
+                _eq(expected, _EXISTING_TRANSITION_CLASSES[kind])
+                _assert(any(t.get("action") == kind and t.get("classification") == expected for t in trace))
+            for b in budgets:
+                _assert(_need(b, "AR_after") <= _need(b, "AR_before"), "existing ID reserve grew")
+                _assert(_need(b, "classification") != "admission_stopped")
+                action = _need(b, "action")
+                expected = _need(transitions, action)
+                _eq(_need(b, "classification"), expected)
+                _assert(any(_need(t, "id") == _need(b, "id") and
+                            _need(t, "action") == action and
+                            _need(t, "classification") == expected for t in trace),
+                        "existing ID budget has no matching API event")
+                _eq(_need(b, "state_before"), "live")
+                for stage in ("before", "after"):
+                    _budget_order(_need(b, stage))
+            _assert(set(_need(b, "action") for b in budgets) >= set(kinds or transitions),
+                    "existing transition has no budget observation")
+            _budget_order(_need(p, "before")); _budget_order(_need(p, "after"))
+    elif row == "A10":
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        slot_rows = _items(_need(report, "131072_slots", "by_fixture"))
+        slots = {r.get("name"): r for r in slot_rows}
+        unreachable = _items(_need(report, "unreachable_rows"))
+        scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+        auxiliary = [p for p in fixtures if p.get("name") == "pressure_slot_first_small_limit"]
+        if len(auxiliary) != 1:
+            raise _EvidenceMissing("small-limit slot control missing or duplicated")
+        control = auxiliary[0]
+        _assert(_need(control, "fixture_limit") < 131072)
+        _eq(_need(control, "before", "B"), 62914560)
+        _eq(_need(control, "first_rejection", "cause"), "slot")
+        if not unit:
+            _eq(_need(control, "fixture_limit"), 128)
+            _eq(_need(control, "status"), "PASS")
+            _eq(len(slot_rows), len(PRESSURE_NAMES))
+            _eq(set(slots), set(PRESSURE_NAMES))
+        primary = ([p for p in fixtures if p.get("name") in PRESSURE_NAMES] if not unit else
+                   [p for p in fixtures if p is not control])
+        if not unit:
+            _eq(len(primary), len(PRESSURE_NAMES))
+        for p in primary:
+            _eq(_need(p, "before", "B"), 62914560)
+            if not unit: _eq(_need(p, "fixture_limit"), 131072)
+            n = _integer(_need(p, "N_last_accepted"))
+            cause = _need(p, "first_rejection", "cause")
+            slot = _need(slots, _need(p, "name"))
+            _eq(_need(slot, "N_stop"), n)
+            if cause == "byte":
+                _assert(0 < n < 131072)
+                _eq(_need(slot, "status"), "N/A")
+                _eq(_need(slot, "reason"), "N/A (byte stop)")
+                _assert(any(u.get("fixture_name") == p["name"] and u.get("observed_N") == n
+                            and u.get("replacement_name") == p["name"] and
+                            u.get("original_name") == p["name"] + "_131072_slots" and
+                            u.get("reason") == "N/A (unreachable by byte policy)"
+                            for u in unreachable))
+            else:
+                _eq(cause, "slot"); _eq(n, 131072); _eq(_need(slot, "status"), "PASS")
+            _eq(_need(scenarios, p["name"], "status"), "PASS")
+    elif row == "A11":
+        names = (_need(report, "test_scale", "measured_scenarios") if unit else
+                 _D02_SCENARIOS + ("prune_transition",))
+        if unit: names = _names(names, "measured_scenarios")
+        scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+        required_n = _need(report, "test_scale", "samples_per_gc") if unit else 1000
+        for name in names:
+            s = _need(scenarios, name)
+            _observed_timing(s)
+            _eq(_need(s, "visit_gate"), "PASS")
+            _measured_time_gate(s, required_n=required_n)
+            plan = _need(s, "sample_plan")
+            if not isinstance(plan, str) or plan not in {
+                    "repeat", "sequential", "sequential_reprepared", "full_deepcopy",
+                    "independent_split_copy"}:
+                raise _EvidenceMissing("sample plan missing or unsupported")
+            checks = _need(s, "sample_checks")
+            _eq(_need(checks, "failures"), [])
+            _assert(_integer(_need(checks, "checked")) >= 2 * required_n,
+                    "insufficient independently checked calls")
+            if not unit and name in ("register_accept", "finish_accept"):
+                observations = _items(_need(s, "sample_observations"))
+                for phase in ("gc_disabled", "gc_enabled"):
+                    measured = [o for o in observations if o.get("phase") == phase]
+                    if len(measured) < required_n:
+                        raise _EvidenceMissing("independent timed call samples missing")
+                    _assert(all(_need(o, "classification") ==
+                                ("registered" if name == "register_accept" else "finalized")
+                                for o in measured), "timed API call did not succeed")
+                    indices = [_integer(_need(o, "index")) for o in measured]
+                    _assert(indices == sorted(set(indices)), "timed call indices reused or unordered")
+                    targets = [_need(o, "target") for o in measured]
+                    if not all(isinstance(target, str) and target for target in targets):
+                        raise _EvidenceMissing("timed call target missing")
+                    _assert(len(set(targets)) == len(targets), "timed call target reused")
+                    if name == "finish_accept":
+                        for observation in measured:
+                            prepared = _integer(_need(observation, "prepared_at"))
+                            called = _integer(_need(observation, "called_at"))
+                            _assert(prepared <= called, "finish measured before preparation")
+                _eq(plan, "sequential_reprepared")
+    elif row == "A12":
+        names = (_need(report, "test_scale", "temporary_scenarios") if unit else
+                 _D02_SCENARIOS + ("prune_transition", "normalization"))
+        scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+        origins = set()
+        for name in names:
+            s = _need(scenarios, name)
+            delta = _temporary(s)
+            _eq(_need(s, "temporary_breakdown", "peak_delta"), delta)
+            _eq(_need(s, "temporary_gate"), "PASS")
+            _items(_need(s, "timing", "gc_disabled", "raw_ns"))
+            _items(_need(s, "timing", "gc_enabled", "raw_ns"))
+            if name in ("prune_transition", "close_boundary_exact", "normalization"):
+                origin = _need(s, "temporary_sample_origin")
+                if not isinstance(origin, str) or not origin:
+                    raise _EvidenceMissing("temporary measurement origin missing")
+                _eq(_need(s, "tracemalloc", "sample_origin"), origin)
+                _assert(origin not in origins, "temporary measurements share one sample")
+                origins.add(origin)
+
+
+def _identity_absence(sample):
+    _eq(_need(sample, "seq_positions"), [])
+    _assert(_need(sample, "tomb") is False and _need(sample, "owner") is False)
+    other = _need(sample, "other_indexes_absent")
+    if set(other) != _INDEX_PATHS - {"seq", "tomb", "owner"}:
+        raise _EvidenceMissing("identity index audit incomplete")
+    _assert(all(v is True for v in other.values()))
+
+
+def _checkpoint_pair(fixture, before_kind, after_kind):
+    checkpoints = _items(_need(fixture, "checkpoints"), 2)
+    before = _items([p for p in checkpoints if p.get("kind") == before_kind])[0]
+    after = _items([p for p in checkpoints if p.get("kind") == after_kind])[0]
+    return before, after
+
+
+def _boundary_pairs(fixture, before_kind, after_kind, expected):
+    """Pair every boundary observation by its witnessed identity, not list position."""
+    checkpoints = _items(_need(fixture, "checkpoints"), 2 * expected)
+    sides = []
+    for kind in (before_kind, after_kind):
+        selected = [p for p in checkpoints if p.get("kind") == kind]
+        if len(selected) < expected:
+            raise _EvidenceMissing(f"{kind} boundary observations incomplete")
+        _eq(len(selected), expected, "boundary observation count changed")
+        indexed = {}
+        for cp in selected:
+            identity = _need(cp, "identity_samples", 0, "id")
+            if identity in indexed:
+                raise _EvidenceViolation("boundary identity repeated")
+            indexed[identity] = cp
+        sides.append(indexed)
+    _eq(set(sides[0]), set(sides[1]), "boundary identity pairs differ")
+    return [(identity, sides[0][identity], sides[1][identity]) for identity in sides[0]]
+
+
+def _b_followup(row, report, fixtures, unit):
+    """Independent inputs for the B01–B12 clauses beyond the row's local equations."""
+    if row == "B02":
+        applicable = fixtures if unit else [f for f in fixtures if f.get("name") in CHURN_NAMES[:-2]]
+        for f in applicable:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            cycle = _items(_need(f, "state_cycle"))
+            registers = [t for t in trace if t.get("action") == "register"]
+            events_by_seq = defaultdict(list)
+            for event in trace:
+                if "registered_seq" in event:
+                    events_by_seq[event["registered_seq"]].append(event)
+            first_unbound = next((i for i, e in enumerate(cycle) if e.get("action") == "unbound"), None)
+            limit = len(registers) if unit else len(registers) - 1
+            for i, reg in enumerate(registers[:limit]):
+                position = i % len(cycle)
+                entry = cycle[position]
+                seq = _need(reg, "registered_seq")
+                events = events_by_seq[seq]
+                action = _need(entry, "action")
+                if action == "finish":
+                    _eq([_need(t, "action") for t in events], ["register", "link_round", "finish"])
+                    _eq([_need(t, "classification") for t in events[1:]], ["linked", "finalized"])
+                elif action == "link":
+                    _eq([_need(t, "action") for t in events], ["register", "link_round"])
+                    _eq(_need(events[1], "classification"), "linked")
+                elif action == "unbound":
+                    if (not unit and _need(f, "name").startswith("churn_init_failed_")
+                            and i == first_unbound):
+                        _eq([_need(t, "action") for t in events], ["register", "init_failed"])
+                        _eq(_need(events[1], "classification"), "init_failed")
+                    else:
+                        _eq([_need(t, "action") for t in events], ["register"])
+                else:
+                    raise _EvidenceMissing(f"cycle action at {position} has no trace rule")
+            if not unit and _need(f, "name").startswith("churn_init_failed_"):
+                if first_unbound is None: raise _EvidenceMissing("Unicode unbound target absent")
+                seq = _need(registers[first_unbound], "registered_seq")
+                _eq(sum(t.get("registered_seq") == seq and t.get("classification") == "init_failed"
+                        for t in trace), 1)
+    elif row == "B03":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            d = _integer(_need(report, "test_scale", "burst_details")) if unit else 2048
+            n = _integer(_need(report, "test_scale", "normal_calls")) if unit else 80641
+            registers = [t for t in trace if t.get("action") == "register"]
+            _eq(len(registers), d + 1 + n, "burst and normal input ledger incomplete")
+            _eq(len({t.get("registered_seq") for t in registers}), len(registers),
+                "burst and normal registrations overlap")
+            probe = registers[d]
+            _eq(_need(probe, "classification"), "registered")
+            open_cp, release_cp = _checkpoint_pair(f, "detail_open", "detail_released")
+            for axis in ("received_at", "received_mono"):
+                _assert(_need(open_cp, axis) <= _need(probe, axis) < _need(release_cp, axis),
+                        "probe was not accepted while details were held")
+    elif row == "B04":
+        n = _integer(_need(report, "test_scale", "normal_calls")) if unit else 80641
+        if n < 2: raise _EvidenceMissing("normal_calls must be at least two")
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"), n)
+            normal = [t for t in trace if t.get("action") == "register" and
+                      not t.get("auxiliary", False)]
+            _eq([_integer(_need(t, "call_index")) for t in trace], list(range(len(trace))))
+            _assert(len(normal) >= n)
+            cps = _items(_need(f, "checkpoints"))
+            _eq(len([c for c in cps if c.get("kind") == "tail_80640"]), 1)
+            _eq(len([c for c in cps if c.get("kind") == "tail_80641"]), 1)
+            _eq(len({_need(c, "checkpoint_id") for c in cps}), len(cps),
+                "simultaneous checkpoints reused an identity")
+    elif row == "B05":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            cps = _items(_need(f, "checkpoints"))
+            public = [c for c in cps if c.get("observation") == "public_advance"]
+            queries = _need(f, "fixture_provenance", "public_query_trace") if public or not unit else []
+            _eq(len(queries), len(public), "public query evidence incomplete")
+            by_id = {_need(q, "checkpoint_id"): q for q in queries}
+            _eq(len(by_id), len(queries), "public query reused checkpoint ID")
+            for cp in public:
+                query = _need(by_id, _need(cp, "checkpoint_id"))
+                _eq((_need(query, "received_at"), _need(query, "received_mono")),
+                    (_need(cp, "received_at"), _need(cp, "received_mono")))
+                _eq(_need(query, "event_order"), _need(cp, "event_order"))
+            before, after = _checkpoint_pair(f, "highwater_before", "highwater_after")
+            low, high = _need(before, "event_order"), _need(after, "event_order")
+            _assert(not any(low < _need(c, "event_order") < high for c in public),
+                    "public advance occurred inside a passive highwater pair")
+            _assert(not any(low < _need(q, "event_order") < high for q in queries),
+                    "public query occurred inside a passive highwater pair")
+            _assert(any(low < _need(t, "event_order") < high and t.get("action") == "register"
+                        for t in trace))
+    elif row == "B06":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            if not unit:
+                previous_event = -1
+                for step in trace:
+                    event = _integer(_need(step, "event_order"))
+                    _assert(event >= previous_event, "API event order regressed")
+                    previous_event = event
+            cps = _items(_need(f, "checkpoints"))
+            cursor = 0
+            scheduled = Counter()
+            registered = Counter()
+            previous_order = -1
+            for cp in cps:
+                total = _integer(_need(cp, "N_total"))
+                order = total if unit else _integer(_need(cp, "event_order"))
+                _assert(order >= previous_order, "checkpoint order regressed")
+                previous_order = order
+                while cursor < len(trace):
+                    step = trace[cursor]
+                    if step.get("action") == "register":
+                        step_order = _integer(_need(step, "registered_seq" if unit else "event_order"))
+                    else:
+                        step_order = _integer(_need(step, "event_order")) if not unit else -1
+                    if step_order > order: break
+                    if step.get("action") == "register":
+                        source = _need(step, "source")
+                        scheduled[source] += 1
+                        if _need(step, "classification") == "registered":
+                            registered[source] += 1
+                    cursor += 1
+                rejected = scheduled - registered
+                _eq(_need(cp, "admission_counts"),
+                    {"scheduled": sum(scheduled.values()), "registered": sum(registered.values()),
+                     "rejected": sum(rejected.values())})
+                _eq(_need(cp, "source_counts"),
+                    {source: {"scheduled": qty, "registered": registered[source],
+                              "rejected": rejected[source]} for source, qty in scheduled.items()})
+    elif row == "B07":
+        for f in fixtures:
+            cps = _items(_need(f, "checkpoints"), 3)
+            observed = [(cp, s) for cp in cps for s in cp.get("identity_samples", [])
+                        if s.get("phase") in ("live", "tomb", "pruned")]
+            live = _items([(cp, s) for cp, s in observed if s.get("phase") == "live"])[0][1]
+            identity = tuple(_need(live, key) for key in ("id", "registered_seq", "source"))
+            for phase, state in (("live", "live"), ("tomb", "tombstoned"),
+                                 ("pruned", "expired_or_untracked")):
+                phase_rows = [(cp, s) for cp, s in observed if s.get("phase") == phase]
+                if not phase_rows: raise _EvidenceMissing(f"{phase} identity phase missing")
+                matches = [(cp, s) for cp, s in phase_rows if
+                           tuple(s.get(key) for key in ("id", "registered_seq", "source")) == identity]
+                _assert(bool(matches), "identity changed across live, tomb, and pruned phases")
+                _eq(_need(matches[0][1], "observed"), state)
+            tail = cps[-1] if unit else _items([c for c in cps if c.get("kind") == "tail_80641"])[0]
+            audit = _items(_need(tail, "identity_index_audit", "samples"))
+            matched = [a for a in audit if a.get("id") == identity[0]]
+            if not matched: raise _EvidenceMissing("initial identity absent from tail index audit")
+            _identity_absence(matched[0])
+    elif row in ("B08", "B09", "B11"):
+        kinds = {"B08": ("probe_close_before", "probe_close_at", 12),
+                 "B09": ("probe_expire_before", "probe_expire_at", 24),
+                 "B11": ("probe_prune_before", "probe_prune_at", 36)}
+        before_kind, after_kind, full_count = kinds[row]
+        for f in fixtures:
+            pairs = _boundary_pairs(f, before_kind, after_kind, 1 if unit else full_count)
+            trace = _items(_need(f, "fixture_provenance", "api_trace")) if row != "B11" or not unit else []
+            for identity, before, at in pairs:
+                if row == "B08":
+                    finish = _items([t for t in trace if t.get("action") == "finish" and
+                                     t.get("id") == identity])[0]
+                    for axis, due in (("received_at", "close_at"), ("received_mono", "close_mono")):
+                        _eq(_need(before, axis), _integer(_need(finish, due)) - 1)
+                        _eq(_need(at, axis), _need(finish, due))
+                    _eq(_need(before, "identity_samples", 0, "observed"), "live")
+                    _eq(_need(at, "identity_samples", 0, "observed"), "tombstoned")
+                    if unit:
+                        _eq(_need(before, "retained_details"), 1)
+                        _eq(_need(at, "retained_details"), 0)
+                    _eq(_need(before, "retained_details") - _need(at, "retained_details"), 1)
+                    _eq(_need(at, "cumulative_end"), _need(at, "close_through"))
+                    totals = _items(_need(at, "frozen_totals_before_after"))
+                    matching = [x for x in totals if x.get("id") == identity]
+                    if not matching: raise _EvidenceMissing("close frozen input missing")
+                    for item in matching:
+                        _eq(_need(item, "requery"), _need(item, "at"))
+                        _eq(_need(item, "at", "finished") - _need(item, "before", "finished"), 1)
+                        source = _need(item, "source")
+                        for cp, part in ((before, "before"), (at, "at")):
+                            expected_finished = sum(
+                                t.get("action") == "finish" and t.get("source") == source and
+                                _integer(_need(t, "close_at")) <= _integer(_need(cp, "received_at")) and
+                                _integer(_need(t, "close_mono")) <= _integer(_need(cp, "received_mono"))
+                                for t in trace if t.get("action") == "finish" and t.get("source") == source)
+                            _eq(_need(item, part, "finished"), expected_finished,
+                                "frozen completion count differs from completed input ledger")
+                elif row == "B09":
+                    reg = _items([t for t in trace if t.get("action") == "register" and
+                                  t.get("id") == identity])[0]
+                    for axis in ("received_at", "received_mono"):
+                        _eq(_need(before, axis), _integer(_need(reg, axis)) + 14_400_000_000 - 1)
+                        _eq(_need(at, axis), _integer(_need(reg, axis)) + 14_400_000_000)
+                    _eq(_need(before, "identity_samples", 0, "observed"), "live")
+                    _eq(_need(at, "identity_samples", 0, "observed"), "tombstoned")
+                    _assert(_need(before, "coverage_complete") is True and
+                            _need(at, "coverage_complete") is False)
+                    _eq(_need(at, "diagnostic_counters", "retention_expired") -
+                        _need(before, "diagnostic_counters", "retention_expired"), 1)
+                    causes = ("expired_start", "expired_finish", "expired_wrapper",
+                              "expired_identity_unverified")
+                    observed_causes = Counter(_need(t, "classification") for t in trace
+                                              if t.get("id") == identity and t.get("classification") in causes and
+                                              _integer(_need(before, "received_at")) <
+                                              _integer(_need(t, "received_at")) <= _integer(_need(at, "received_at")) and
+                                              _integer(_need(before, "received_mono")) <
+                                              _integer(_need(t, "received_mono")) <= _integer(_need(at, "received_mono")))
+                    if not observed_causes:
+                        raise _EvidenceMissing("expiry cause input trace absent")
+                    for cause in causes:
+                        if cause in _need(before, "diagnostic_counters") or cause in _need(at, "diagnostic_counters"):
+                            _eq(_need(at, "diagnostic_counters", cause) -
+                                _need(before, "diagnostic_counters", cause), observed_causes[cause])
+                        elif observed_causes[cause]:
+                            raise _EvidenceMissing("expiry cause counter absent")
+                    _eq(_need(at, "uncertain_sources"), [_need(reg, "source")])
+                else:
+                    for axis in ("received_at", "received_mono"):
+                        _eq(_need(before, axis), _integer(_need(at, axis)) - 1)
+                    _eq(_need(before, "identity_samples", 0, "observed"), "tombstoned")
+                    _eq(_need(at, "identity_samples", 0, "observed"), "expired_or_untracked")
+                    witness = _need(at, "prune_witness")
+                    _eq(_need(witness, "before_N_res"), _need(before, "N_res"))
+                    _eq(_need(witness, "after_N_res"), _need(at, "N_res"))
+                    _eq(_need(witness, "pruned_count"), _need(witness, "before_N_res") +
+                        _need(witness, "accepted_between") - _need(witness, "after_N_res"))
+                    _assert(identity in _need(witness, "sample_ids"))
+                    audit = _items(_need(at, "identity_index_audit", "samples"))
+                    matched = [sample for sample in audit if sample.get("id") == identity]
+                    if not matched: raise _EvidenceMissing("pruned identity index audit absent")
+                    _identity_absence(matched[0])
+                    _assert(_integer(_need(at, "prune_observed_through")) <=
+                            _integer(_need(witness, "as_of")))
+                    _eq(_need(witness, "unprocessed_tomb_count"), 0,
+                        "prune watermark advanced with unprocessed tombs")
+                    if not unit:
+                        tomb = _items([t for t in trace if t.get("action") == "tomb" and
+                                       t.get("id") == identity])[0]
+                        for axis, due in (("received_at", "prune_due_at"),
+                                          ("received_mono", "prune_due_mono")):
+                            _eq(_need(at, axis), _need(tomb, due))
+            if row == "B11" and not unit:
+                watermarks = [_need(cp, "prune_observed_through") for cp in
+                              _items(_need(f, "checkpoints")) if cp.get("kind") == after_kind]
+                _eq(watermarks, sorted(watermarks), "prune watermark regressed")
+    elif row == "B10" and not unit:
+        hour_us = 3_600_000_000
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            normal = [t for t in trace if t.get("action") == "register" and not t.get("auxiliary", False)]
+            start = _items(normal)[0]
+            tombs = [t for t in trace if t.get("action") == "tomb"]
+            ledger = _need(f, "tomb_due_ledger")
+            _eq(len(ledger), len(tombs), "due ledger omitted a tomb transition")
+            by_id = {_need(t, "id"): t for t in tombs}
+            _eq(len(by_id), len(tombs), "tomb identity repeated")
+            for entry in ledger:
+                tomb = _need(by_id, _need(entry, "id"))
+                for key in ("registered_seq", "source"):
+                    _eq(_need(entry, key), _need(tomb, key))
+                due = max((_integer(_need(tomb, "prune_due_at")) - _integer(_need(start, "received_at")) + hour_us - 1) // hour_us,
+                          (_integer(_need(tomb, "prune_due_mono")) - _integer(_need(start, "received_mono")) + hour_us - 1) // hour_us)
+                _eq(_need(entry, "due_hour"), due)
+    elif row == "B12":
+        for f in fixtures:
+            pairs = _boundary_pairs(f, "probe_recent_before", "probe_recent_at", 1 if unit else 10)
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            ledger = _items(_need(f, "recent_input_ledger"))
+            _eq(len({e.get("id") for e in ledger}), len(ledger), "recent input identity repeated")
+            for entry in ledger:
+                identity = _need(entry, "id")
+                reg = _items([t for t in trace if t.get("action") == "register" and
+                              t.get("id") == identity and t.get("source") == entry.get("source")])[0]
+                finish = _items([t for t in trace if t.get("action") == "finish" and
+                                 t.get("id") == identity])[0]
+                _eq(_need(entry, "connection"), _need(reg, "connection"))
+                _eq(_need(entry, "lifecycle"), _need(finish, "classification"))
+                for axis, start in (("received_at", "registered_at"),
+                                    ("received_mono", "registered_mono")):
+                    _eq(_need(entry, start), _need(reg, axis))
+                for end in ("bucket_end", "bucket_end_mono"):
+                    _eq(_need(entry, end), _need(finish, end))
+            for identity, before, at in pairs:
+                target = _items([e for e in ledger if e.get("id") == identity])[0]
+                _eq(_need(before, "identity_samples", 0, "observed"), "included")
+                _eq(_need(at, "identity_samples", 0, "observed"), "excluded")
+                for axis, end in (("received_at", "bucket_end"), ("received_mono", "bucket_end_mono")):
+                    _eq(_need(before, axis), _integer(_need(target, end)) - 1)
+                    _eq(_need(at, axis), _need(target, end))
+                for cp, part in ((before, "before"), (at, "at")):
+                    counts = {}
+                    for entry in ledger:
+                        if not (all(_need(entry, start) <= _need(cp, axis) < _need(entry, end)
+                                    for start, axis, end in (("registered_at", "received_at", "bucket_end"),
+                                                             ("registered_mono", "received_mono", "bucket_end_mono")))):
+                            continue
+                        source = _need(entry, "source")
+                        bucket = counts.setdefault(source, {"registered": 0, "connection": {}, "lifecycle": {}})
+                        bucket["registered"] += 1
+                        for axis in ("connection", "lifecycle"):
+                            classification = _need(entry, axis)
+                            bucket[axis][classification] = bucket[axis].get(classification, 0) + 1
+                    sources = {e["source"] for e in ledger}
+                    for source in sources:
+                        expected = counts.get(source, {"registered": 0, "connection": {}, "lifecycle": {}})
+                        _eq(_need(cp, "recent_expected_counts", source, part), expected)
+                        _eq(_need(cp, "recent_rows", source), expected)
+
+
+def _evaluate_b(row, report):
+    unit = report.get("mode") == "predicate_unit"
+    fixtures = _items(_need(report, "churn_fixtures"))
+    if row == "B01":
+        n = _integer(_need(report, "test_scale", "normal_calls")) if unit else 80641
+        if unit and n < 2:
+            raise _EvidenceMissing("normal_calls must be at least two")
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"), n)
+            _eq([_integer(_need(t, "call_index")) for t in trace], list(range(len(trace))))
+            normal = [t for t in trace if t.get("action") == "register" and
+                      not t.get("auxiliary", False)][:n]
+            _eq(len(normal), n)
+            _assert(all(t.get("classification") == "registered" for t in normal))
+            start = normal[0]
+            for i, t in enumerate(normal):
+                offset = (i % 8) * 7_500_000 + (i // 8) * 60_000_000
+                _eq(_need(t, "received_at"), _need(start, "received_at") + offset)
+                _eq(_need(t, "received_mono"), _need(start, "received_mono") + offset)
+                _eq(_need(t, "source"), ("investing" if i % 8 < 6 else "bs" if i % 8 == 6 else "citi"))
+            _eq(_need(f, "scheduled_registered"), n)
+            _eq(_need(f, "scheduled_target"), n)
+            _eq(_need(f, "N_total_at_tail"), n + f.get("auxiliary_registered", 0))
+            registered = [t for t in trace if t.get("action") == "register" and
+                          t.get("classification") == "registered"]
+            _eq(_need(f, "source_registered"), dict(Counter(_need(t, "source") for t in registered)))
+            _eq(_need(f, "classification_counts", "registered"), len(registered))
+            _eq(_need(f, "tail_classification"), "registered")
+            b, a = _checkpoint_pair(f, "tail_80640", "tail_80641")
+            for cp, count in ((b, n - 1), (a, n)):
+                _eq((_need(cp, "received_at"), _need(cp, "received_mono")),
+                    (_need(normal[count - 1], "received_at"), _need(normal[count - 1], "received_mono")))
+                admission = _need(cp, "admission_counts")
+                _eq((_need(admission, "scheduled"), _need(admission, "registered"), _need(admission, "rejected")),
+                    (count, count, 0))
+                _eq(_need(cp, "source_counts"),
+                    {source: {"scheduled": qty, "registered": qty, "rejected": 0}
+                     for source, qty in Counter(t["source"] for t in normal[:count]).items()})
+    elif row == "B02":
+        scale = _need(report, "test_scale") if unit else {}
+        names = _need(scale, "churn_names") if unit else None
+        applicable = fixtures if unit else [f for f in fixtures if f.get("name") in CHURN_NAMES[:-2]]
+        if not unit:
+            _eq(len(applicable), 8)
+        for f in applicable:
+            if names is not None and _need(f, "name") not in names: continue
+            cycle = _items(_need(f, "state_cycle"))
+            length = _need(scale, "cycle_length") if unit else 20
+            _eq(len(cycle), length)
+            _eq([_need(c, "position") for c in cycle], list(range(length)))
+            actions = Counter(_need(c, "action") for c in cycle)
+            if unit:
+                _eq(actions.get("finish", 0), _need(scale, "finished"))
+                _eq(actions.get("unbound", 0), _need(scale, "unbound"))
+            else:
+                expected = ({"finish": 16, "link": 2, "unbound": 2}
+                            if _need(f, "state_track") == "most_finished" else
+                            {"finish": 4, "link": 4, "unbound": 12})
+                _eq(dict(actions), expected, "full state cycle distribution changed")
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            registers = [t for t in trace if t.get("action") == "register"]
+            _eq(len(registers), length if unit else 80641)
+            finished_seqs = {t.get("registered_seq") for t in trace
+                             if t.get("action") == "finish" and t.get("classification") == "finalized"}
+            for i, t in enumerate(registers[:length] if unit else registers[:80640]):
+                position = i % length
+                _eq(_need(t, "cycle_position"), position)
+                _eq(_need(t, "source"), _need(cycle[position], "source"))
+                if cycle[position]["action"] == "finish":
+                    seq = _need(t, "registered_seq")
+                    _assert(seq in finished_seqs)
+            if not unit and _need(f, "name").startswith("churn_init_failed_"):
+                first_unbound = next((i for i, item in enumerate(cycle)
+                                      if item.get("action") == "unbound"), None)
+                if first_unbound is None: raise _EvidenceMissing("init failure target absent")
+                seq = _need(registers[first_unbound], "registered_seq")
+                _eq(sum(t.get("registered_seq") == seq and t.get("classification") == "init_failed"
+                        for t in trace), 1, "Unicode first unbound failure absent")
+            _eq(_need(f, "classification_counts", "registered"), len(registers))
+            _eq(_need(f, "classification_counts", "finalized"),
+                sum(t.get("action") == "finish" and t.get("classification") == "finalized"
+                    for t in trace))
+            ids = [_need(t, "id") for t in registers]
+            _eq(_need(f, "id_utf8_bytes"), len(ids[0].encode()))
+            _eq(_need(f, "id_getsizeof_bytes"), sys.getsizeof(ids[0]))
+    elif row == "B03":
+        d = _need(report, "test_scale", "burst_details") if unit else 2048
+        n = _need(report, "test_scale", "normal_calls") if unit else 80641
+        applicable = fixtures if unit else [f for f in fixtures if f.get("name") in CHURN_NAMES[-2:]]
+        if not unit:
+            _eq(len(applicable), 2)
+            _eq({f.get("name") for f in applicable}, set(CHURN_NAMES[-2:]))
+            _assert(all(_need(f, "id_kind") == f["name"].removeprefix("churn_burst_")
+                        and _need(f, "state_track") == "burst" for f in applicable),
+                    "burst fixture identity changed")
+        for f in applicable:
+            _eq(_need(f, "auxiliary_registered"), d + 1)
+            _eq(_need(f, "N_total_at_tail"), n + d + 1)
+            _eq(_need(f, "scheduled_registered"), n)
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            probe = _need([t for t in trace if t.get("action") == "register"], d)
+            _eq(_need(probe, "classification"), "registered")
+            probe_position = trace.index(probe)
+            close_position = next((i for i, t in enumerate(trace) if t.get("action") == "close"), None)
+            if close_position is None: raise _EvidenceMissing("detail release input missing")
+            first_normal = _need([t for t in trace if t.get("action") == "register"], d + 1)
+            _assert(probe_position < close_position < trace.index(first_normal),
+                    "probe, close, and normal schedule order violated")
+            completed_before_probe = [t for t in trace[:probe_position]
+                                      if t.get("action") == "finish" and
+                                      t.get("classification") == "finalized"]
+            _eq(len(completed_before_probe), d, "burst details not complete at probe")
+            registers = [t for t in trace if t.get("action") == "register"]
+            _assert(len(registers) >= d + 1 + n, "normal calls absent after probe")
+            normal = registers[d + 1:d + 1 + n]
+            _assert(all(trace.index(t) > close_position and t.get("classification") == "registered"
+                        for t in normal), "normal calls not independently accepted")
+            if not unit:
+                _assert(all(t.get("auxiliary") is True for t in registers[:d + 1]))
+                _assert(all(t.get("auxiliary") is False for t in normal))
+            open_cp, released = _checkpoint_pair(f, "detail_open", "detail_released")
+            _eq(_need(open_cp, "retained_details"), d)
+            _eq(_need(open_cp, "budget", "D"), d * 4096)
+            _eq(_need(released, "retained_details"), 0)
+            _eq(_need(released, "budget", "D"), 0)
+            _eq(_need(f, "max_retained_details_observed"), d)
+            expire = _items([p for p in f["checkpoints"] if p.get("kind") == "probe_expire_at"])[0]
+            _eq(_need(expire, "received_at"), _need(probe, "received_at") + 14_400_000_000)
+            _eq(_need(expire, "received_mono"), _need(probe, "received_mono") + 14_400_000_000)
+            _assert(any(s.get("id") == probe["id"] and s.get("observed") == "tombstoned"
+                        for s in _need(expire, "identity_samples")))
+            _eq(_need(_items([p for p in f["checkpoints"] if p.get("kind") == "tail_80641"])[0], "N_total"), n + d + 1)
+    elif row == "B04":
+        hours = _need(report, "test_scale", "hours") if unit else 168
+        days = _need(report, "test_scale", "days") if unit else 7
+        n = _need(report, "test_scale", "normal_calls") if unit else 80641
+        for f in fixtures:
+            _eq(_need(f, "evidence_gaps"), [])
+            trace = _items(_need(f, "fixture_provenance", "api_trace"), n)
+            normal = [t for t in trace if t.get("action") == "register" and
+                      not t.get("auxiliary", False)]
+            _assert(len(normal) >= n)
+            start = normal[0]
+            checkpoints = _items(_need(f, "checkpoints"))
+            _eq(len({c.get("checkpoint_id") for c in checkpoints}), len(checkpoints))
+            for kind, total, increment in (("hour", hours, 3_600_000_000), ("day", days, 86_400_000_000)):
+                selected = [c for c in checkpoints if c.get("kind") == kind]
+                if len(selected) < total: raise _EvidenceMissing("scheduled checkpoint missing")
+                _eq(len(selected), total)
+                for i, cp in enumerate(selected, 1):
+                    _eq(_need(cp, "received_at"), _need(start, "received_at") + i * increment)
+                    _eq(_need(cp, "received_mono"), _need(start, "received_mono") + i * increment)
+            for kind, index in (("tail_80640", n - 2), ("tail_80641", n - 1)):
+                cp = _items([c for c in checkpoints if c.get("kind") == kind])[0]
+                for key in ("received_at", "received_mono"):
+                    _eq(_need(cp, key), _need(normal[index], key))
+    elif row == "B05":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            checkpoints = _items(_need(f, "checkpoints"), 2)
+            _eq(len({c.get("checkpoint_id") for c in checkpoints}), len(checkpoints))
+            register = _items([x for x in trace if x.get("action") == "register"])[0]
+            before, after = _checkpoint_pair(f, "highwater_before", "highwater_after")
+            _assert(_need(before, "observation") == _need(after, "observation") == "passive")
+            _assert(_need(before, "event_order") < _need(register, "event_order") < _need(after, "event_order"))
+            for key in ("received_at", "received_mono"):
+                _eq(_need(before, key), _need(register, key))
+                _eq(_need(after, key), _need(register, key))
+    elif row == "B06":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            registered_trace = (t for t in trace if t.get("classification") == "registered")
+            next_registered = next(registered_trace, None)
+            registered_count = 0
+            for cp in _items(_need(f, "checkpoints")):
+                admission = _need(cp, "admission_counts")
+                _eq(_need(admission, "scheduled"), _need(admission, "registered") + _need(admission, "rejected"))
+                source_counts = _need(cp, "source_counts")
+                for counts in source_counts.values():
+                    _eq(_need(counts, "scheduled"), _need(counts, "registered") + _need(counts, "rejected"))
+                _eq(_need(cp, "source_registered"), {k: v["registered"] for k, v in source_counts.items()})
+                _eq(sum(v["registered"] for v in source_counts.values()), _need(admission, "registered"))
+                total = _integer(_need(cp, "N_total"))
+                _eq(_need(cp, "last_seq"), total)
+                _eq(_need(cp, "registered_records"), total)
+                _eq(_need(cp, "N_res"), _integer(_need(cp, "N_live")) + _integer(_need(cp, "N_tomb")))
+                _assert(_need(cp, "N_res") <= 131072)
+                _eq(_need(admission, "rejected"), 0)
+                while next_registered is not None and _integer(_need(next_registered, "registered_seq")) <= total:
+                    registered_count += 1
+                    _eq(_need(next_registered, "registered_seq"), registered_count,
+                        "registration sequence gap")
+                    next_registered = next(registered_trace, None)
+                _eq(registered_count, total, "registration sequence gap")
+    elif row == "B07":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            cps = _items(_need(f, "checkpoints"), 3)
+            phases = ("live", "tomb", "pruned")
+            states = ("live", "tombstoned", "expired_or_untracked")
+            samples = [(cp, sample) for cp in cps for sample in cp.get("identity_samples", [])]
+            initial = _items([(cp, sample) for cp, sample in samples
+                              if sample.get("phase") == "live"])[0][1]
+            identity = tuple(_need(initial, key) for key in ("id", "registered_seq", "source"))
+            for phase, state in zip(phases, states):
+                phase_rows = [(cp, sample) for cp, sample in samples if sample.get("phase") == phase]
+                if not phase_rows: raise _EvidenceMissing(f"{phase} identity phase missing")
+                selected = [(cp, sample) for cp, sample in phase_rows if
+                            tuple(sample.get(key) for key in ("id", "registered_seq", "source")) == identity]
+                _assert(bool(selected), "identity changed across live, tomb, and pruned phases")
+                cp, sample = selected[0]
+                _eq(_need(sample, "phase"), phase)
+                _eq(_need(sample, "observed"), state)
+                _eq(_need(sample, "expected"), state)
+                _assert(any(t.get("id") == sample["id"] and t.get("registered_seq") == sample["registered_seq"]
+                            and t.get("source") == sample["source"] for t in trace))
+            tail = cps[-1] if unit else _items([cp for cp in cps if cp.get("kind") == "tail_80641"])[0]
+            final = _items([sample for sample in _need(tail, "identity_index_audit", "samples")
+                            if sample.get("id") == identity[0]])[0]
+            _eq(_need(final, "checkpoint_id"), _need(tail, "checkpoint_id"))
+            _identity_absence(final)
+            _assert(_need(tail, "N_total") > 0)
+    elif row == "B08":
+        for f in fixtures:
+            b, a = _checkpoint_pair(f, "probe_close_before", "probe_close_at")
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            finished = _items([t for t in trace if t.get("action") == "finish"])[0]
+            for axis, end_key in (("received_at", "close_at"), ("received_mono", "close_mono")):
+                _eq(_need(b, axis), _need(finished, end_key) - 1)
+                _eq(_need(a, axis), _need(finished, end_key))
+            if unit:
+                _eq(_need(b, "retained_details"), 1)
+                _eq(_need(a, "retained_details"), 0)
+            else:
+                _eq(_need(b, "retained_details") - _need(a, "retained_details"), 1)
+            for cp, state in ((b, "live"), (a, "tombstoned")):
+                sample = _items(_need(cp, "identity_samples"))[0]
+                _eq(_need(sample, "id"), _need(finished, "id"))
+                _eq(_need(sample, "observed"), state)
+            _eq(_need(a, "cumulative_end"), _need(a, "close_through"))
+            for totals in _items(_need(a, "frozen_totals_before_after")):
+                _eq(_need(totals, "id"), _need(finished, "id"))
+                _eq(_need(totals, "requery"), _need(totals, "at"))
+                _assert(_need(totals, "at", "finished") > _need(totals, "before", "finished"))
+    elif row == "B09":
+        for f in fixtures:
+            b, a = _checkpoint_pair(f, "probe_expire_before", "probe_expire_at")
+            reg = _items(_need(f, "fixture_provenance", "api_trace"))[0]
+            for axis in ("received_at", "received_mono"):
+                _eq(_need(b, axis), _need(reg, axis) + 14_400_000_000 - 1)
+                _eq(_need(a, axis), _need(reg, axis) + 14_400_000_000)
+            for cp, state in ((b, "live"), (a, "tombstoned")):
+                sample = _items(_need(cp, "identity_samples"))[0]
+                _eq(_need(sample, "id"), _need(reg, "id"))
+                _eq(_need(sample, "observed"), state)
+            _eq(_need(a, "diagnostic_counters", "retention_expired") -
+                _need(b, "diagnostic_counters", "retention_expired"), 1)
+            _eq(_need(a, "diagnostic_counters", "expired_start") -
+                _need(b, "diagnostic_counters", "expired_start"), 1)
+            _assert(_need(b, "coverage_complete") is True and _need(a, "coverage_complete") is False)
+            _eq(_need(a, "uncertain_sources"), [_need(reg, "source")])
+    elif row == "B10":
+        hours = _need(report, "test_scale", "hours") if unit else 168
+        pre = _need(report, "test_scale", "pre_prune_hours") if unit else 3
+        for f in fixtures:
+            ledger = _need(f, "tomb_due_ledger")
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            due = Counter(_need(e, "due_hour") for e in ledger)
+            identities = {(t.get("id"), t.get("registered_seq"), t.get("source"))
+                          for t in trace}
+            for entry in ledger:
+                _assert((entry.get("id"), entry.get("registered_seq"),
+                         entry.get("source")) in identities)
+            checkpoints = [c for c in _items(_need(f, "checkpoints")) if c.get("kind") == "hour"]
+            _eq(len(checkpoints), hours)
+            previous_res, previous_total = 0, 0
+            for hour, cp in enumerate(checkpoints, 1):
+                _eq(_need(cp, "minute_index"), 60 * hour)
+                pruned = _integer(_need(cp, "pruned_since_previous_hour"))
+                _eq(pruned, due[hour])
+                _assert(pruned == 0 if hour <= pre else pruned > 0)
+                accepted = _integer(_need(cp, "N_total")) - previous_total
+                other = _integer(_need(cp, "other_recorded_resident_removals"))
+                _assert(other >= 0)
+                _eq(pruned + other, previous_res + accepted - _integer(_need(cp, "N_res")))
+                previous_res, previous_total = cp["N_res"], cp["N_total"]
+    elif row == "B11":
+        for f in fixtures:
+            b, a = _checkpoint_pair(f, "probe_prune_before", "probe_prune_at")
+            for axis in ("received_at", "received_mono"):
+                _eq(_need(b, axis), _need(a, axis) - 1)
+            sample_b = _items(_need(b, "identity_samples"))[0]
+            sample_a = _items(_need(a, "identity_samples"))[0]
+            _eq(_need(sample_b, "id"), _need(sample_a, "id"))
+            _eq(_need(sample_b, "observed"), "tombstoned")
+            _eq(_need(sample_a, "observed"), "expired_or_untracked")
+            witness = _need(a, "prune_witness")
+            count = _need(witness, "before_N_res") + _need(witness, "accepted_between") - _need(witness, "after_N_res")
+            _eq(_need(witness, "pruned_count"), count)
+            _assert(count > 0)
+            _eq(_need(witness, "before_N_res"), _need(b, "N_res"))
+            _eq(_need(witness, "after_N_res"), _need(a, "N_res"))
+            _assert(_need(sample_a, "id") in _need(witness, "sample_ids"))
+            _assert(_need(a, "prune_observed_through") <= _need(witness, "as_of"))
+            audit = _items(_need(a, "identity_index_audit", "samples"))[0]
+            _eq(_need(audit, "id"), _need(sample_a, "id"))
+            _identity_absence(audit)
+    elif row == "B12":
+        for f in fixtures:
+            b, a = _checkpoint_pair(f, "probe_recent_before", "probe_recent_at")
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            finish = _items([t for t in trace if t.get("action") == "finish"])[0]
+            reg = _items([t for t in trace if t.get("action") == "register" and t.get("id") == finish.get("id")])[0]
+            _eq(_need(b, "received_at"), _need(finish, "bucket_end") - 1)
+            _eq(_need(a, "received_at"), _need(finish, "bucket_end"))
+            for cp, state, part in ((b, "included", "before"), (a, "excluded", "at")):
+                _eq(_need(cp, "identity_samples", 0, "id"), _need(finish, "id"))
+                _eq(_need(cp, "identity_samples", 0, "observed"), state)
+                source = _need(finish, "source")
+                expected = _need(cp, "recent_expected_counts", source, part)
+                _eq(_need(cp, "recent_rows", source), expected)
+                _eq(_need(expected, "registered"), 1 if part == "before" else 0)
+                _eq(_need(expected, "connection", _need(reg, "connection")) if part == "before" else
+                    _need(expected, "connection"), 1 if part == "before" else {})
+                _eq(_need(expected, "lifecycle", _need(finish, "classification")) if part == "before" else
+                    _need(expected, "lifecycle"), 1 if part == "before" else {})
+
+    _b_followup(row, report, fixtures, unit)
+
+
+def _validate_budget(budget, unit):
+    for key in ("F_4", "Q_4", "D", "A", "R", "T", "R_T", "AR", "TR", "E", "B", "G", "B_minus_E"):
+        _integer(_need(budget, key))
+    _eq(budget["AR"], budget["A"] + budget["R"])
+    _eq(budget["TR"], budget["T"] + budget["R_T"])
+    _eq(budget["E"], sum(budget[k] for k in ("F_4", "Q_4", "D", "AR", "TR")))
+    _eq(budget["Q_4"], _need(budget, "capacity", "charged_bytes"))
+    _eq(budget["B_minus_E"], budget["B"] - budget["E"])
+    _budget_order(budget)
+    _eq(_need(budget, "unknown_types"), [])
+    if not unit: _eq(budget["B"], 62_914_560)
+
+
+def _container_sum(point):
+    seen = set()
+    total = 0
+    for backing in _need(point, "container_backings"):
+        marker = _need(backing, "object_id")
+        if marker in seen: continue
+        seen.add(marker)
+        attributed = _integer(_need(backing, "Q_attributed_bytes"))
+        _assert(attributed <= _integer(_need(backing, "charged_limit_bytes")))
+        _assert(attributed == max(0, _integer(_need(backing, "getsizeof_bytes")) -
+                                   _integer(_need(backing, "header_accounted_elsewhere_bytes"))))
+        _need(backing, "includes_deleted_dummy")
+        total += attributed
+    _eq(total, _integer(_need(point, "Q_actual_bytes")))
+    _assert(total <= _integer(_need(point, "Q_4_bytes")), "Q actual exceeds Q4")
+
+
+def _evaluate_b_rest(row, report):
+    unit = report.get("mode") == "predicate_unit"
+    if row not in ("B20", "B22", "B23"):
+        fixtures = _items(_need(report, "churn_fixtures"))
+    if row == "B13":
+        for f in fixtures:
+            checkpoints = _items(_need(f, "checkpoints"))
+            kinds = Counter(_need(cp, "kind") for cp in checkpoints)
+            required = (Counter(_names(_need(report, "test_scale", "required_budget_points"),
+                                       "required_budget_points")) if unit else
+                        Counter({"hour": 168, "day": 7, "tail_80640": 1, "tail_80641": 1,
+                                 "highwater_before": 1, "highwater_after": 1,
+                                 "probe_close_before": 12, "probe_close_at": 12,
+                                 "probe_expire_before": 24, "probe_expire_at": 24,
+                                 "probe_prune_before": 36, "probe_prune_at": 36,
+                                 "probe_recent_before": 10, "probe_recent_at": 10}))
+            for kind, minimum in required.items():
+                if kinds[kind] < minimum:
+                    raise _EvidenceMissing(f"required budget checkpoint absent: {kind}")
+            _eq(len({_need(cp, "checkpoint_id") for cp in checkpoints}), len(checkpoints))
+            for cp in checkpoints:
+                _validate_budget(_need(cp, "budget"), unit)
+    elif row == "B14":
+        for f in fixtures:
+            cps = _items(_need(f, "checkpoints"), 2)
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            last = None
+            for cp in cps:
+                for axis, received, last_received in (("wall", "received_at", "last_received_at"),
+                                                      ("mono", "received_mono", "last_received_mono")):
+                    _assert(_need(cp, last_received) <= _need(cp, received))
+                    if last:
+                        _assert(_need(cp, received) >= _need(last, received))
+                        _assert(_need(cp, last_received) >= _need(last, last_received))
+                _eq(_need(cp, "cumulative_end"), _need(cp, "close_through"))
+                if last and last.get("close_through") is not None and cp.get("close_through") is not None:
+                    _assert(cp["close_through"] >= last["close_through"])
+                if last and last.get("prune_observed_through") is not None and cp.get("prune_observed_through") is not None:
+                    _assert(cp["prune_observed_through"] >= last["prune_observed_through"])
+                last = cp
+            closed = [t for t in trace if t.get("action") in ("finish", "close")]
+            _assert(any(t.get("close_at") == _need(cps[-1], "close_through") for t in closed))
+            _assert(_need(cps[-1], "prune_observed_through") <= _need(cps[-1], "prune_witness", "as_of"))
+            for totals in _items(_need(cps[-1], "frozen_totals_before_after")):
+                _eq(_need(totals, "at"), _need(totals, "requery"))
+            for cp in cps:
+                close = _need(cp, "close_through")
+                if close is not None:
+                    matches = [t for t in closed if t.get("close_at") == close]
+                    if not matches:
+                        raise _EvidenceMissing("close deadline input absent")
+                    _assert(any(_integer(_need(t, "close_at")) <= _integer(_need(cp, "received_at"))
+                                and _integer(_need(t, "close_mono")) <= _integer(_need(cp, "received_mono"))
+                                for t in matches), "close posted before both deadlines")
+                watermark = _need(cp, "prune_observed_through")
+                if watermark is not None:
+                    witness = _need(cp, "prune_witness")
+                    _eq(_need(witness, "unprocessed_tomb_count"), 0)
+                    _assert(_integer(_need(witness, "as_of")) <= _integer(_need(cp, "received_at"))
+                            and _integer(_need(witness, "as_of_mono")) <= _integer(_need(cp, "received_mono")))
+                    _assert(_integer(watermark) <= _integer(_need(witness, "as_of")))
+                    tombs = [t for t in trace if t.get("action") == "tomb"]
+                    if not tombs:
+                        raise _EvidenceMissing("prune deadline input absent")
+                    due = {t.get("id") for t in tombs if
+                           _integer(_need(t, "prune_due_at")) <= watermark and
+                           _integer(_need(t, "prune_due_mono")) <= _integer(_need(witness, "as_of_mono"))}
+                    pruned = {t.get("id") for t in trace if t.get("action") == "prune" and
+                              _integer(_need(t, "received_at")) <= _integer(_need(witness, "as_of")) and
+                              _integer(_need(t, "received_mono")) <= _integer(_need(witness, "as_of_mono"))}
+                    _eq(pruned, due, "prune watermark lacks completed tomb transitions")
+    elif row == "B15":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            for cp in _items(_need(f, "checkpoints")):
+                retained, open_seqs = _need(cp, "retained_seqs"), _need(cp, "open_seqs")
+                if not isinstance(retained, list) or not isinstance(open_seqs, list):
+                    raise _EvidenceMissing("retained/open seq input malformed")
+                _assert(all(type(seq) is int and seq >= 0 for seq in retained + open_seqs))
+                _eq(len(retained), len(set(retained)))
+                _eq(len(open_seqs), len(set(open_seqs)))
+                _eq(_need(cp, "oldest_retained_seq"), min(retained) if retained else None)
+                _eq(_need(cp, "latest_open_seq"), max(open_seqs) if open_seqs else None)
+                for probe in _items(_need(cp, "cursor_probes")):
+                    entries = _need(probe, "entry_seqs")
+                    _assert(all(type(s) is int and s > _need(probe, "after_seq") for s in entries))
+                    _eq(entries, sorted(set(entries)))
+                    _assert(set(entries) <= set(open_seqs))
+                    _eq(_need(probe, "next_seq"), entries[-1] if entries and
+                        _need(probe, "has_more") is True else None)
+                    _eq(_need(probe, "has_more"), bool([s for s in open_seqs if s >
+                        (entries[-1] if entries else probe["after_seq"])]))
+                for audit in _items(_need(cp, "identity_index_audit", "samples")):
+                    _identity_absence(audit)
+                order = _integer(_need(cp, "event_order"))
+                prefix = [t for t in trace if _integer(_need(t, "event_order")) <= order]
+                registered = {_integer(_need(t, "registered_seq")) for t in prefix
+                              if t.get("action") == "register" and t.get("classification") == "registered"}
+                retired = {_integer(_need(t, "registered_seq")) for t in prefix
+                           if t.get("action") == "prune"}
+                open_removed = {_integer(_need(t, "registered_seq")) for t in prefix
+                                if t.get("action") in ("finish", "close", "prune")}
+                _eq(set(retained), registered - retired, "retained seq differs from transition trace")
+                _eq(set(open_seqs), registered - open_removed, "open seq differs from transition trace")
+                probes = _need(cp, "cursor_probes")
+                if retained:
+                    _assert(any(_need(p, "after_seq") < min(retained) for p in probes),
+                            "stale cursor probe absent")
+                if open_seqs:
+                    _assert(any(_need(p, "after_seq") >= max(open_seqs) for p in probes),
+                            "latest cursor probe absent")
+                else:
+                    _assert(any(_need(p, "entry_seqs") == [] for p in probes),
+                            "empty latest cursor probe absent")
+    elif row == "B16":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            cps = _items(_need(f, "checkpoints"), 2)
+            if not any("passive_cohort_projection" in cp for cp in cps):
+                raise _EvidenceMissing("passive cohort projection missing")
+            public = {c.get("checkpoint_id"): c for c in cps}
+            required_sources = (set(REGISTRY) if not unit else
+                                {_need(t, "source") for t in trace if t.get("action") == "register"})
+            for cp in cps:
+                if "passive_cohort_projection" not in cp: continue
+                projections = _items(cp["passive_cohort_projection"])
+                _eq({_need(p, "source") for p in projections}, required_sources,
+                    "recent cohort passive projection omitted a source")
+                _eq(len(projections), len(required_sources))
+                for projection in projections:
+                    _eq(_need(cp, "observation"), "passive")
+                    pub = _need(public, _need(projection, "public_checkpoint_id"))
+                    source = _need(projection, "source")
+                    _eq(set(_need(pub, "recent_cohorts")), required_sources,
+                        "recent cohort public response omitted a source")
+                    actual = _need(pub, "recent_cohorts", source)
+                    _eq(_need(projection, "counts"), _need(actual, "counts"))
+                    _eq(_need(projection, "range"), _need(actual, "range"))
+                    counts = _need(actual, "counts")
+                    registered = _integer(_need(counts, "registered"))
+                    _eq(registered, sum(_need(counts, "connection").values()))
+                    _eq(registered, sum(_need(counts, "lifecycle").values()))
+                    _assert(all(_need(actual, "equations_hold", key) is True for key in ("connection", "lifecycle")))
+                    probe = _need(pub, "old_cohort_probe")
+                    _assert(_need(probe, "start") < _need(pub, "cohort_exact_from"))
+                    _eq(_need(probe, "classification"), "cohort_expired")
+                    _assert("cohort_expired" in _need(probe, "diagnostics", "codes"))
+                    _assert(not any(key in probe for key in
+                                    ("counts", "registered", "connection", "lifecycle", "equations_hold")),
+                            "expired cohort returned a partial denominator")
+                    start, end = (_integer(_need(actual, "range", key)) for key in ("start", "end"))
+                    _eq(end, _integer(_need(pub, "received_at")))
+                    _assert(start < end and start >= _integer(_need(pub, "cohort_exact_from")))
+                    if not unit:
+                        _eq(start, max(_integer(_need(pub, "cohort_exact_from")), end - 60 * MINUTE))
+                    cohort = [t for t in trace if t.get("action") == "register" and
+                              t.get("source") == source and
+                              start <= _integer(_need(t, "received_at")) < end and
+                              start <= _integer(_need(t, "received_mono")) <
+                              _integer(_need(pub, "received_mono"))]
+                    _eq(counts["registered"], len(cohort), "cohort range input count differs")
+                    _eq(counts["connection"], dict(Counter(_need(t, "connection") for t in cohort)))
+                    lifecycle = Counter()
+                    for registration in cohort:
+                        completions = [t for t in trace if t.get("action") == "finish" and
+                                       t.get("id") == _need(registration, "id") and
+                                       _integer(_need(t, "received_at")) <= _integer(_need(pub, "received_at")) and
+                                       _integer(_need(t, "received_mono")) <= _integer(_need(pub, "received_mono"))]
+                        state = _need(completions[-1], "classification") if completions else _need(registration, "lifecycle")
+                        lifecycle[state] += 1
+                    _eq(counts["lifecycle"], dict(lifecycle))
+    elif row == "B17":
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            cps = _items(_need(f, "checkpoints"), 2)
+            if not any("passive_epoch_projection" in cp for cp in cps):
+                raise _EvidenceMissing("passive epoch projection missing")
+            public = {c.get("checkpoint_id"): c for c in cps}
+            sources = set(_need(f, "source_registered"))
+            _eq(sources, {_need(t, "source") for t in trace if t.get("action") == "register"},
+                "source input coverage incomplete")
+            for cp in cps:
+                if "passive_epoch_projection" not in cp: continue
+                projections = _items(cp["passive_epoch_projection"])
+                _eq({_need(p, "source") for p in projections}, sources,
+                    "passive epoch omitted a source")
+                _eq(len(projections), len(sources), "passive epoch duplicated a source")
+                for projection in projections:
+                    pub = _need(public, _need(projection, "public_checkpoint_id"))
+                    source = _need(projection, "source")
+                    entries = _items(_need(pub, "epoch_sources"))
+                    _eq({_need(e, "source") for e in entries}, sources,
+                        "public epoch omitted a source")
+                    _eq(len(entries), len(sources), "public epoch duplicated a source")
+                    entry = _items([e for e in entries if e.get("source") == source])[0]
+                    for key in ("registered_invocations", "frozen_invocations", "live_invocations",
+                                "connection_counts", "lifecycle_counts"):
+                        _eq(_need(projection, key), _need(entry, key))
+                    registered = _integer(_need(entry, "registered_invocations"))
+                    _eq(registered, _need(entry, "frozen_invocations") + _need(entry, "live_invocations"))
+                    _eq(registered, sum(_need(entry, "connection_counts").values()))
+                    _eq(registered, sum(_need(entry, "lifecycle_counts").values()))
+                    _eq(registered, _need(f, "source_registered", source))
+                    _eq(registered, sum(t.get("action") == "register" and t.get("source") == source for t in trace))
+                    _assert(all(_need(entry, "equations_hold", key) is True for key in ("connection", "lifecycle")))
+                    _eq(_need(pub, "N_total"), sum(e["registered_invocations"] for e in pub["epoch_sources"]))
+                    _eq(_need(pub, "N_live"), sum(e["live_invocations"] for e in pub["epoch_sources"]))
+    elif row == "B18":
+        for f in fixtures:
+            trace = _need(f, "fixture_provenance", "api_trace")
+            previous_event = -1
+            for step in trace:
+                event = _integer(_need(step, "event_order"))
+                _assert(event >= previous_event, "API event order regressed")
+                previous_event = event
+            cursor = 0
+            previous_order = -1
+            causes = ("retention_expired", "expired_start", "expired_finish", "expired_wrapper",
+                      "expired_identity_unverified", "init_failed")
+            totals = Counter()
+            affected = set()
+            for cp in _items(_need(f, "checkpoints")):
+                counters = _need(cp, "diagnostic_counters")
+                order = _integer(_need(cp, "event_order"))
+                _assert(order >= previous_order, "checkpoint order regressed")
+                previous_order = order
+                while cursor < len(trace) and _integer(_need(trace[cursor], "event_order")) <= order:
+                    step = trace[cursor]
+                    classification = step.get("classification")
+                    if classification in causes:
+                        totals[classification] += 1
+                        affected.add(_need(step, "source"))
+                    cursor += 1
+                for key in (*causes, "clock_unverified"):
+                    _integer(_need(counters, key))
+                _eq(_need(counters, "clock_unverified"), 0)
+                isolation = _need(cp, "clock_isolation")
+                _assert(_need(isolation, "active") is False and _need(isolation, "candidate_pairs") == 0,
+                        "normal trace entered clock isolation")
+                _assert(_need(cp, "admission_stopped") is False)
+                _eq(set(_need(cp, "uncertain_sources")), affected,
+                    "uncertain source differs from cause input")
+                _eq(_need(cp, "coverage_complete"), not affected)
+                for cause in causes:
+                    _eq(_need(counters, cause), totals[cause])
+    elif row == "B19":
+        scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+        for f in fixtures:
+            trace = _items(_need(f, "fixture_provenance", "api_trace"))
+            counts = Counter()
+            cursor = 0
+            cps = _items(_need(f, "checkpoints"))
+            legacy_unit = (unit and len(cps) == 1 and "event_order" not in cps[0] and
+                           all("event_order" not in t for t in trace))
+            if legacy_unit:
+                counts.update(_need(t, "classification") for t in trace)
+            else:
+                previous_event = -1
+                for step in trace:
+                    event = _integer(_need(step, "event_order"))
+                    _assert(event >= previous_event, "API event order regressed")
+                    previous_event = event
+            previous_order = -1
+            for cp in cps:
+                if not legacy_unit:
+                    order = _integer(_need(cp, "event_order"))
+                    _assert(order >= previous_order, "checkpoint order regressed")
+                    previous_order = order
+                    while cursor < len(trace) and _integer(_need(trace[cursor], "event_order")) <= order:
+                        counts[_need(trace[cursor], "classification")] += 1
+                        cursor += 1
+                _eq(_need(cp, "transition_counts"), dict(counts))
+                refs = _items(_need(cp, "measurement_refs"))
+                _eq(len(set(refs)), len(refs))
+                for classification, count in counts.items():
+                    if not count: continue
+                    _assert(any(_need(scenarios, ref, "measured_transition") == classification for ref in refs))
+                for ref in refs:
+                    scenario = _need(scenarios, ref)
+                    _observed_timing(scenario)
+                    _measured_time_gate(scenario, required_n=1 if unit else 1000)
+                    _temporary(scenario)
+                    _eq(_need(scenario, "status"), "PASS")
+                if counts.get("prune", 0):
+                    _assert(any(_need(scenarios, ref, "measured_transition") == "prune"
+                                for ref in refs), "prune requires independent measurement")
+    elif row == "B20":
+        kinds = _need(report, "test_scale", "fault_kinds") if unit else None
+        scenarios = _items(_need(report, "scenarios"))
+        faults = [s for s in scenarios if "fault_evidence" in s]
+        if kinds is not None: _eq({s["fault_evidence"]["fault_kind"] for s in faults}, set(kinds))
+        expected_classes = {"clock_step": "clock_unverified",
+                            "merge_failure": "CumulativeMergeFailureForTest",
+                            "late_after_expiry": "expired_finish",
+                            "id_collision": "registration_conflict",
+                            "uuid_uniqueness": "registered"}
+        for s in _items(faults):
+            _assert(_need(s, "classification_ok") is True)
+            _assert(_need(s, "sample_checks", "checked") > 0)
+            _eq(_need(s, "sample_checks", "failures"), [])
+            _need(s, "first_call", "classification")
+            evidence = _need(s, "fault_evidence")
+            kind = _need(evidence, "fault_kind")
+            if kind not in expected_classes:
+                raise _EvidenceMissing("unknown fault kind")
+            _eq(_need(s, "first_call", "classification"), expected_classes[kind],
+                "fault classification differs from fault kind")
+            coverage = _need(evidence, "expected_coverage")
+            affected = _items(_need(evidence, "affected_sources"))
+            _eq(_need(coverage, "uncertain_sources"), affected)
+            _eq(_need(coverage, "complete"), False)
+            _eq(_need(evidence, "watermark_before"), _need(evidence, "watermark_after"))
+            _eq(_need(evidence, "normal_schedule_before"),
+                _need(evidence, "normal_schedule_after"),
+                "fault entered the normal schedule")
+            fault_trace = _items(_need(evidence, "fault_trace"))
+            _eq(_need(fault_trace[0], "classification"), expected_classes[kind])
+            _eq(_need(fault_trace[0], "source"), affected[0])
+            _eq(_need(fault_trace[0], "watermark_after"), _need(evidence, "watermark_before"),
+                "fault published a watermark")
+            retry = _need(evidence, "retry_admission")
+            _eq(_need(retry, "attempted"), _need(retry, "registered") + _need(retry, "rejected"))
+            _eq(_need(retry, "rejected"), 0)
+            registered = [t for t in fault_trace[1:] if t.get("action") == "register" and
+                          t.get("classification") == "registered"]
+            _eq(len(registered), _need(retry, "registered"),
+                "retry/new admission trace differs from summary")
+            _assert(all(_need(t, "source") in affected for t in registered))
+            if kind == "merge_failure":
+                _assert(any(t.get("action") == "retry" and
+                            t.get("classification") == "published" and
+                            _need(t, "watermark_after") != _need(evidence, "watermark_before")
+                            for t in fault_trace[1:]), "merge retry did not publish")
+            if kind == "uuid_uniqueness":
+                ids = [_need(t, "id") for t in registered]
+                _eq(len(ids), len(set(ids)), "UUID uniqueness counterexample reused an ID")
+            _assert(_need(evidence, "normal_schedule_counted") is False)
+    elif row == "B21":
+        for f in fixtures:
+            trace = _items(_need(f, "resident_trace"))
+            maximum = max(trace)
+            _eq(_need(f, "max_resident_observed"), maximum)
+            _assert(maximum > 0 and maximum <= (4929 if f.get("auxiliary_registered", 0) else 2880))
+            cps = _items(_need(f, "checkpoints"))
+            _assert(all(_need(cp, "N_res") <= maximum for cp in cps))
+            _assert(any(_need(cp, "pruned_since_previous_hour") > 0 for cp in cps if cp.get("kind") == "hour"))
+            tail = _items([cp for cp in cps if cp.get("kind") == "tail_80641"])[0]
+            _assert(any(s.get("observed") == "expired_or_untracked" for s in _need(tail, "identity_samples")))
+            events = _items(_need(f, "resident_events"))
+            api = _items(_need(f, "fixture_provenance", "api_trace"))
+            orders = [_integer(_need(e, "event_order")) for e in events]
+            _assert(all(previous < current for previous, current in zip(orders, orders[1:])),
+                    "resident events omitted or reused an order")
+            _eq([_integer(_need(e, "N_res")) for e in events], trace,
+                "resident trace differs from every event")
+            _eq([(_need(e, "event_order"), _need(e, "action"), _need(e, "id")) for e in events],
+                [(_need(t, "event_order"), _need(t, "action"), _need(t, "id")) for t in api],
+                "resident event omitted an API transition")
+            cursor = 0
+            previous_order = -1
+            for cp in cps:
+                order = _integer(_need(cp, "event_order"))
+                _assert(order >= previous_order, "checkpoint order regressed")
+                previous_order = order
+                while cursor < len(events) and orders[cursor] <= order:
+                    cursor += 1
+                if cursor == 0:
+                    raise _EvidenceMissing("checkpoint has no preceding resident event")
+                _eq(_need(cp, "N_res"), _need(events[cursor - 1], "N_res"))
+            initial = {_need(s, "id") for s in _need(tail, "identity_samples")
+                       if s.get("observed") == "expired_or_untracked"}
+            _assert(any(t.get("action") == "expire" and t.get("id") in initial for t in api),
+                    "initial identity never expired")
+            _assert(any(t.get("action") == "prune" and t.get("id") in initial for t in api),
+                    "initial identity never pruned")
+    elif row == "B22":
+        proof = _need(report, "capacity_proof")
+        m = _need(report, "test_scale", "max_records") if unit else 131072
+        j = _need(report, "test_scale", "job_key_limit") if unit else 12
+        steps = _need(proof, "budget_q_size_steps")
+        _eq(_need(steps, "at_count"), m)
+        _eq(_need(steps, "list_header_bytes"), sys.getsizeof([]))
+        _eq(_need(steps, "list_slot_bytes"), sys.getsizeof([None]) - sys.getsizeof([]))
+        _eq(_need(steps, "block_width"), 257)
+        _eq(_need(steps, "detail_cap"), min(m, 2048))
+        if sys.version_info[:3] != (3, 13, 5):
+            raise _EvidenceMissing("locked CPython 3.13.5 size steps unavailable")
+        actual_dict, actual_set = _runtime_budget_steps(m)
+        _eq(_need(steps, "dict_steps"), actual_dict)
+        _eq(_need(steps, "set_steps"), actual_set)
+        _eq(_need(steps, "computed_q_at_limit"), _actual_budget_q(m, steps))
+        _assert(_need(proof, "H_res") <= m and _need(proof, "H_job") <= j)
+        _eq(_need(proof, "job_key_limit"), j)
+        _eq(_need(proof, "Q_cap_bytes"), _actual_budget_q(m, steps) + 512 * m + 1536 * j)
+        _assert(_need(proof, "Q_obs_bytes") <= _need(proof, "Q_cap_bytes"))
+        ownership = _need(proof, "F4_ownership")
+        _eq(_need(ownership, "total_bytes"), 18_874_368)
+        _eq(sum(_need(i, "bytes") for i in _items(_need(ownership, "items"))), 18_874_368)
+        _assert(all(_need(i, "owner") == "F_4" for i in ownership["items"]))
+        paths = [_need(i, "path") for i in ownership["items"]]
+        _eq(len(paths), len(set(paths)), "F4 ownership path duplicated")
+        fixtures = _items(_need(report, "churn_fixtures"))
+        observed_keys = set()
+        for f in fixtures:
+            counts = _need(f, "job_key_counts")
+            registered = [t for t in _items(_need(f, "fixture_provenance", "api_trace"))
+                          if t.get("action") == "register" and t.get("classification") == "registered"]
+            observed = Counter(_need(t, "source") + ":" + _need(t, "job_id") for t in registered)
+            _eq(counts, dict(observed), "job key count differs from registration trace")
+            observed_keys.update(observed)
+        _assert(_need(proof, "H_job") <= len(observed_keys), "H_job lacks job-key input")
+    elif row == "B23":
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        applicable = fixtures if unit else [p for p in fixtures
+                                             if p.get("name") == "pressure_unique_job_keys_byte_stop"]
+        if not unit:
+            _eq(len(applicable), 1)
+        for p in applicable:
+            r = _need(p, "first_rejection")
+            before = _need(p, "before")
+            _assert(_need(before, "N_res") + 1 < 131072)
+            _budget_order(before)
+            _assert(_need(r, "slot_test", "would_exceed") is False)
+            _eq(_need(r, "slot_test", "candidate_N_res"), _need(before, "N_res") + 1)
+            _eq(_need(r, "byte_precheck", "would_exceed"), _need(r, "byte_precheck", "candidate_E") > _need(before, "B"))
+            _eq(_need(r, "cause"), "byte")
+            _assert(_need(r, "no_insertion") is True)
+            _index_audit(_need(r, "index_audit"))
+            _assert(_need(p, "post_latch", "resumed_after_release") is False, "latch reopened")
+            control = _need(p, "control_existing_key")
+            _eq(_need(control, "classification"), "registered")
+            _assert(any(key.endswith(":" + _need(control, "job_id")) for key in _need(p, "job_key_counts")))
+            _assert(not any(key.endswith(":" + _need(r, "candidate_job_id")) for key in p["job_key_counts"]))
+            trace = _items(_need(p, "fixture_provenance", "api_trace"))
+            rejected_at = _integer(_need(r, "trace_call_index"))
+            pressure = [t for t in trace if _integer(_need(t, "call_index")) <= rejected_at]
+            keys = [_need(t, "source") + ":" + _need(t, "job_id") for t in pressure]
+            _eq(len(keys), len(set(keys)), "unique-key pressure reused a key")
+            rejection = _items([t for t in pressure if _need(t, "call_index") == rejected_at])[0]
+            _eq(_need(rejection, "job_id"), _need(r, "candidate_job_id"))
+            _eq(_need(rejection, "classification"), "rejected")
+            _assert(all(_need(t, "classification") == "registered" for t in pressure[:-1]))
+            accepted = Counter(_need(t, "source") + ":" + _need(t, "job_id")
+                               for t in pressure if t.get("classification") == "registered")
+            _eq(_need(p, "job_key_counts"), dict(accepted),
+                "unique-key pressure count differs from accepted calls")
+            control_call = _items([t for t in trace if t.get("call_index") ==
+                                   _need(control, "trace_call_index")])[0]
+            _eq(_need(control_call, "job_id"), _need(control, "job_id"))
+            _eq(_need(control_call, "classification"), "registered")
+            _assert(_need(control_call, "call_index") > rejected_at)
+            for point in (before, _need(p, "after")):
+                _budget_order(point)
+            _assert(all(_need(t, "classification") == "rejected" for t in
+                        trace if _need(t, "call_index") > rejected_at and t is not control_call),
+                    "byte latch resumed a new-key admission")
+
+
+def _actual_budget_q(count, steps):
+    def stepped(table, n):
+        return max((row for row in table if row[0] <= n), key=lambda row: row[0])
+    def backing(n):
+        return 0 if n == 0 else ((n + (n >> 3) + 9) & ~3) * steps["list_slot_bytes"]
+    d = stepped(_need(steps, "dict_steps"), count)
+    s = stepped(_need(steps, "set_steps"), count)
+    blocks = min(3, count) + count // 128
+    details = min(count, 2048)
+    return (d[2] - 64 + backing(count) + 2 * (d[1] - 64) + s[1] - 216
+            + 6 * backing(blocks) + blocks * (steps["list_header_bytes"] + backing(257))
+            + backing(details) + d[1] - 64 +
+            details * (steps["list_header_bytes"] + backing(1)))
+
+
+def _runtime_budget_steps(count):
+    if type(count) is not int or count < 0 or count > 131072:
+        raise _EvidenceMissing("invalid budget count")
+    generic, unicode, entries = {}, {}, set()
+    dict_steps = [[0, sys.getsizeof(generic), sys.getsizeof(unicode)]]
+    set_steps = [[0, sys.getsizeof(entries)]]
+    for n in range(1, count + 1):
+        key = n - 1
+        generic[key] = key
+        unicode[str(key)] = key
+        entries.add(key)
+        size = [n, sys.getsizeof(generic), sys.getsizeof(unicode)]
+        if size[1:] != dict_steps[-1][1:]: dict_steps.append(size)
+        set_size = [n, sys.getsizeof(entries)]
+        if set_size[1] != set_steps[-1][1]: set_steps.append(set_size)
+    return dict_steps, set_steps
+
+
+def _attempts(fixture, attachments, unit):
+    h = _need(fixture, "highwater_checks")
+    if unit and "register_attempts" in h:
+        return _items(h["register_attempts"])
+    cache = _finalize_cache.get()
+    key = id(fixture)
+    if cache is not None and key in cache["attempts"]:
+        return cache["attempts"][key]
+    ref = _need(h, "register_attempts_ref")
+    path = _need(ref, "path")
+    if not _safe_ref(path): raise _EvidenceMissing("unsafe attachment path")
+    blob = _need(attachments, path)
+    if not isinstance(blob, bytes): raise _EvidenceMissing("attachment bytes missing")
+    if hashlib.sha256(blob).hexdigest() != _need(ref, "sha256"):
+        raise _EvidenceMissing("attachment hash mismatch")
+    try:
+        lines = gzip.decompress(blob).splitlines()
+        rows = [json.loads(line) for line in lines]
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise _EvidenceMissing("invalid gzip JSONL attachment") from exc
+    if len(rows) != _need(ref, "rows"):
+        raise _EvidenceMissing("attachment row count mismatch")
+    _items(rows)
+    if rows[0].get("register_seq") != _need(ref, "first_seq") or rows[-1].get("register_seq") != _need(ref, "last_seq"):
+        raise _EvidenceMissing("attachment sequence bounds mismatch")
+    if cache is not None:
+        cache["attempts"][key] = rows
+    return rows
+
+
+def _safe_ref(path):
+    return (isinstance(path, str) and path and not Path(path).is_absolute() and
+            all(part not in ("..", "") for part in Path(path).parts))
+
+
+def _validate_attempts(rows, *, require_budget=False, require_complete=True):
+    if [r.get("register_seq") for r in rows] != list(range(len(rows))):
+        raise _EvidenceMissing("register sequence gap")
+    for r in rows:
+        _need(r, "input")
+        _need(r, "classification")
+        _need(r, "before")
+        _need(r, "after")
+        if require_complete:
+            _need(r, "selected")
+            layout = _need(r, "normalized_layout")
+            _need(layout, "before")
+            _need(layout, "after")
+        if require_budget:
+            _budget_order(r["before"])
+            _budget_order(r["after"])
+
+
+def _validate_attempt_stream(rows, *, unit, highwater):
+    """Check the register ledger against its own input and adjacent registrations."""
+    previous = None
+    phases = Counter()
+    for row in rows:
+        input_row = _need(row, "input")
+        for key in ("invocation_id", "source", "job_id", "received_at", "received_mono",
+                    "started_at", "started_mono", "minute_index", "auxiliary"):
+            _need(input_row, key)
+        before, after = _need(row, "before"), _need(row, "after")
+        for side in (before, after):
+            for key in ("N_total", "N_res", "H_res", "H_job"):
+                _integer(_need(side, key))
+            _budget_order(side)
+        classification = _need(row, "classification")
+        if classification == "registered":
+            _eq(after["N_total"], before["N_total"] + 1)
+        elif classification == "rejected":
+            _eq(after["N_total"], before["N_total"])
+        else:
+            raise _EvidenceViolation("register attempt classification changed")
+        _assert(after["H_res"] >= before["H_res"] and after["H_job"] >= before["H_job"])
+        if previous is not None:
+            _eq(before["N_total"], previous["N_total"], "register sequence N_total discontinuity")
+            _assert(before["H_res"] >= previous["H_res"] and before["H_job"] >= previous["H_job"])
+        previous = after
+        if not unit:
+            phase = _need(input_row, "phase")
+            _assert(phase in ("burst", "probe", "schedule", "tail"))
+            phases[phase] += 1
+    if not unit:
+        _assert(_need(highwater, "first_pass_complete") is True,
+                "register attempt first pass did not complete")
+        _eq(phases["schedule"] + phases["tail"], 80641)
+        _eq(phases["tail"], 1)
+        _assert(all(row["classification"] == "registered" for row in rows
+                    if row["input"]["phase"] in ("burst", "probe", "schedule", "tail")))
+
+
+def _layout_changed(layout):
+    before, after = _need(layout, "before"), _need(layout, "after")
+    for side in (before, after):
+        for item in side:
+            for key in ("path", "size_bytes", "share_group", "q_attributed_bytes", "includes_deleted_dummy"):
+                _need(item, key)
+    return before != after
+
+
+def _no_rebuild(report):
+    events = _need(report, "rebuild_events")
+    if events != []: return False
+    for f in _items(_need(report, "churn_fixtures")):
+        for cp in _items(_need(f, "checkpoints")):
+            cap = _need(cp, "budget", "capacity")
+            if (_need(cp, "rebuild_count") != 0 or _need(cap, "rebuild_old_bytes") != 0
+                    or _need(cap, "rebuild_new_bytes") != 0): return False
+    scenarios = _items(_need(report, "scenarios"))
+    rebuild = _items([s for s in scenarios if s.get("name") == "rebuild_double_backing"])[0]
+    _eq(_need(rebuild, "status"), "N/A")
+    return _need(rebuild, "reason") == "N/A (no rebuild in this implementation)"
+
+
+def _evaluate_c(row, report, attachments):
+    unit = report.get("mode") == "predicate_unit"
+    if row in ("C01", "C02", "C03", "C04", "C05", "C06", "C07", "C08"):
+        fixtures = _items(_need(report, "churn_fixtures"))
+    if row == "C01":
+        for f in fixtures:
+            h = _need(f, "highwater_checks")
+            attempts = _attempts(f, attachments, unit)
+            _validate_attempts(attempts, require_complete=False)
+            selected = _items(_need(h, "checks"))
+            actual_events = [step["register_seq"] for step in attempts
+                             if step["classification"] == "registered" and
+                             (step["after"]["H_res"] > step["before"]["H_res"] or
+                              step["after"]["H_job"] > step["before"]["H_job"])]
+            _eq([_need(check, "register_seq") for check in selected], actual_events)
+            res_count = job_count = both_count = 0
+            for check in selected:
+                seq = _integer(_need(check, "register_seq"))
+                attempt = _need(attempts, seq)
+                for side in ("before", "after"):
+                    for key in ("H_res", "H_job"):
+                        _eq(_need(check, side, key), _need(attempt, side, key))
+                res = check["after"]["H_res"] > check["before"]["H_res"]
+                job = check["after"]["H_job"] > check["before"]["H_job"]
+                res_count += res; job_count += job; both_count += res and job
+                _assert(res or job)
+                _eq(_need(check, "N_total_before"), _need(attempt, "before", "N_total"))
+                _eq(_need(check, "N_total_after"), _need(attempt, "after", "N_total"))
+                for key in ("received_at", "received_mono", "minute_index"):
+                    _eq(_need(check, key), _need(attempt, "input", key))
+            _eq(_need(h, "resident_events"), res_count)
+            _eq(_need(h, "job_events"), job_count)
+            _eq(_need(h, "both_events"), both_count)
+            _eq(_need(h, "events"), len(selected))
+    elif row == "C02":
+        for f in fixtures:
+            h = _need(f, "highwater_checks")
+            attempts = _attempts(f, attachments, unit)
+            checks = _items(_need(h, "checks"))
+            point_rows = _items(_need(report, "capacity_proof", "checkpoints"), 2)
+            points = {_need(p, "checkpoint_id"): p for p in point_rows}
+            _eq(len(points), len(point_rows), "capacity checkpoint ID reused")
+            cps = _items(_need(f, "checkpoints"), 2)
+            check_seqs = [_integer(_need(check, "register_seq")) for check in checks]
+            _eq(len(set(check_seqs)), len(check_seqs), "highwater sequence reused")
+            check_by_seq = dict(zip(check_seqs, checks))
+            first_violation = h.get("first_violation")
+            if isinstance(first_violation, dict):
+                violation_seq = _integer(_need(first_violation, "register_seq"))
+                if violation_seq not in check_by_seq: check_by_seq[violation_seq] = first_violation
+            changed = preserved = violations = 0
+            paired_refs = set()
+            paired_cps = defaultdict(list)
+            for cp in cps:
+                if cp.get("kind") in ("highwater_before", "highwater_after"):
+                    paired_cps[(cp.get("register_seq"), cp["kind"])].append(cp)
+            for seq, attempt in enumerate(attempts):
+                _eq(_need(attempt, "register_seq"), seq)
+                check = check_by_seq.get(seq)
+                layout = _need(attempt, "normalized_layout")
+                if check is not None and "normalized_layout" in check:
+                    _eq(_need(check, "normalized_layout"), layout)
+                backing = _layout_changed(layout)
+                if seq in check_seqs: _eq(_need(check, "backing_changed"), backing)
+                before = attempt.get("before") if "before" in attempt else _need(check, "before")
+                after = attempt.get("after") if "after" in attempt else _need(check, "after")
+                if check is not None and "before" in attempt and "after" in attempt:
+                    for side, measured in (("before", before), ("after", after)):
+                        for key in ("H_job", "Q_actual", "Q_4", "G", "E", "B"):
+                            _eq(_need(check, side, key), _need(measured, key))
+                violation = any(
+                    _need(point, "G") > _need(point, "E") or
+                    _need(point, "E") > _need(point, "B") or
+                    _need(point, "Q_actual") > _need(point, "Q_4")
+                    for point in (before, after)
+                )
+                selected = (backing or _need(after, "H_job") > _need(before, "H_job") or
+                            (violation and violations == 0))
+                _eq(_need(attempt, "selected"), selected)
+                if selected:
+                    if check is None: raise _EvidenceMissing("selected highwater check missing")
+                if seq in check_seqs:
+                    changed += backing
+                    preserved += bool(_need(check, "preserved"))
+                    _eq(_need(check, "preserved"), selected)
+                violations += violation
+                if selected:
+                    def paired(kind):
+                        matching = paired_cps[(seq, kind)]
+                        if not matching:
+                            raise _EvidenceMissing(f"{kind} pair for register_seq {seq} missing")
+                        _eq(len(matching), 1, f"{kind} pair for register_seq {seq} duplicated")
+                        return matching[0]
+                    before_cp = paired("highwater_before")
+                    after_cp = paired("highwater_after")
+                    for side, cp in (("before", before_cp), ("after", after_cp)):
+                        measured = _need(check, side)
+                        _budget_order(measured)
+                        ref = _need(cp, "capacity_ref")
+                        _assert(ref not in paired_refs, "selected capacity point reused")
+                        paired_refs.add(ref)
+                        point = _need(points, ref)
+                        _container_sum(point)
+                        _eq(_need(measured, "Q_actual"), _need(point, "Q_actual_bytes"))
+                        _eq(_need(measured, "Q_4"), _need(point, "Q_4_bytes"))
+            _eq(_need(h, "backing_changes"), changed)
+            _eq(_need(h, "preserved_pairs"), preserved)
+            _eq(_need(h, "violations"), violations)
+    elif row == "C03":
+        for f in fixtures:
+            attempts = _attempts(f, attachments, unit)
+            cps = _items(_need(f, "checkpoints"), 2)
+            paired_cps = defaultdict(list)
+            for cp in cps:
+                if cp.get("kind") in ("highwater_before", "highwater_after"):
+                    paired_cps[(cp.get("register_seq"), cp["kind"])].append(cp)
+            point_rows = _items(_need(report, "capacity_proof", "checkpoints"), 2)
+            points = {p.get("checkpoint_id") for p in point_rows}
+            _eq(len(points), len(point_rows))
+            refs = set()
+            trace = _need(f, "fixture_provenance", "api_trace")
+            public = _need(f, "fixture_provenance", "public_query_trace")
+            trace_blocked = [_integer(_need(event, "event_order")) for event in trace
+                             if event.get("action") in ("link_round", "finish")]
+            public_blocked = [_integer(_need(event, "event_order")) for event in public]
+            for orders in (trace_blocked, public_blocked):
+                _assert(all(a <= b for a, b in zip(orders, orders[1:])),
+                        "event order regressed")
+            blocked = list(heapq.merge(trace_blocked, public_blocked))
+            blocked_cursor = 0
+            previous_order = -1
+            for attempt in attempts:
+                if not _need(attempt, "selected"): continue
+                seq = _need(attempt, "register_seq")
+                before_rows = paired_cps[(seq, "highwater_before")]
+                after_rows = paired_cps[(seq, "highwater_after")]
+                before = _items(before_rows)[0]
+                after = _items(after_rows)[0]
+                _eq(len(before_rows), 1)
+                _eq(len(after_rows), 1)
+                order = _integer(_need(attempt, "event_order"))
+                _assert(order >= previous_order, "selected attempt order regressed")
+                previous_order = order
+                after_order = _integer(_need(after, "event_order"))
+                _assert(_need(before, "event_order") < order < after_order)
+                while blocked_cursor < len(blocked) and blocked[blocked_cursor] <= order:
+                    blocked_cursor += 1
+                _assert(blocked_cursor == len(blocked) or blocked[blocked_cursor] > after_order,
+                        "highwater pair followed a public query, link, or finish")
+                for cp in (before, after):
+                    _eq(_need(cp, "observation"), "passive")
+                    for key in ("received_at", "received_mono", "minute_index"):
+                        _eq(_need(cp, key), _need(attempt, "input", key))
+                    ref = _need(cp, "capacity_ref")
+                    _assert(ref in points)
+                    _assert(ref not in refs, "capacity point reused")
+                    refs.add(ref)
+    elif row == "C04":
+        for f in fixtures:
+            h = _need(f, "highwater_checks")
+            attempts = _attempts(f, attachments, unit)
+            _validate_attempts(attempts, require_budget=True)
+            _validate_attempt_stream(attempts, unit=unit, highwater=h)
+            replay = _need(h, "replay")
+            selected = [r["register_seq"] for r in attempts if r["selected"]]
+            if selected:
+                _assert(_need(replay, "performed") is True)
+                _eq(_need(replay, "stopped_after_seq"), max(selected))
+                _eq(_need(replay, "compared_steps"), max(selected) + 1)
+            else:
+                _assert(_need(replay, "performed") is False)
+                _eq(_need(replay, "compared_steps"), 0)
+            _eq(_need(replay, "mismatch"), None)
+            if selected:
+                digest = _need(replay, "comparison_digest_by_seq")
+                for seq in selected:
+                    record = _need(digest, seq)
+                    _eq(_need(record, "register_seq"), seq)
+                    source = {key: _need(attempts[seq], key) for key in
+                              ("input", "classification", "before", "after", "normalized_layout", "selected")}
+                    raw = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+                    _eq(_need(record, "pass1_sha256"), hashlib.sha256(raw).hexdigest())
+    elif row == "C05":
+        for f in fixtures:
+            h = _need(f, "highwater_checks")
+            attempts = _attempts(f, attachments, unit)
+            replay = _need(h, "replay")
+            digest = _need(replay, "comparison_digest_by_seq")
+            selected = [r["register_seq"] for r in attempts if _need(r, "selected")]
+            if not selected:
+                _assert(_need(replay, "performed") is False)
+                _eq(_need(replay, "compared_steps"), 0)
+                _eq(digest, [])
+            else:
+                final = max(selected)
+                _assert(_need(replay, "performed") is True)
+                _eq(_need(replay, "stopped_after_seq"), final)
+                _eq(_need(replay, "compared_steps"), final + 1)
+                if len(digest) != final + 1: raise _EvidenceMissing("replay digest prefix incomplete")
+                if not unit:
+                    _assert(_need(h, "first_pass_complete") is True,
+                            "first pass did not finish independently of replay")
+                checks = {_need(c, "register_seq"): c for c in _items(_need(h, "checks"))}
+                cps = _items(_need(f, "checkpoints"), 2)
+                paired_cps = defaultdict(list)
+                for cp in cps:
+                    if cp.get("kind") in ("highwater_before", "highwater_after"):
+                        paired_cps[(cp.get("register_seq"), cp["kind"])].append(cp)
+                point_rows = _items(_need(report, "capacity_proof", "checkpoints"), 2)
+                point_ids = {_need(p, "checkpoint_id") for p in point_rows}
+                _eq(len(point_ids), len(point_rows))
+                for seq in selected:
+                    check = _need(checks, seq)
+                    _assert(_need(check, "preserved") is True,
+                            "selected before/after pair not preserved")
+                    for side, kind in (("before", "highwater_before"), ("after", "highwater_after")):
+                        _eq(_need(check, side), _need(attempts[seq], side))
+                        matched = paired_cps[(seq, kind)]
+                        if not matched: raise _EvidenceMissing("selected replay capacity pair absent")
+                        _eq(len(matched), 1)
+                        _assert(_need(matched[0], "capacity_ref") in point_ids)
+                for i, record in enumerate(digest):
+                    _eq(_need(record, "register_seq"), i)
+                    source = {k: _need(attempts[i], k) for k in
+                              ("input", "classification", "before", "after", "normalized_layout", "selected")}
+                    raw = json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+                    _eq(_need(record, "pass1_sha256"), hashlib.sha256(raw).hexdigest())
+                    if _need(record, "pass1_sha256") != _need(record, "pass2_sha256"):
+                        raise _EvidenceMissing("replay prefix mismatch")
+            _eq(_need(replay, "mismatch"), None)
+    elif row == "C06":
+        point_rows = _items(_need(report, "capacity_proof", "checkpoints"))
+        points = {_need(p, "checkpoint_id"): p for p in point_rows}
+        _eq(len(points), len(point_rows), "capacity checkpoint ID reused")
+        required_kinds = {"hour", "day", "highwater_before", "highwater_after",
+                          "probe_prune_at", "prune", "tail_80640", "tail_80641"}
+        used_refs = set()
+        for f in fixtures:
+            for cp in _items(_need(f, "checkpoints")):
+                ref = _need(cp, "capacity_ref")
+                if ref is None:
+                    if cp.get("kind") in required_kinds:
+                        raise _EvidenceMissing("required capacity observation missing")
+                    continue
+                _assert(ref not in used_refs, "capacity point reused")
+                used_refs.add(ref)
+                point = _need(points, ref)
+                _eq(_need(point, "fixture_name"), _need(f, "name"))
+                _eq(_need(point, "kind"), _need(cp, "kind"))
+                _eq(_need(point, "minute_index"), _need(cp, "minute_index"))
+                _container_sum(point)
+                _assert(_need(point, "G_bytes") <= _need(point, "E_bytes") <= _need(point, "B_bytes"))
+                _assert(_need(point, "capacity_covered") is True and _need(point, "resident_covered") is True)
+    elif row == "C07":
+        _assert(_no_rebuild(report), "rebuild cannot be classified no-rebuild")
+    elif row == "C08":
+        if _no_rebuild(report):
+            raise _NoRebuild()
+        events = _items(_need(report, "rebuild_events"))
+        observed_rebuild = False
+        for f in fixtures:
+            for cp in _items(_need(f, "checkpoints")):
+                count = _integer(_need(cp, "rebuild_count"))
+                old = _integer(_need(cp, "budget", "capacity", "rebuild_old_bytes"))
+                new = _integer(_need(cp, "budget", "capacity", "rebuild_new_bytes"))
+                _assert(count >= 0 and old >= 0 and new >= 0)
+                if count == 0: _eq((old, new), (0, 0))
+                observed_rebuild |= count > 0
+        _assert(observed_rebuild, "rebuild event has no checkpoint")
+        event_counts = Counter(_need(event, "checkpoint_id") for event in events)
+        for f in fixtures:
+            for cp in _items(_need(f, "checkpoints")):
+                _eq(event_counts[_need(cp, "checkpoint_id")], _need(cp, "rebuild_count"),
+                    "rebuild event coverage differs from checkpoint")
+        for event in events:
+            for phase in ("before", "during", "after"):
+                point = _need(event, phase)
+                _assert(_need(point, "Q_actual") <= _need(point, "Q_4"))
+                _budget_order(point)
+            _assert(_need(event, "during", "Q_actual") >= _need(event, "old_bytes") +
+                    _need(event, "new_bytes"), "old/new backing absent from physical Q")
+            base_charges = [_need(event, phase, "E") - _need(event, phase, "Q_actual")
+                            for phase in ("before", "during", "after")]
+            _eq(base_charges, [base_charges[0]] * 3,
+                "old/new backing charged twice or omitted from E")
+            _assert(any(_need(cp, "checkpoint_id") == _need(event, "checkpoint_id") and
+                        _need(cp, "rebuild_count") > 0 for f in fixtures for cp in f["checkpoints"]),
+                    "rebuild event has no measured checkpoint")
+            _assert(_need(event, "failure_retry", "atomic") is True and
+                    _need(event, "failure_retry", "retry_succeeded") is True)
+            temporary = _need(event, "temporary")
+            delta = _need(temporary, "peak") - _need(temporary, "current_before")
+            _eq(_need(temporary, "peak_delta"), delta)
+            _assert(delta <= 262144)
+    elif row == "C09":
+        proof = _need(report, "capacity_proof")
+        _eq(_need(proof, "unknown_ownership"), [])
+        points = _items(_need(proof, "checkpoints"))
+        for point in points:
+            _container_sum(point)
+            _need(point, "kind")
+            if point.get("kind") == "prune":
+                backings = _need(point, "container_backings")
+                deleted = {_need(backing, "object_id") for backing in backings
+                           if _need(backing, "includes_deleted_dummy") is True}
+                _eq(set(_need(point, "deleted_dummy_object_ids")), deleted,
+                    "deleted dummy lacks physical Q ownership")
+        if not unit and not any(p.get("kind") in ("highwater", "highwater_before", "highwater_after")
+                                for p in points):
+            raise _EvidenceMissing("high-water capacity observation missing")
+        if not any(p.get("kind") == "prune" for p in points):
+            raise _EvidenceMissing("prune capacity observation missing")
+        scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+        temporary_refs = []
+        for point in points:
+            if point.get("kind") == "prune":
+                ref = _need(point, "temporary_ref")
+                temporary_refs.append(ref)
+                _temporary(_need(scenarios, ref))
+        _eq(len(temporary_refs), len(set(temporary_refs)), "prune peak sample reused")
+    elif row == "C10":
+        calibration = _need(report, "calibration")
+        if _need(calibration, "status") != "complete":
+            raise _EvidenceMissing("pre-full calibration incomplete or unlinked")
+        observations = _items(_need(calibration, "observations"))
+        for obs in observations:
+            for key in ("prepare_seconds", "clone_seconds", "call_seconds", "pass1_seconds",
+                        "pass2_seconds", "selected_pairs", "error_seconds"):
+                _need(obs, key)
+        eta = _need(report, "eta")
+        seconds = _need(eta, "seconds")
+        budget = _need(eta, "budget_seconds")
+        if (type(seconds) not in (int, float) or type(budget) not in (int, float) or
+                not math.isfinite(seconds) or not math.isfinite(budget)):
+            raise _EvidenceMissing("calibration ETA or budget missing")
+        if seconds > 14_400 or budget > 14_400:
+            reference = report.get("budget_agreement_ref")
+            if not isinstance(reference, str) or not reference.strip():
+                raise _EvidenceViolation("extended full budget lacks prior agreement")
+            _eq(_need(eta, "decision"), "agreement_required")
+            agreement = _need(report, "budget_agreement")
+            _eq(_need(agreement, "ref"), reference)
+            _eq(_need(agreement, "approved_budget_seconds"), budget)
+            _assert(bool(_need(agreement, "signature")))
+            _assert(_need(agreement, "signed_at") < _need(report, "run_started_at"),
+                    "extended budget was not signed before full run")
+        else:
+            _eq(_need(eta, "decision"), "within_budget")
+        _assert(seconds <= budget, "ETA exceeds agreed budget")
+        _assert(_need(report, "total_elapsed_seconds") <= budget)
+        _need(report, "environment", "command")
+        if not unit:
+            _assert(_need(report, "complete") is True and _need(report, "aborted_reason") is None)
+            _assert(_need(report, "calibration", "run_id") != _need(report, "environment", "run_id"),
+                    "calibration and full run are the same execution")
+
+
+class _NoRebuild(Exception):
+    pass
+
+
+def _full_scope(row_id, report):
+    if report.get("mode") == "predicate_unit": return
+    if report.get("mode") != "full": raise _EvidenceMissing("unsupported evidence mode")
+    if row_id in ("A01", "C10"): return
+    if row_id[0] == "A" and row_id not in ("A11", "A12") or row_id == "B23":
+        pressure = _items(_need(report, "pressure_fixtures"), len(PRESSURE_NAMES + PRESSURE_AUX))
+        if any("name" not in p for p in pressure) or len({p["name"] for p in pressure}) != len(pressure):
+            raise _EvidenceMissing("pressure fixture names incomplete or duplicated")
+        actual = {p["name"] for p in pressure}
+        if set(PRESSURE_NAMES + PRESSURE_AUX) - actual:
+            raise _EvidenceMissing("required pressure fixture missing")
+        _eq(actual, set(PRESSURE_NAMES + PRESSURE_AUX), "unexpected pressure fixture replaced the full plan")
+    if (row_id[0] in ("B", "C") and row_id not in ("B20", "B23", "C10")) or row_id == "A02":
+        churn = _items(_need(report, "churn_fixtures"), len(CHURN_NAMES))
+        if any("name" not in f for f in churn) or len({f["name"] for f in churn}) != len(churn):
+            raise _EvidenceMissing("churn fixture names incomplete or duplicated")
+        actual = {f["name"] for f in churn}
+        if set(CHURN_NAMES) - actual:
+            raise _EvidenceMissing("required churn fixture missing")
+        _eq(actual, set(CHURN_NAMES), "unexpected churn fixture replaced the full plan")
+    if row_id in ("A11", "A12"):
+        scenarios = _items(_need(report, "scenarios"), len(_D02_SCENARIOS))
+        if not set(_D02_SCENARIOS) <= {s.get("name") for s in scenarios}:
+            raise _EvidenceMissing("applied measurement scenario missing")
+    if row_id == "B20":
+        fault_kinds = {s.get("fault_evidence", {}).get("fault_kind") for s in
+                       _items(_need(report, "scenarios"))}
+        if not {"clock_step", "merge_failure", "late_after_expiry", "id_collision",
+                "uuid_uniqueness"} <= fault_kinds:
+            raise _EvidenceMissing("independent fault scenario missing")
+
+
+def _validate_unit_scale(report):
+    scale = report.get("test_scale", {})
+    if not isinstance(scale, dict):
+        raise _EvidenceMissing("test scale malformed")
+    name_lists = {"id_kinds", "tracks", "sources", "existing_transitions", "measured_scenarios",
+                  "temporary_scenarios", "fault_kinds", "churn_names"}
+    for key, value in scale.items():
+        if key in name_lists:
+            if not isinstance(value, list) or not value or not all(isinstance(v, str) and v for v in value):
+                raise _EvidenceMissing(f"{key} name list missing")
+            if len(set(value)) != len(value):
+                raise _EvidenceViolation(f"{key} names duplicated")
+        elif key in {"normal_calls", "minutes", "hours", "days", "burst_details", "max_records",
+                     "job_key_limit", "samples_per_gc", "cycle_length", "finished", "unbound",
+                     "pre_prune_hours", "detail_target"}:
+            if type(value) is not int or value <= 0:
+                raise _EvidenceMissing(f"{key} scale must be a positive integer")
+
+
+def _validate_full_keys(report, row_id):
+    for field in ("pressure_fixtures", "churn_fixtures", "scenarios"):
+        if field not in report: continue
+        rows = _items(report[field])
+        names = [_need(item, "name") for item in rows]
+        if not all(isinstance(name, str) and name for name in names):
+            raise _EvidenceMissing(f"{field} name missing")
+        _assert(len(set(names)) == len(names), f"{field} name reused")
+    for fixture in report.get("churn_fixtures", []) if row_id[0] in ("B", "C") else []:
+        if "checkpoints" in fixture:
+            _unique_named(fixture["checkpoints"], "checkpoint_id", "checkpoint")
+    references = []
+    for fixture in report.get("churn_fixtures", []) if row_id[0] in ("B", "C") else []:
+        if "checkpoints" in fixture:
+            ids = [cp["checkpoint_id"] for cp in _items(fixture["checkpoints"])
+                   if "checkpoint_id" in cp]
+            _assert(len(set(ids)) == len(ids), "checkpoint ID reused")
+        ref = fixture.get("highwater_checks", {}).get("register_attempts_ref")
+        if ref is not None: references.append(_need(ref, "path"))
+    if references:
+        _assert(len(set(references)) == len(references), "attachment reference reused")
+    proof = report.get("capacity_proof")
+    if row_id[0] == "C" and isinstance(proof, dict) and "checkpoints" in proof:
+        ids = [point["checkpoint_id"] for point in _items(proof["checkpoints"])
+               if "checkpoint_id" in point]
+        _assert(len(set(ids)) == len(ids), "capacity checkpoint ID reused")
+
+
+def _validate_common_keys(report, row_id):
+    fields = (("pressure_fixtures",) if row_id[0] == "A" else
+              ("churn_fixtures",) if row_id[0] in ("B", "C") else ())
+    if row_id in ("A04", "A10", "A11", "A12") and "scenarios" in report:
+        _unique_named(report["scenarios"], "name", "scenario")
+    for field in fields:
+        if field not in report:
+            continue
+        rows = _items(report[field])
+        if all(isinstance(row, dict) and "name" in row for row in rows):
+            _unique_named(rows, "name", field)
+        if field == "churn_fixtures":
+            ids = []
+            for fixture in rows:
+                if "checkpoints" in fixture:
+                    ids.extend(cp["checkpoint_id"] for cp in _items(fixture["checkpoints"])
+                               if "checkpoint_id" in cp)
+            if ids: _names(ids, "checkpoint")
+            refs = []
+            for fixture in rows:
+                hw = fixture.get("highwater_checks", {})
+                if isinstance(hw, dict) and "register_attempts_ref" in hw:
+                    refs.append(_need(hw["register_attempts_ref"], "path"))
+            if refs: _names(refs, "attachment reference")
+
+
+_INTEGER_EVIDENCE_KEYS = frozenset({
+    "N_total", "N_res", "N_tomb", "N_live", "D", "K", "A", "R", "T", "R_T",
+    "AR", "TR", "E", "B", "G", "F_4", "Q_4", "Q_actual", "last_seq",
+    "registered_seq", "call_index", "seq", "candidate_seq", "candidate_N_res",
+    "candidate_E", "attempted", "visits", "visit_limit", "n",
+    "detail_charge_bytes", "detail_charged_bytes", "id_utf8_bytes",
+    "id_getsizeof_bytes", "retained_details", "requested_detail_target",
+    "effective_detail_target", "received_at", "received_mono", "started_at",
+    "started_mono", "admission_stopped_at", "current_before", "current_after",
+    "peak", "peak_delta", "fixture_limit", "N_last_accepted", "AR_before",
+    "AR_after", "pruned_count", "registered", "finished", "last_seq",
+    "N_stop", "observed_N", "candidate_before", "candidate_after",
+    "minute_index", "samples_per_gc", "detail_target", "normal_calls",
+})
+_INTEGER_EVIDENCE_ARRAYS = frozenset({"raw_ns", "D_observed", "K_observed", "entry_seqs"})
+_INTEGER_EVIDENCE_MAPS = frozenset({"source_registered", "job_key_counts", "state_counts",
+                                    "classification_counts", "transition_counts", "owned_bytes"})
+_BOOLEAN_EVIDENCE_KEYS = frozenset({
+    "active", "admission_stopped", "all_rejected", "atomic", "auxiliary",
+    "backing_changed", "capacity_covered", "checked", "classification_ok",
+    "complete", "connection", "conservative_shared_strings", "coverage_complete",
+    "eligible", "equal", "first_stop_time_unchanged", "fresh_starts",
+    "gc_enabled", "has_more", "hash_seed_zero", "includes_deleted_dummy",
+    "lifecycle", "live", "measured", "min_4_cores", "min_8gib_ram",
+    "no_bytecode", "no_insertion", "no_retirement", "normal_schedule_counted",
+    "open", "original_unchanged", "overdue", "owned_id", "owner",
+    "partial_acceptance_applicable", "performed", "preserved", "previous_job",
+    "prune", "python_3_13", "recent", "record_access_audit", "resident_covered",
+    "resumed_after_release", "retry_succeeded", "same_pair", "selected", "seq",
+    "seq_bucket_reversed", "tomb", "uncertain", "used", "would_exceed",
+    "expiry", "cohort", "close",
+})
+
+
+def _reject_integer_bools(value, key=None):
+    if type(value) is bool and (key in _INTEGER_EVIDENCE_KEYS or
+                                key in _INTEGER_EVIDENCE_ARRAYS or
+                                key in _INTEGER_EVIDENCE_MAPS or
+                                (key not in _BOOLEAN_EVIDENCE_KEYS and key is not None) or
+                                isinstance(key, str) and (key.startswith("max_") or key.endswith("_bytes"))):
+        raise _EvidenceMissing("JSON bool cannot stand for integer evidence")
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            _reject_integer_bools(child, None if key in ("paths", "other_indexes_absent") else
+                                  key if key in _INTEGER_EVIDENCE_MAPS else child_key)
+    elif isinstance(value, list):
+        for child in value:
+            _reject_integer_bools(child, key if key in _INTEGER_EVIDENCE_ARRAYS else None)
+
+
+def evaluate_row(row_id, report, *, attachments):
+    if row_id not in EVIDENCE_ROW_IDS:
+        raise ValueError(row_id)
+    try:
+        _need(report, "mode")
+        cache = _finalize_cache.get()
+        if cache is None or not cache["bool_checked"] or cache["report_id"] != id(report):
+            _reject_integer_bools(report)
+            if cache is not None and cache["report_id"] == id(report):
+                cache["bool_checked"] = True
+        if report.get("mode") == "predicate_unit": _validate_unit_scale(report)
+        elif report.get("mode") == "full": _validate_full_keys(report, row_id)
+        _validate_common_keys(report, row_id)
+        _full_scope(row_id, report)
+        if row_id[0] == "A": _evaluate_a(row_id, report)
+        elif row_id in tuple(f"B{i:02d}" for i in range(1, 13)): _evaluate_b(row_id, report)
+        elif row_id[0] == "B": _evaluate_b_rest(row_id, report)
+        else: _evaluate_c(row_id, report, attachments)
+    except _NoRebuild:
+        return {"row_id": row_id, "status": "N/A", "reason": "N/A (no rebuild in this implementation)",
+                "evidence_refs": []}
+    except _EvidenceMissing as exc:
+        return {"row_id": row_id, "status": "UNVERIFIED", "reason": str(exc), "evidence_refs": []}
+    except _EvidenceViolation as exc:
+        return {"row_id": row_id, "status": "FAIL", "reason": str(exc), "evidence_refs": []}
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError, StopIteration,
+            OverflowError, UnicodeError, ZeroDivisionError) as exc:
+        return {"row_id": row_id, "status": "UNVERIFIED",
+                "reason": f"malformed nested evidence: {type(exc).__name__}", "evidence_refs": []}
+    return {"row_id": row_id, "status": "PASS", "reason": None, "evidence_refs": []}
+
+
+def _result(row_id, status, reason=None):
+    return {"row_id": row_id, "status": status, "reason": reason, "evidence_refs": []}
+
+
+def _parse_stdout(stdout_bytes):
+    try:
+        source = stdout_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None, False
+    start = len(source) - len(source.lstrip())
+    if start == len(source): return None, False
+    if source[start] == "[": return None, False
+    if source[start] != "{":
+        # Diagnostic text before a complete report is still a D05 failure, but
+        # the report remains available to the evidence rows.
+        start = source.find("{", start)
+        if start < 0: return None, False
+    try:
+        report, end = json.JSONDecoder().raw_decode(source, start)
+    except ValueError:
+        # In particular, never scan into a malformed outer JSON object for an
+        # apparently valid nested object.
+        return None, False
+    if not isinstance(report, dict): return None, False
+    trailing = source[end:].lstrip()
+    if trailing:
+        try:
+            json.JSONDecoder().raw_decode(trailing)
+        except ValueError:
+            pass
+        else:
+            return None, False
+    return report, bool(source[:start].strip() or trailing)
+
+
+def _d05(report, stderr_bytes, exit_code, extra_stdout):
+    if report is None: return _result("D05", "FAIL", "usable JSON report absent or duplicated")
+    if extra_stdout: return _result("D05", "FAIL", "non-JSON stdout content")
+    if type(exit_code) is not int or exit_code != 0 or type(report.get("exit_code")) is not int or report["exit_code"] != exit_code:
+        return _result("D05", "FAIL", "measurement exit code mismatch")
+    complete, reason = report.get("complete"), report.get("aborted_reason")
+    if (complete is True and reason is not None) or (complete is False and not reason):
+        return _result("D05", "FAIL", "contradictory completion marking")
+    if complete not in (True, False): return _result("D05", "UNVERIFIED", "completion marking missing")
+    if not stderr_bytes.strip(): return _result("D05", "UNVERIFIED", "stderr progress log missing")
+    try: lines = stderr_bytes.decode("utf-8").splitlines()
+    except UnicodeDecodeError: return _result("D05", "FAIL", "invalid stderr encoding")
+    lines = [line.strip() for line in lines if line.strip()]
+    open_jobs, progress = [], set()
+    if not lines or not lines[0].startswith("start "):
+        return _result("D05", "FAIL", "stderr must begin with start")
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 2: return _result("D05", "FAIL", "malformed stderr record")
+        action, name = parts[:2]
+        if action == "start": open_jobs.append(name)
+        elif action == "progress":
+            if name not in open_jobs: return _result("D05", "FAIL", "progress outside start/end")
+            progress.add(name)
+        elif action == "end":
+            if name not in open_jobs: return _result("D05", "FAIL", "end without matching start")
+            if (name.startswith("pressure_") or name.startswith("churn_") or
+                    name in _D02_SCENARIOS) and name not in progress:
+                return _result("D05", "FAIL", "required progress missing")
+            open_jobs.remove(name)
+        else: return _result("D05", "FAIL", "unknown stderr record")
+    if complete and (open_jobs or not lines[-1].startswith("end ")):
+        return _result("D05", "FAIL", "unclosed stderr task")
+    if not complete: return _result("D05", "UNVERIFIED", "run aborted before complete evidence")
+    return _result("D05", "PASS")
+
+
+_D02_SCENARIOS = (
+    "link_round_accept", "report_init_failed_accept", "wrapper_exited_accept", "contributions_tail_empty",
+    "aggregation_empty", "cohort_empty", "finish_accept", "link_round_duplicate", "finish_near_valid_limit",
+    "finish_over_input_limit", "finish_duplicate", "contributions_first_page", "contributions_after_cursor",
+    "aggregation_recent", "cohort_all", "register_accept", "register_capacity_reject", "close_boundary_before",
+    "close_boundary_exact", "large_clock_jump", "close_same_time_requery", "mass_close_boundary", "mass_overdue",
+    "stale_overdue_end_cursor", "stale_overdue_requery", "multi_bucket_close", "multi_bucket_close_requery",
+    "multi_bucket_close_merge_failure", "multi_bucket_close_retry", "multi_bucket_close_retry_requery",
+    "reverse_cohort_register_tail", "reverse_cohort_empty", "reverse_cohort_narrow", "identity_absent_link",
+    "identity_absent_finish", "missing_record_direct", "missing_record_first_query_cohort",
+    "missing_record_first_query_contributions", "missing_record_first_query_aggregation", "open_end_cursor",
+    "open_last_seq_cursor", "recent_window_seq_order", "recent_window_boundary", "recent_window_before_exclusion",
+    "recent_window_after_exclusion", "recent_window_before_close", "recent_window_exact_close",
+    "close_wait_target_advance", "recent_outside_open", "recent_outside_open_one_inside",
+)
+_ADAPTER_SCENARIOS = ("adapter_investing_link", "adapter_investing_finish", "adapter_bs_link",
+                      "adapter_bs_finish", "adapter_citi_link", "adapter_citi_finish", "adapter_bank_to_finish")
+
+
+def _locked_result(report, attachments, key):
+    entry = _need(report, "locked_tests", key)
+    reference = _need(entry, "result_ref")
+    if not _safe_ref(reference): raise _EvidenceMissing(f"{key} unsafe locked test reference")
+    raw = _need(attachments, reference)
+    if not isinstance(raw, bytes) or hashlib.sha256(raw).hexdigest() != _need(entry, "result_sha256"):
+        raise _EvidenceMissing(f"{key} locked test attachment missing or changed")
+    try: observed = json.loads(raw)
+    except (ValueError, UnicodeError) as exc: raise _EvidenceMissing(f"{key} locked result invalid") from exc
+    if not isinstance(observed, dict): raise _EvidenceMissing(f"{key} locked result invalid")
+    if observed != {"suite": key, "passed": _need(entry, "passed"), "failed": _need(entry, "failed"),
+                    "commit_sha": _need(entry, "commit_sha")}:
+        raise _EvidenceMissing(f"{key} locked result disagrees with report")
+    _eq(_need(entry, "commit_sha"), _need(report, "environment", "commit_sha"))
+    _assert(_integer(_need(entry, "passed")) > 0 and _integer(_need(entry, "failed")) == 0,
+            f"{key} locked test failed")
+
+
+def _require_row_pass(rows, row_id):
+    status = _need(rows, row_id, "status")
+    if status == "FAIL": raise _EvidenceViolation(f"{row_id} failed")
+    if status not in ("PASS", "N/A"): raise _EvidenceMissing(f"{row_id} unverified")
+
+
+def _d02_own(report, attachments, rows):
+    if report.get("mode") != "full" or report.get("complete") is not True:
+        raise _EvidenceMissing("full run did not complete")
+    _require_row_pass(rows, "A01")
+    _require_row_pass(rows, "D05")
+    scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
+    for name in _D02_SCENARIOS + _ADAPTER_SCENARIOS:
+        scenario = _need(scenarios, name)
+        for field in ("status", "visit_gate", "temporary_gate"):
+            _eq(_need(scenario, field), "PASS")
+        if name in _D02_SCENARIOS and scenario.get("time_gate") == "N/A":
+            _observed_timing(scenario)
+            _measured_time_gate(scenario, required_n=1000)
+        else:
+            _eq(_need(scenario, "time_gate"), "PASS")
+            if name in _D02_SCENARIOS:
+                _observed_timing(scenario)
+                _measured_time_gate(scenario, required_n=1000)
+    _eq(_need(report, "adapter", "status"), "PASS")
+    observations = _items(_need(report, "adapter", "observations"), 3)
+    _eq(len(observations), 3)
+    _eq({_need(obs, "source") for obs in observations}, {"investing", "bs", "citi"})
+    for obs in observations:
+        _eq(_need(obs, "link"), "linked")
+        _eq(_need(obs, "finish"), "finalized")
+        _eq(_need(obs, "status"), "PASS")
+    _eq(_need(report, "record_access_audit_findings"), [])
+    _assert(_need(report, "prerequisites", "record_access_audit") is True)
+    for key in ("d7", "index"): _locked_result(report, attachments, key)
+
+
+def _d_verdict(report, attachments, rows, stage):
+    try:
+        _d02_own(report, attachments, rows)
+        if stage >= 3:
+            _locked_result(report, attachments, "slice5a3")
+            for row_id in tuple(f"A{i:02d}" for i in range(1, 13)) + ("B13",):
+                _require_row_pass(rows, row_id)
+            for name in ("resident_unfinished", "resident_2048_details",
+                         "resident_released_identity", "resident_capacity_stop"):
+                _eq(_need({s.get("name"): s for s in report["scenarios"]}, name, "status"), "PASS")
+        if stage >= 4:
+            for key in ("slice5a4a", "slice5a4b"):
+                _locked_result(report, attachments, key)
+            for row_id in EVIDENCE_ROW_IDS: _require_row_pass(rows, row_id)
+        if stage >= 3 and rows["D01"]["status"] != "PASS":
+            bad = [r for r in EVIDENCE_ROW_IDS if rows[r]["status"] != "PASS" and rows[r]["status"] != "N/A"]
+            raise _EvidenceMissing("overall not PASS: " + ", ".join(bad))
+    except _EvidenceMissing as exc:
+        return _result(f"D0{stage if stage != 2 else 2}", "UNVERIFIED", str(exc))
+    except _EvidenceViolation as exc:
+        return _result(f"D0{stage if stage != 2 else 2}", "FAIL", str(exc))
+    return _result(f"D0{stage if stage != 2 else 2}", "PASS")
+
+
+def finalize_acceptance(*, stdout_bytes: bytes, stderr_bytes: bytes,
+                        exit_code: int, attachments: dict[str, bytes]) -> dict:
+    report, extra = _parse_stdout(stdout_bytes)
+    if report is None:
+        entries = [_result(r, "UNVERIFIED", "usable JSON report absent") for r in EVIDENCE_ROW_IDS]
+    else:
+        token = _finalize_cache.set({"report_id": id(report), "bool_checked": False, "attempts": {}})
+        try:
+            entries = [evaluate_row(r, report, attachments=attachments) for r in EVIDENCE_ROW_IDS]
+        finally:
+            _finalize_cache.reset(token)
+    d05 = _d05(report, stderr_bytes, exit_code, extra)
+    entries.append(d05)
+    by_id = {entry["row_id"]: entry for entry in entries}
+    if report is None:
+        d01 = _result("D01", "FAIL", "usable JSON report absent")
+    else:
+        for entry in entries:
+            if entry["status"] == "N/A":
+                try:
+                    allowed = entry["row_id"] == "C08" and _no_rebuild(report)
+                except (_EvidenceMissing, _EvidenceViolation):
+                    allowed = False
+                if not allowed: entry.update(status="UNVERIFIED", reason="N/A not supported by evidence")
+        statuses = {entry["status"] for entry in entries}
+        overall = "FAIL" if "FAIL" in statuses else "UNVERIFIED" if "UNVERIFIED" in statuses else "PASS"
+        d01 = _result("D01", overall, None if overall == "PASS" else "evidence rows or D05 incomplete")
+    by_id["D01"] = d01
+    verdicts = []
+    for stage in (2, 3, 4):
+        if report is None: verdict = _result(f"D0{stage}", "UNVERIFIED", "usable JSON report absent")
+        else: verdict = _d_verdict(report, attachments, by_id, stage)
+        verdicts.append(verdict)
+    by_id.update((v["row_id"], v) for v in verdicts)
+    final = {"slice5a2_partial": verdicts[0]["status"], "slice5a3": verdicts[1]["status"],
+             "slice5a4": verdicts[2]["status"]}
+    provisional = report.get("verdicts", {}) if report else {}
+    diffs = {}
+    if report and report.get("overall") != d01["status"]:
+        diffs["overall"] = {"provisional": report.get("overall"), "final": d01["status"]}
+    for name, status in final.items():
+        if provisional.get(name) != status:
+            diffs[name] = {"provisional": provisional.get(name), "final": status}
+    return {"acceptance_checklist": [by_id[r] for r in ROW_IDS], "overall": d01["status"],
+            "verdicts": final,
+            "verdict_reasons": {name: verdicts[i]["reason"] for i, name in
+                                enumerate(("slice5a2_partial", "slice5a3", "slice5a4"))},
+            "provisional_consistency": {"matches": not diffs, "diffs": diffs}}
+
+
+def _finalize_cli(argv):
+    parser = argparse.ArgumentParser(description="Finalize D7 evidence from captured output")
+    parser.add_argument("--stdout-log", required=True)
+    parser.add_argument("--stderr-log", required=True)
+    parser.add_argument("--exit-code", required=True, type=int)
+    parser.add_argument("--attachments-dir", required=True)
+    parser.add_argument("--out", required=True)
+    args = parser.parse_args(argv)
+    stdout = Path(args.stdout_log).read_bytes()
+    stderr = Path(args.stderr_log).read_bytes()
+    report, extra_stdout = _parse_stdout(stdout)
+    attachments = {}
+    if report:
+        references = []
+        for fixture in report.get("churn_fixtures", []):
+            ref = fixture.get("highwater_checks", {}).get("register_attempts_ref", {})
+            if isinstance(ref, dict) and "path" in ref: references.append(ref["path"])
+        for entry in report.get("locked_tests", {}).values():
+            if isinstance(entry, dict) and "result_ref" in entry: references.append(entry["result_ref"])
+        root = Path(args.attachments_dir).resolve()
+        for reference in references:
+            if not _safe_ref(reference): continue
+            target = (root / reference).resolve()
+            if not target.is_relative_to(root) or not target.is_file(): continue
+            attachments[reference] = target.read_bytes()
+    result = finalize_acceptance(stdout_bytes=stdout, stderr_bytes=stderr,
+                                 exit_code=args.exit_code, attachments=attachments)
+    Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return 0 if report is not None and not extra_stdout else 1
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "finalize":
+        return _finalize_cli(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--limit", type=int, default=CAP)
@@ -3714,4 +6382,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

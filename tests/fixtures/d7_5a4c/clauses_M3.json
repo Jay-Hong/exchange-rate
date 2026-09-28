@@ -1,0 +1,916 @@
+[
+ {
+  "base": "example",
+  "clause": "B13.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "budget",
+     "AR"
+    ],
+    3
+   ]
+  ],
+  "row": "B13",
+  "why": "AR 합계 식 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B13.P2",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "test_scale",
+     "required_budget_points"
+    ],
+    [
+     "unit",
+     "missing"
+    ]
+   ]
+  ],
+  "row": "B13",
+  "why": "필수 예산 지점 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B13.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "budget",
+     "unknown_types"
+    ]
+   ]
+  ],
+  "row": "B13",
+  "why": "예산 구성 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B13.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "budget",
+     "G"
+    ],
+    6
+   ]
+  ],
+  "row": "B13",
+  "why": "검증된 G≤E 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B14.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "last_received_at"
+    ],
+    11
+   ]
+  ],
+  "row": "B14",
+  "why": "마지막 성공 시각이 수신 뒤"
+ },
+ {
+  "base": "example",
+  "clause": "B14.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "prune_witness",
+     "unprocessed_tomb_count"
+    ],
+    1
+   ]
+  ],
+  "row": "B14",
+  "why": "미처리 tomb가 있는데 prune 게시"
+ },
+ {
+  "base": "example",
+  "clause": "B14.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "prune_witness"
+    ]
+   ]
+  ],
+  "row": "B14",
+  "why": "prune 경계 근거 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B14.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "cumulative_end"
+    ],
+    9
+   ]
+  ],
+  "row": "B14",
+  "why": "close/cumulative 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "B15.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "cursor_probes",
+     0,
+     "entry_seqs"
+    ],
+    [
+     1
+    ]
+   ]
+  ],
+  "row": "B15",
+  "why": "cursor 이하 seq 반환"
+ },
+ {
+  "base": "example",
+  "clause": "B15.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     0,
+     "registered_seq"
+    ],
+    3
+   ]
+  ],
+  "row": "B15",
+  "why": "retained seq가 등록 trace와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B15.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "oldest_retained_seq"
+    ]
+   ]
+  ],
+  "row": "B15",
+  "why": "retained 양끝 원자료 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B15.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "cursor_probes",
+     0,
+     "next_seq"
+    ],
+    2
+   ]
+  ],
+  "row": "B15",
+  "why": "has_more=false에서 next_seq 게시"
+ },
+ {
+  "base": "example",
+  "clause": "B16.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "recent_cohorts",
+     "investing",
+     "counts",
+     "registered"
+    ],
+    2
+   ]
+  ],
+  "row": "B16",
+  "why": "최근 cohort 축 합계 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B16.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     0,
+     "received_at"
+    ],
+    0
+   ]
+  ],
+  "row": "B16",
+  "why": "등록이 최근 범위 밖인데 분모에 포함"
+ },
+ {
+  "base": "example",
+  "clause": "B16.P3",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "old_cohort_probe",
+     "counts"
+    ],
+    {
+     "registered": 1
+    }
+   ]
+  ],
+  "row": "B16",
+  "why": "만료 응답에 부분 분모 노출"
+ },
+ {
+  "base": "example",
+  "clause": "B16.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "passive_cohort_projection"
+    ]
+   ]
+  ],
+  "row": "B16",
+  "why": "수동 투영 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B16.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "old_cohort_probe",
+     "classification"
+    ],
+    "snapshot"
+   ]
+  ],
+  "row": "B16",
+  "why": "오래된 cohort 거절 분류 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B17.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "N_total"
+    ],
+    2
+   ]
+  ],
+  "row": "B17",
+  "why": "epoch 전체 등록 합계 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B17.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "source_registered",
+     "bs"
+    ],
+    1
+   ],
+   [
+    "append",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace"
+    ],
+    {
+     "action": "register",
+     "source": "bs"
+    }
+   ]
+  ],
+  "row": "B17",
+  "why": "추가 source의 수동·공개 epoch 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B17.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "passive_epoch_projection"
+    ]
+   ]
+  ],
+  "row": "B17",
+  "why": "epoch 수동 투영 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B17.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "epoch_sources",
+     0,
+     "equations_hold",
+     "connection"
+    ],
+    false
+   ]
+  ],
+  "row": "B17",
+  "why": "검증된 epoch 등식 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B18.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "clock_isolation",
+     "active"
+    ],
+    true
+   ]
+  ],
+  "row": "B18",
+  "why": "정상 trace에서 시계 격리 활성"
+ },
+ {
+  "base": "example",
+  "clause": "B18.P2",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "event_order"
+    ]
+   ]
+  ],
+  "row": "B18",
+  "why": "원인 counter의 checkpoint 접두 위치 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B18.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "clock_isolation"
+    ]
+   ]
+  ],
+  "row": "B18",
+  "why": "격리 원자료 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B18.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "admission_stopped"
+    ],
+    true
+   ]
+  ],
+  "row": "B18",
+  "why": "정상 trace에서 접수 중단"
+ },
+ {
+  "base": "example",
+  "clause": "B19.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "visits"
+    ],
+    65
+   ]
+  ],
+  "row": "B19",
+  "why": "전이 방문 상한 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B19.P2",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "scenarios",
+     0,
+     "time_gate"
+    ]
+   ]
+  ],
+  "row": "B19",
+  "why": "독립 측정 시간 게이트 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B19.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "measurement_refs"
+    ]
+   ]
+  ],
+  "row": "B19",
+  "why": "측정 참조 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B19.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "transition_counts",
+     "prune"
+    ],
+    2
+   ]
+  ],
+  "row": "B19",
+  "why": "전이 분류 건수 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B20.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "fault_evidence",
+     "normal_schedule_counted"
+    ],
+    true
+   ]
+  ],
+  "row": "B20",
+  "why": "fault가 정상 일정에 혼입"
+ },
+ {
+  "base": "example",
+  "clause": "B20.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "first_call",
+     "classification"
+    ],
+    "registered"
+   ]
+  ],
+  "row": "B20",
+  "why": "원인별 첫 호출 분류 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "B20.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "scenarios",
+     0,
+     "fault_evidence",
+     "watermark_after"
+    ]
+   ]
+  ],
+  "row": "B20",
+  "why": "fault 게시 경계 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B20.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "fault_evidence",
+     "retry_admission",
+     "attempted"
+    ],
+    2
+   ],
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "fault_evidence",
+     "retry_admission",
+     "rejected"
+    ],
+    1
+   ]
+  ],
+  "row": "B20",
+  "why": "재시도 정상 접수 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B21.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "max_resident_observed"
+    ],
+    0
+   ]
+  ],
+  "row": "B21",
+  "why": "실측 최대 상주 축소"
+ },
+ {
+  "base": "example",
+  "clause": "B21.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "resident_events",
+     0,
+     "N_res"
+    ],
+    0
+   ]
+  ],
+  "row": "B21",
+  "why": "전이 직후 상주 trace와 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "B21.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "max_resident_observed"
+    ]
+   ]
+  ],
+  "row": "B21",
+  "why": "최대 상주 근거 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B21.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "identity_samples",
+     0,
+     "observed"
+    ],
+    "live"
+   ]
+  ],
+  "row": "B21",
+  "why": "초기 ID가 tail에 잔존"
+ },
+ {
+  "base": "example",
+  "clause": "B22.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "capacity_proof",
+     "Q_cap_bytes"
+    ],
+    5703
+   ]
+  ],
+  "row": "B22",
+  "why": "구조적 Q_cap 공식 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B22.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "append",
+    [
+     "capacity_proof",
+     "F4_ownership",
+     "items"
+    ],
+    {
+     "bytes": 0,
+     "owner": "F_4",
+     "path": "fixed"
+    }
+   ]
+  ],
+  "row": "B22",
+  "why": "F4 소유 경로 중복"
+ },
+ {
+  "base": "example",
+  "clause": "B22.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "capacity_proof",
+     "budget_q_size_steps"
+    ]
+   ]
+  ],
+  "row": "B22",
+  "why": "size-step 원자료 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B22.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "capacity_proof",
+     "H_res"
+    ],
+    2
+   ]
+  ],
+  "row": "B22",
+  "why": "실측 H_res 단위 상한 초과"
+ },
+ {
+  "base": "example",
+  "clause": "B23.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "resumed_after_release"
+    ],
+    true
+   ]
+  ],
+  "row": "B23",
+  "why": "byte latch 재개"
+ },
+ {
+  "base": "example",
+  "clause": "B23.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "after",
+     "E"
+    ],
+    11
+   ]
+  ],
+  "row": "B23",
+  "why": "거절 뒤 E가 B를 초과"
+ },
+ {
+  "base": "example",
+  "clause": "B23.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "index_audit"
+    ]
+   ]
+  ],
+  "row": "B23",
+  "why": "후보 색인 감사 결손"
+ },
+ {
+  "base": "example",
+  "clause": "B23.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "cause"
+    ],
+    "slot"
+   ]
+  ],
+  "row": "B23",
+  "why": "검증된 byte 원인 오분류"
+ }
+]

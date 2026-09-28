@@ -1,0 +1,1135 @@
+[
+ {
+  "base": "example",
+  "clause": "S01",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "append",
+    [
+     "scenarios"
+    ],
+    {
+     "D": 0,
+     "D_observed": [
+      0,
+      0
+     ],
+     "K": 0,
+     "K_observed": [
+      0,
+      0
+     ],
+     "measured_transition": "prune",
+     "name": "prune_transition",
+     "sample_checks": {
+      "checked": 2,
+      "failures": []
+     },
+     "sample_exception": null,
+     "sample_plan": "sequential",
+     "status": "PASS",
+     "time_gate": "PASS",
+     "timing": {
+      "gc_disabled": {
+       "max_us": 1,
+       "n": 1,
+       "p99_us": 1,
+       "raw_ns": [
+        1000
+       ]
+      },
+      "gc_enabled": {
+       "max_us": 1,
+       "n": 1,
+       "p99_us": 1,
+       "raw_ns": [
+        1000
+       ]
+      }
+     },
+     "visit_gate": "PASS",
+     "visit_limit": 64,
+     "visits": 0
+    }
+   ]
+  ],
+  "row": "A11",
+  "why": "동일 범위의 scenario 이름 중복"
+ },
+ {
+  "base": "example",
+  "clause": "S02",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "limits",
+     "max_records"
+    ],
+    true
+   ]
+  ],
+  "row": "A01",
+  "why": "정수 자리에 JSON bool"
+ },
+ {
+  "base": "example",
+  "clause": "S03",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "append",
+    [
+     "test_scale",
+     "measured_scenarios"
+    ],
+    "prune_transition"
+   ]
+  ],
+  "row": "A11",
+  "why": "단위 이름 배열 중복"
+ },
+ {
+  "base": "example",
+  "clause": "S04",
+  "expect": "UNVERIFIED",
+  "not_isolatable": "단위 예시는 full 필드를 요구하지 않고 run6에는 완전 trace가 없어 단일 변형으로 격리 불가",
+  "ops": [],
+  "row": "A02",
+  "why": "full API trace 필수 형식"
+ },
+ {
+  "base": "example",
+  "clause": "S05",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     0,
+     "id"
+    ],
+    {}
+   ]
+  ],
+  "row": "A02",
+  "why": "잘못된 중첩 ID 원자료의 예외 차단"
+ },
+ {
+  "base": "example",
+  "clause": "U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "limits",
+     "max_records"
+    ]
+   ]
+  ],
+  "row": "A01",
+  "why": "필수 정수 근거 누락"
+ },
+ {
+  "base": "example",
+  "clause": "F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "limits",
+     "max_records"
+    ],
+    131071
+   ]
+  ],
+  "row": "A01",
+  "why": "완전 관측 기본값 위반"
+ },
+ {
+  "base": "example",
+  "clause": "P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "index_audit",
+     "after",
+     "paths",
+     "live"
+    ],
+    true
+   ]
+  ],
+  "row": "A07",
+  "why": "후보 색인 경로 삽입"
+ },
+ {
+  "base": "example",
+  "clause": "P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "timing",
+     "gc_disabled",
+     "p99_us"
+    ],
+    2
+   ]
+  ],
+  "row": "A11",
+  "why": "원시 시간과 p99 재계산 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "P3",
+  "expect": "UNVERIFIED",
+  "not_isolatable": "C04 예시는 인라인 장부이고 부속 참조 기준선과 bytes가 없어 한 필드 변형으로 격리 불가",
+  "ops": [],
+  "row": "C04",
+  "why": "부속 참조 경로 격리"
+ },
+ {
+  "base": "example",
+  "clause": "A01.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "limits",
+     "max_records"
+    ],
+    131071
+   ]
+  ],
+  "row": "A01",
+  "why": "full 기본 한도"
+ },
+ {
+  "base": "example",
+  "clause": "A01.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "limits",
+     "max_records"
+    ]
+   ]
+  ],
+  "row": "A01",
+  "why": "한도 근거 누락"
+ },
+ {
+  "base": "example",
+  "clause": "A01.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "limits",
+     "max_records"
+    ],
+    131071
+   ]
+  ],
+  "row": "A01",
+  "why": "기본값 이탈"
+ },
+ {
+  "base": "example",
+  "clause": "A02.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "id_getsizeof_bytes"
+    ],
+    50
+   ]
+  ],
+  "row": "A02",
+  "why": "ID 크기 재계산"
+ },
+ {
+  "base": "example",
+  "clause": "A02.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "state_registration_counts",
+     "bs"
+    ],
+    2
+   ]
+  ],
+  "row": "A02",
+  "why": "등록 상태의 source별 trace 대조"
+ },
+ {
+  "base": "example",
+  "clause": "A02.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace"
+    ]
+   ]
+  ],
+  "row": "A02",
+  "why": "API trace 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A02.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "id_getsizeof_bytes"
+    ],
+    50
+   ]
+  ],
+  "row": "A02",
+  "why": "ID 크기 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "A03.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "receipt_invariants",
+     "checked_steps",
+     0,
+     "retire_eligible"
+    ],
+    1
+   ]
+  ],
+  "row": "A03",
+  "why": "고정 시계에서 퇴출 발생"
+ },
+ {
+  "base": "example",
+  "clause": "A03.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "trace_call_index"
+    ],
+    1
+   ]
+  ],
+  "row": "A03",
+  "why": "첫 거절과 접수 trace 순번 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "A03.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "receipt_invariants",
+     "checked_steps"
+    ]
+   ]
+  ],
+  "row": "A03",
+  "why": "접수별 결합 근거 누락"
+ },
+ {
+  "base": "example",
+  "clause": "A03.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "receipt_invariants",
+     "checked_steps",
+     0,
+     "retire_eligible"
+    ],
+    1
+   ]
+  ],
+  "row": "A03",
+  "why": "퇴출 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A04.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "status"
+    ],
+    "FAIL"
+   ]
+  ],
+  "row": "A04",
+  "why": "압력 원본 상태 이탈"
+ },
+ {
+  "base": "example",
+  "clause": "A04.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "scenarios"
+    ]
+   ]
+  ],
+  "row": "A04",
+  "why": "동명 측정 행 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A04.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "status"
+    ],
+    "FAIL"
+   ]
+  ],
+  "row": "A04",
+  "why": "압력 원본 상태 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A05.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "transition_trace",
+     2,
+     "detail_charge_bytes"
+    ],
+    0
+   ]
+  ],
+  "row": "A05",
+  "why": "API 전이 투영 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "A05.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "transition_trace",
+     2,
+     "classification"
+    ],
+    "linked"
+   ],
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     2,
+     "classification"
+    ],
+    "linked"
+   ]
+  ],
+  "row": "A05",
+  "why": "상세 prefix의 finish 분류 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A05.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "transition_trace"
+    ]
+   ]
+  ],
+  "row": "A05",
+  "why": "전이 장부 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A05.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "transition_trace",
+     2,
+     "detail_charge_bytes"
+    ],
+    0
+   ]
+  ],
+  "row": "A05",
+  "why": "요금 투영 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "A06.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "cause"
+    ],
+    "slot"
+   ]
+  ],
+  "row": "A06",
+  "why": "첫 참 원인 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "A06.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "health_after",
+     "last_seq"
+    ],
+    2
+   ]
+  ],
+  "row": "A06",
+  "why": "거절 후 last_seq 변동"
+ },
+ {
+  "base": "example",
+  "clause": "A06.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "byte_precheck"
+    ]
+   ]
+  ],
+  "row": "A06",
+  "why": "후보 byte 선검사 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A06.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "cause"
+    ],
+    "slot"
+   ]
+  ],
+  "row": "A06",
+  "why": "거절 원인 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A07.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "no_insertion"
+    ],
+    false
+   ]
+  ],
+  "row": "A07",
+  "why": "무삽입 표지 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A07.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "index_audit",
+     "after"
+    ]
+   ]
+  ],
+  "row": "A07",
+  "why": "색인 감사 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A07.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "first_rejection",
+     "index_audit",
+     "after",
+     "paths",
+     "live"
+    ],
+    true
+   ]
+  ],
+  "row": "A07",
+  "why": "실제 색인 삽입"
+ },
+ {
+  "base": "example",
+  "clause": "A08.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "resumed_after_release"
+    ],
+    true
+   ]
+  ],
+  "row": "A08",
+  "why": "latch 이후 재개"
+ },
+ {
+  "base": "example",
+  "clause": "A08.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "api_trace",
+     0,
+     "source"
+    ],
+    "other"
+   ]
+  ],
+  "row": "A08",
+  "why": "post latch 접수 source 결합 누락"
+ },
+ {
+  "base": "example",
+  "clause": "A08.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "coverage_by_source"
+    ]
+   ]
+  ],
+  "row": "A08",
+  "why": "source별 coverage 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A08.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "resumed_after_release"
+    ],
+    true
+   ]
+  ],
+  "row": "A08",
+  "why": "latch 재개 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A09.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "existing_id_budget",
+     0,
+     "AR_after"
+    ],
+    5
+   ]
+  ],
+  "row": "A09",
+  "why": "기존 ID 예약 증가"
+ },
+ {
+  "base": "example",
+  "clause": "A09.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "existing_id_transitions",
+     "link_round"
+    ],
+    "wrong"
+   ],
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     0,
+     "classification"
+    ],
+    "wrong"
+   ],
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "existing_id_budget",
+     0,
+     "classification"
+    ],
+    "wrong"
+   ]
+  ],
+  "row": "A09",
+  "why": "전이 종류별 정해진 분류 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A09.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "existing_id_budget"
+    ]
+   ]
+  ],
+  "row": "A09",
+  "why": "기존 ID 예산 근거 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A09.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures",
+     0,
+     "post_latch",
+     "existing_id_budget",
+     0,
+     "AR_after"
+    ],
+    5
+   ]
+  ],
+  "row": "A09",
+  "why": "예약 증가 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A10.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "131072_slots",
+     "by_fixture",
+     0,
+     "status"
+    ],
+    "PASS"
+   ]
+  ],
+  "row": "A10",
+  "why": "byte stop 원 목표의 PASS 허위 표지"
+ },
+ {
+  "base": "example",
+  "clause": "A10.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "unreachable_rows"
+    ]
+   ]
+  ],
+  "row": "A10",
+  "why": "대체 행 결합 결손"
+ },
+ {
+  "base": "example",
+  "clause": "A10.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "131072_slots",
+     "by_fixture",
+     0,
+     "status"
+    ],
+    "PASS"
+   ]
+  ],
+  "row": "A10",
+  "why": "도달 불가 slot PASS 주장"
+ },
+ {
+  "base": "example",
+  "clause": "A10.N1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "131072_slots",
+     "by_fixture",
+     0,
+     "status"
+    ],
+    "PASS"
+   ]
+  ],
+  "row": "A10",
+  "why": "검증된 원 목표 N/A를 PASS로 승격"
+ },
+ {
+  "base": "example",
+  "clause": "A11.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "visits"
+    ],
+    65
+   ]
+  ],
+  "row": "A11",
+  "why": "방문 한도 초과"
+ },
+ {
+  "base": "example",
+  "clause": "A11.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "sample_checks",
+     "checked"
+    ],
+    1
+   ]
+  ],
+  "row": "A11",
+  "why": "독립 표본 검사 횟수 부족"
+ },
+ {
+  "base": "example",
+  "clause": "A11.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "scenarios",
+     0,
+     "timing",
+     "gc_disabled",
+     "raw_ns"
+    ]
+   ]
+  ],
+  "row": "A11",
+  "why": "원시 시간 표본 누락"
+ },
+ {
+  "base": "example",
+  "clause": "A11.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "visits"
+    ],
+    65
+   ]
+  ],
+  "row": "A11",
+  "why": "완전 관측 방문 위반"
+ },
+ {
+  "base": "example",
+  "clause": "A11.N1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "time_gate"
+    ],
+    "N/A"
+   ]
+  ],
+  "row": "A11",
+  "why": "D+K=0에서 시간 N/A 사유 없음"
+ },
+ {
+  "base": "example",
+  "clause": "A12.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "tracemalloc",
+     "peak"
+    ],
+    262245
+   ],
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "temporary_breakdown",
+     "peak_delta"
+    ],
+    262145
+   ]
+  ],
+  "row": "A12",
+  "why": "peak−current_before 임시 한도 초과"
+ },
+ {
+  "base": "example",
+  "clause": "A12.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     1,
+     "temporary_sample_origin"
+    ],
+    "prune_sample"
+   ],
+   [
+    "set",
+    [
+     "scenarios",
+     1,
+     "tracemalloc",
+     "sample_origin"
+    ],
+    "prune_sample"
+   ]
+  ],
+  "row": "A12",
+  "why": "close와 prune 표본 원본 중복"
+ },
+ {
+  "base": "example",
+  "clause": "A12.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "scenarios",
+     0,
+     "tracemalloc",
+     "current_before"
+    ]
+   ]
+  ],
+  "row": "A12",
+  "why": "임시 메모리 원시 기준점 누락"
+ },
+ {
+  "base": "example",
+  "clause": "A12.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "tracemalloc",
+     "peak"
+    ],
+    262245
+   ],
+   [
+    "set",
+    [
+     "scenarios",
+     0,
+     "temporary_breakdown",
+     "peak_delta"
+    ],
+    262145
+   ]
+  ],
+  "row": "A12",
+  "why": "원시 peak 초과"
+ }
+]

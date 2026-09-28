@@ -1,0 +1,1012 @@
+[
+ {
+  "base": "example",
+  "clause": "B01.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     1,
+     "source"
+    ],
+    "citi"
+   ]
+  ],
+  "row": "B01",
+  "why": "정상 일정의 두 번째 source가 입력 순서와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B01.P2",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "test_scale",
+     "normal_calls"
+    ],
+    1
+   ]
+  ],
+  "row": "B01",
+  "why": "단위 normal_calls는 둘 이상"
+ },
+ {
+  "base": "example",
+  "clause": "B01.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace"
+    ]
+   ]
+  ],
+  "row": "B01",
+  "why": "정상 접수 trace가 없음"
+ },
+ {
+  "base": "example",
+  "clause": "B01.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     1,
+     "classification"
+    ],
+    "rejected"
+   ]
+  ],
+  "row": "B01",
+  "why": "완전 trace에서 정상 접수가 거절됨"
+ },
+ {
+  "base": "example",
+  "clause": "B02.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "state_cycle",
+     0,
+     "action"
+    ],
+    "unbound"
+   ]
+  ],
+  "row": "B02",
+  "why": "cycle의 종료 위치 분포가 바뀜"
+ },
+ {
+  "base": "example",
+  "clause": "B02.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     1,
+     "classification"
+    ],
+    "ignored"
+   ]
+  ],
+  "row": "B02",
+  "why": "finish 앞 link 분류가 linked가 아님"
+ },
+ {
+  "base": "example",
+  "clause": "B02.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "state_cycle"
+    ]
+   ]
+  ],
+  "row": "B02",
+  "why": "위치별 cycle 원자료가 없음"
+ },
+ {
+  "base": "example",
+  "clause": "B02.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "id_getsizeof_bytes"
+    ],
+    43
+   ]
+  ],
+  "row": "B02",
+  "why": "실제 ID 크기와 보고 크기가 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B03.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "auxiliary_registered"
+    ],
+    1
+   ]
+  ],
+  "row": "B03",
+  "why": "burst와 probe 보조 접수 합계가 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B03.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     4,
+     "registered_seq"
+    ],
+    2
+   ]
+  ],
+  "row": "B03",
+  "why": "정상 접수가 probe 등록 seq를 재사용함"
+ },
+ {
+  "base": "example",
+  "clause": "B03.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace"
+    ]
+   ]
+  ],
+  "row": "B03",
+  "why": "probe·close·정상 접수 원자료가 없음"
+ },
+ {
+  "base": "example",
+  "clause": "B03.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "N_total_at_tail"
+    ],
+    3
+   ]
+  ],
+  "row": "B03",
+  "why": "독립 접수 총수식 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B04.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     2,
+     "received_at"
+    ],
+    3600000001
+   ]
+  ],
+  "row": "B04",
+  "why": "hour checkpoint가 계산된 wall 경계와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B04.P2",
+  "not_isolatable": "동시 hour/day/tail ID 분리는 P1의 범위 전체 checkpoint ID 유일성에 포함되어 단독 위반 불가",
+  "ops": [],
+  "row": "B04",
+  "why": "동시 hour/day/tail ID 분리는 P1의 범위 전체 checkpoint ID 유일성에 포함되어 단독 위반 불가"
+ },
+ {
+  "base": "example",
+  "clause": "B04.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1
+    ]
+   ]
+  ],
+  "row": "B04",
+  "why": "두 번째 tail checkpoint가 없음"
+ },
+ {
+  "base": "example",
+  "clause": "B04.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     3,
+     "received_mono"
+    ],
+    86400000001
+   ]
+  ],
+  "row": "B04",
+  "why": "완전 day checkpoint mono 경계 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B05.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "received_at"
+    ],
+    2
+   ]
+  ],
+  "row": "B05",
+  "why": "passive before의 수신쌍이 register와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B05.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "public_query_trace",
+     0,
+     "received_mono"
+    ],
+    3
+   ]
+  ],
+  "row": "B05",
+  "why": "public_advance와 공개 조회의 수신쌍이 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B05.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace"
+    ]
+   ]
+  ],
+  "row": "B05",
+  "why": "highwater 사이 register 순서가 없음"
+ },
+ {
+  "base": "example",
+  "clause": "B05.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "checkpoint_id"
+    ],
+    "x:b"
+   ]
+  ],
+  "row": "B05",
+  "why": "완전 checkpoint ID 중복"
+ },
+ {
+  "base": "example",
+  "clause": "B06.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "last_seq"
+    ],
+    2
+   ]
+  ],
+  "row": "B06",
+  "why": "last_seq와 N_total이 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B06.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     0,
+     "source"
+    ],
+    "citi"
+   ]
+  ],
+  "row": "B06",
+  "why": "checkpoint source 집계가 시점별 등록 trace와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B06.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "source_registered"
+    ]
+   ]
+  ],
+  "row": "B06",
+  "why": "checkpoint source_registered 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B06.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "N_tomb"
+    ],
+    1
+   ]
+  ],
+  "row": "B06",
+  "why": "상주식 N_res=N_live+N_tomb 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B07.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     2,
+     "identity_index_audit",
+     "samples",
+     0,
+     "tomb"
+    ],
+    true
+   ]
+  ],
+  "row": "B07",
+  "why": "prune 후 tomb index 잔존"
+ },
+ {
+  "base": "example",
+  "clause": "B07.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "identity_samples",
+     0,
+     "id"
+    ],
+    "b"
+   ],
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "identity_samples",
+     0,
+     "registered_seq"
+    ],
+    2
+   ],
+   [
+    "append",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace"
+    ],
+    {
+     "action": "register",
+     "classification": "registered",
+     "id": "b",
+     "registered_seq": 2,
+     "source": "investing"
+    }
+   ]
+  ],
+  "row": "B07",
+  "why": "세 phase의 등록 ID가 같지 않음"
+ },
+ {
+  "base": "example",
+  "clause": "B07.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     2,
+     "identity_index_audit"
+    ]
+   ]
+  ],
+  "row": "B07",
+  "why": "최종 index 감사 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B07.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     2,
+     "identity_samples",
+     0,
+     "observed"
+    ],
+    "live"
+   ]
+  ],
+  "row": "B07",
+  "why": "prune 후 상태가 부재가 아님"
+ },
+ {
+  "base": "example",
+  "clause": "B08.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "received_at"
+    ],
+    8
+   ]
+  ],
+  "row": "B08",
+  "why": "close 전 시각이 기한−1이 아님"
+ },
+ {
+  "base": "example",
+  "clause": "B08.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "frozen_totals_before_after",
+     0,
+     "before",
+     "finished"
+    ],
+    2
+   ],
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "frozen_totals_before_after",
+     0,
+     "at",
+     "finished"
+    ],
+    3
+   ],
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "frozen_totals_before_after",
+     0,
+     "requery",
+     "finished"
+    ],
+    3
+   ]
+  ],
+  "row": "B08",
+  "why": "frozen 누적은 자기 증분과 맞지만 완료 입력 전체 합계와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B08.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "frozen_totals_before_after"
+    ]
+   ]
+  ],
+  "row": "B08",
+  "why": "완료 누적 재조회 원자료 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B08.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "frozen_totals_before_after",
+     0,
+     "requery",
+     "finished"
+    ],
+    2
+   ]
+  ],
+  "row": "B08",
+  "why": "동일 시각 재조회 값이 변경됨"
+ },
+ {
+  "base": "example",
+  "clause": "B09.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "received_at"
+    ],
+    14399999998
+   ]
+  ],
+  "row": "B09",
+  "why": "만료 직전 경계가 기한−1이 아님"
+ },
+ {
+  "base": "example",
+  "clause": "B09.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "fixture_provenance",
+     "api_trace",
+     1,
+     "classification"
+    ],
+    "expired_finish"
+   ]
+  ],
+  "row": "B09",
+  "why": "원인별 진단 증가가 입력 사건 종류와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B09.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "diagnostic_counters"
+    ]
+   ]
+  ],
+  "row": "B09",
+  "why": "만료 후 원인 counter 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B09.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "coverage_complete"
+    ],
+    true
+   ]
+  ],
+  "row": "B09",
+  "why": "만료 후 coverage_complete가 참"
+ },
+ {
+  "base": "example",
+  "clause": "B10.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "pruned_since_previous_hour"
+    ],
+    0
+   ]
+  ],
+  "row": "B10",
+  "why": "due hour의 prune 건수 불일치"
+ },
+ {
+  "base": "example",
+  "clause": "B10.P2",
+  "not_isolatable": "단위 예시는 due ledger를 독립 입력으로 쓰며 full 168시간·10원본의 두 시계 tomb trace가 없어 full due-hour 재계산만 단독 변형 불가",
+  "ops": [],
+  "row": "B10",
+  "why": "단위 예시는 due ledger를 독립 입력으로 쓰며 full 168시간·10원본의 두 시계 tomb trace가 없어 full due-hour 재계산만 단독 변형 불가"
+ },
+ {
+  "base": "example",
+  "clause": "B10.P3",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "other_recorded_resident_removals"
+    ],
+    1
+   ]
+  ],
+  "row": "B10",
+  "why": "상주 감소에서 기록된 다른 제거량을 빼야 함"
+ },
+ {
+  "base": "example",
+  "clause": "B10.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "tomb_due_ledger"
+    ]
+   ]
+  ],
+  "row": "B10",
+  "why": "due ledger 원자료 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B10.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "N_res"
+    ],
+    1
+   ]
+  ],
+  "row": "B10",
+  "why": "완전 hour 상주 감소 식 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B11.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "identity_samples",
+     0,
+     "observed"
+    ],
+    "live"
+   ]
+  ],
+  "row": "B11",
+  "why": "prune 정시에도 ID가 live"
+ },
+ {
+  "base": "example",
+  "clause": "B11.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "prune_witness",
+     "unprocessed_tomb_count"
+    ],
+    1
+   ]
+  ],
+  "row": "B11",
+  "why": "미처리 tomb가 남았는데 prune watermark가 게시됨"
+ },
+ {
+  "base": "example",
+  "clause": "B11.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "identity_index_audit"
+    ]
+   ]
+  ],
+  "row": "B11",
+  "why": "prune 후 index 감사 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B11.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "prune_witness",
+     "pruned_count"
+    ],
+    2
+   ]
+  ],
+  "row": "B11",
+  "why": "pruned_count 상주식 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B12.P1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "received_at"
+    ],
+    11
+   ]
+  ],
+  "row": "B12",
+  "why": "recent 정확 경계 시각 위반"
+ },
+ {
+  "base": "example",
+  "clause": "B12.P2",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "recent_input_ledger",
+     0,
+     "connection"
+    ],
+    "unbound"
+   ]
+  ],
+  "row": "B12",
+  "why": "입력 완료 장부의 connection 축이 API trace와 다름"
+ },
+ {
+  "base": "example",
+  "clause": "B12.U1",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "del",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     0,
+     "recent_expected_counts"
+    ]
+   ]
+  ],
+  "row": "B12",
+  "why": "recent 기대 분모 원자료 누락"
+ },
+ {
+  "base": "example",
+  "clause": "B12.F1",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures",
+     0,
+     "checkpoints",
+     1,
+     "recent_rows",
+     "investing",
+     "registered"
+    ],
+    1
+   ]
+  ],
+  "row": "B12",
+  "why": "완전 recent 분모가 기대 장부와 다름"
+ }
+]

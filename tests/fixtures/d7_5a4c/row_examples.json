@@ -1,0 +1,2928 @@
+{
+  "A01": {
+    "aborted_reason": null,
+    "complete": true,
+    "limits": {
+      "churn_minutes": 10080,
+      "churn_stride_minutes": 1,
+      "fixture_detail_divisor": 1,
+      "max_detail_bytes": 4096,
+      "max_records": 131072,
+      "max_resident_bytes": 62914560,
+      "max_retained_details": 2048,
+      "owned_bytes": 67108864,
+      "temporary_bytes": 262144
+    },
+    "mode": "predicate_unit"
+  },
+  "A02": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "classification": "registered",
+              "detail_charge_bytes": 0,
+              "id": "a",
+              "job_id": "j",
+              "received_at": 10,
+              "received_mono": 10,
+              "registered_seq": 1,
+              "source": "bs",
+              "started_at": 10,
+              "started_mono": 10,
+              "state_after": "live",
+              "state_before": "absent"
+            }
+          ],
+          "clone_equivalence": {
+            "clone_replay_sha256": null,
+            "original_after_sha256": null,
+            "original_before_sha256": null,
+            "used": false
+          },
+          "detail_charged_bytes": 0
+        },
+        "id_getsizeof_bytes": 42,
+        "id_kind": "short_ascii",
+        "id_utf8_bytes": 1,
+        "job_key_counts": {
+          "bs:j": 1
+        },
+        "name": "p",
+        "retained_details": 0,
+        "source_registered": {
+          "bs": 1
+        },
+        "state_counts": {
+          "registered": 1
+        },
+        "state_registration_counts": {
+          "bs": 1
+        },
+        "track": "P0"
+      }
+    ]
+  },
+  "A03": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "after": {
+          "N_res": 1,
+          "N_tomb": 0,
+          "N_total": 1
+        },
+        "before": {
+          "N_res": 1,
+          "N_tomb": 0,
+          "N_total": 1
+        },
+        "first_rejection": {
+          "classification": "admission_stopped",
+          "received_at": 10,
+          "received_mono": 10,
+          "trace_call_index": 0
+        },
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "classification": "admission_stopped",
+              "received_at": 10,
+              "received_mono": 10,
+              "started_at": 10,
+              "started_mono": 10
+            }
+          ]
+        },
+        "receipt_invariants": {
+          "checked_steps": [
+            {
+              "N_res": 1,
+              "N_tomb": 0,
+              "N_total": 1,
+              "call_index": 0,
+              "received_at": 10,
+              "received_mono": 10,
+              "retire_eligible": 0,
+              "started_at": 10,
+              "started_mono": 10
+            }
+          ],
+          "fresh_starts": true,
+          "no_retirement": true,
+          "same_pair": true
+        }
+      }
+    ]
+  },
+  "A04": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "effective_detail_target": 0,
+        "id_kind": "short_ascii",
+        "name": "pressure_p0_short_ascii",
+        "requested_detail_target": 0,
+        "status": "PASS",
+        "track": "P0"
+      }
+    ],
+    "scenarios": [
+      {
+        "name": "pressure_p0_short_ascii",
+        "status": "PASS"
+      }
+    ],
+    "test_scale": {
+      "id_kinds": [
+        "short_ascii"
+      ],
+      "tracks": [
+        "P0"
+      ]
+    }
+  },
+  "A05": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "effective_detail_target": 1,
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "detail_charge_bytes": 0,
+              "registered_seq": 1
+            },
+            {
+              "action": "link_round",
+              "classification": "linked",
+              "detail_charge_bytes": 0,
+              "registered_seq": 1
+            },
+            {
+              "action": "finish",
+              "classification": "finalized",
+              "detail_charge_bytes": 4096,
+              "registered_seq": 1
+            }
+          ],
+          "detail_charged_bytes": 4096
+        },
+        "requested_detail_target": 1,
+        "retained_details": 1,
+        "state_counts": {
+          "finished": 1,
+          "registered": 1
+        },
+        "track": "P2",
+        "transition_trace": [
+          {
+            "action": "register",
+            "classification": "registered",
+            "detail_charge_bytes": 0,
+            "seq": 1
+          },
+          {
+            "action": "link_round",
+            "classification": "linked",
+            "detail_charge_bytes": 0,
+            "seq": 1
+          },
+          {
+            "action": "finish",
+            "classification": "finalized",
+            "detail_charge_bytes": 4096,
+            "seq": 1
+          }
+        ]
+      }
+    ],
+    "test_scale": {
+      "detail_target": 1,
+      "tracks": [
+        "P2"
+      ]
+    }
+  },
+  "A06": {
+    "limits": {
+      "max_records": 2
+    },
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "N_last_accepted": 1,
+        "after": {
+          "N_res": 1,
+          "N_total": 1
+        },
+        "before": {
+          "B": 10,
+          "N_res": 1,
+          "N_total": 1
+        },
+        "first_rejection": {
+          "admission_stopped_at": 10,
+          "byte_precheck": {
+            "candidate_E": 11,
+            "would_exceed": true
+          },
+          "candidate_id": "b",
+          "candidate_job_id": "j",
+          "candidate_seq": 2,
+          "candidate_source": "bs",
+          "cause": "byte",
+          "classification": "admission_stopped",
+          "diagnostics_codes": [
+            "admission_stopped",
+            "aggregation_capacity"
+          ],
+          "health_after": {
+            "N_total": 1,
+            "admission_stopped": true,
+            "admission_stopped_at": 10,
+            "last_seq": 1
+          },
+          "health_before": {
+            "N_total": 1,
+            "admission_stopped": false,
+            "last_seq": 1
+          },
+          "precedence": "slot_then_byte",
+          "received_at": 10,
+          "received_mono": 10,
+          "simultaneous_causes": [
+            "byte"
+          ],
+          "slot_test": {
+            "candidate_N_res": 2,
+            "would_exceed": false
+          }
+        },
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "admission_stopped",
+              "id": "b",
+              "job_id": "j",
+              "received_at": 10,
+              "received_mono": 10,
+              "source": "bs"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "A07": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "first_rejection": {
+          "index_audit": {
+            "absent_paths": [
+              "close",
+              "cohort",
+              "expiry",
+              "live",
+              "open",
+              "overdue",
+              "owned_id",
+              "owner",
+              "previous_job",
+              "prune",
+              "recent",
+              "seq",
+              "tomb"
+            ],
+            "after": {
+              "N_total": 1,
+              "last_seq": 1,
+              "paths": {
+                "close": false,
+                "cohort": false,
+                "expiry": false,
+                "live": false,
+                "open": false,
+                "overdue": false,
+                "owned_id": false,
+                "owner": false,
+                "previous_job": false,
+                "prune": false,
+                "recent": false,
+                "seq": false,
+                "tomb": false
+              }
+            },
+            "before": {
+              "N_total": 1,
+              "last_seq": 1,
+              "paths": {
+                "close": false,
+                "cohort": false,
+                "expiry": false,
+                "live": false,
+                "open": false,
+                "overdue": false,
+                "owned_id": false,
+                "owner": false,
+                "previous_job": false,
+                "prune": false,
+                "recent": false,
+                "seq": false,
+                "tomb": false
+              }
+            },
+            "owned_bytes": {
+              "candidate_after": 0,
+              "candidate_before": 0
+            }
+          },
+          "no_insertion": true
+        }
+      }
+    ]
+  },
+  "A08": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "first_rejection": {
+          "admission_stopped_at": 10,
+          "index_audit": {
+            "absent_paths": [
+              "close",
+              "cohort",
+              "expiry",
+              "live",
+              "open",
+              "overdue",
+              "owned_id",
+              "owner",
+              "previous_job",
+              "prune",
+              "recent",
+              "seq",
+              "tomb"
+            ],
+            "after": {
+              "N_total": 1,
+              "last_seq": 1,
+              "paths": {
+                "close": false,
+                "cohort": false,
+                "expiry": false,
+                "live": false,
+                "open": false,
+                "overdue": false,
+                "owned_id": false,
+                "owner": false,
+                "previous_job": false,
+                "prune": false,
+                "recent": false,
+                "seq": false,
+                "tomb": false
+              }
+            },
+            "before": {
+              "N_total": 1,
+              "last_seq": 1,
+              "paths": {
+                "close": false,
+                "cohort": false,
+                "expiry": false,
+                "live": false,
+                "open": false,
+                "overdue": false,
+                "owned_id": false,
+                "owner": false,
+                "previous_job": false,
+                "prune": false,
+                "recent": false,
+                "seq": false,
+                "tomb": false
+              }
+            },
+            "owned_bytes": {
+              "candidate_after": 0,
+              "candidate_before": 0
+            }
+          }
+        },
+        "post_latch": {
+          "all_rejected": true,
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "admission_stopped",
+              "source": "bs"
+            }
+          ],
+          "attempted": 1,
+          "coverage_by_source": {
+            "bs": {
+              "diagnostic_codes": [
+                "aggregation_capacity"
+              ],
+              "uncertain": true
+            }
+          },
+          "first_stop_time_unchanged": true,
+          "g_diagnostic": {
+            "E": 9,
+            "G": 8,
+            "measured": true
+          },
+          "prune_after_release": {
+            "N_res_after": 1,
+            "N_res_before": 2,
+            "attempt_classification": "admission_stopped",
+            "stop_time": 10
+          },
+          "resumed_after_release": false
+        }
+      }
+    ],
+    "test_scale": {
+      "sources": [
+        "bs"
+      ]
+    }
+  },
+  "A09": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "after": {
+          "B": 10,
+          "E": 9,
+          "G": 8
+        },
+        "before": {
+          "B": 10,
+          "E": 9,
+          "G": 8
+        },
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "link_round",
+              "classification": "linked",
+              "id": "a"
+            }
+          ]
+        },
+        "post_latch": {
+          "existing_id_budget": [
+            {
+              "AR_after": 4,
+              "AR_before": 4,
+              "action": "link_round",
+              "after": {
+                "B": 10,
+                "E": 9,
+                "G": 8
+              },
+              "before": {
+                "B": 10,
+                "E": 9,
+                "G": 8
+              },
+              "classification": "linked",
+              "id": "a",
+              "state_before": "live"
+            }
+          ],
+          "existing_id_transitions": {
+            "link_round": "linked"
+          }
+        }
+      }
+    ],
+    "test_scale": {
+      "existing_transitions": [
+        "link_round"
+      ]
+    }
+  },
+  "A10": {
+    "131072_slots": {
+      "by_fixture": [
+        {
+          "N_stop": 1,
+          "name": "p",
+          "reason": "N/A (byte stop)",
+          "status": "N/A"
+        }
+      ]
+    },
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "N_last_accepted": 1,
+        "before": {
+          "B": 62914560
+        },
+        "first_rejection": {
+          "cause": "byte"
+        },
+        "name": "p"
+      },
+      {
+        "before": {
+          "B": 62914560
+        },
+        "first_rejection": {
+          "cause": "slot"
+        },
+        "fixture_limit": 1,
+        "name": "pressure_slot_first_small_limit",
+        "status": "PASS"
+      }
+    ],
+    "scenarios": [
+      {
+        "name": "p",
+        "status": "PASS"
+      }
+    ],
+    "test_scale": {
+      "max_records": 2
+    },
+    "unreachable_rows": [
+      {
+        "fixture_name": "p",
+        "observed_N": 1,
+        "original_name": "p_131072_slots",
+        "reason": "N/A (unreachable by byte policy)",
+        "replacement_name": "p"
+      }
+    ]
+  },
+  "A11": {
+    "mode": "predicate_unit",
+    "scenarios": [
+      {
+        "D": 0,
+        "D_observed": [
+          0,
+          0
+        ],
+        "K": 0,
+        "K_observed": [
+          0,
+          0
+        ],
+        "measured_transition": "prune",
+        "name": "prune_transition",
+        "sample_checks": {
+          "checked": 2,
+          "failures": []
+        },
+        "sample_exception": null,
+        "sample_plan": "sequential",
+        "status": "PASS",
+        "time_gate": "PASS",
+        "timing": {
+          "gc_disabled": {
+            "max_us": 1,
+            "n": 1,
+            "p99_us": 1,
+            "raw_ns": [
+              1000
+            ]
+          },
+          "gc_enabled": {
+            "max_us": 1,
+            "n": 1,
+            "p99_us": 1,
+            "raw_ns": [
+              1000
+            ]
+          }
+        },
+        "visit_gate": "PASS",
+        "visit_limit": 64,
+        "visits": 0
+      }
+    ],
+    "test_scale": {
+      "measured_scenarios": [
+        "prune_transition"
+      ],
+      "samples_per_gc": 1
+    }
+  },
+  "A12": {
+    "mode": "predicate_unit",
+    "scenarios": [
+      {
+        "name": "prune_transition",
+        "temporary_breakdown": {
+          "peak_delta": 20
+        },
+        "temporary_gate": "PASS",
+        "temporary_sample_origin": "prune_sample",
+        "timing": {
+          "gc_disabled": {
+            "raw_ns": [
+              1
+            ]
+          },
+          "gc_enabled": {
+            "raw_ns": [
+              1
+            ]
+          }
+        },
+        "tracemalloc": {
+          "current_after": 110,
+          "current_before": 100,
+          "peak": 120,
+          "sample_origin": "prune_sample"
+        },
+        "visits": 1
+      },
+      {
+        "name": "close_boundary_exact",
+        "temporary_breakdown": {
+          "peak_delta": 20
+        },
+        "temporary_gate": "PASS",
+        "temporary_sample_origin": "close_sample",
+        "timing": {
+          "gc_disabled": {
+            "raw_ns": [
+              1
+            ]
+          },
+          "gc_enabled": {
+            "raw_ns": [
+              1
+            ]
+          }
+        },
+        "tracemalloc": {
+          "current_after": 110,
+          "current_before": 100,
+          "peak": 120,
+          "sample_origin": "close_sample"
+        },
+        "visits": 1
+      },
+      {
+        "name": "normalization",
+        "temporary_breakdown": {
+          "peak_delta": 20
+        },
+        "temporary_gate": "PASS",
+        "temporary_sample_origin": "normalization_sample",
+        "timing": {
+          "gc_disabled": {
+            "raw_ns": [
+              1
+            ]
+          },
+          "gc_enabled": {
+            "raw_ns": [
+              1
+            ]
+          }
+        },
+        "tracemalloc": {
+          "current_after": 110,
+          "current_before": 100,
+          "peak": 120,
+          "sample_origin": "normalization_sample"
+        },
+        "visits": 1
+      }
+    ],
+    "test_scale": {
+      "temporary_scenarios": [
+        "prune_transition",
+        "close_boundary_exact",
+        "normalization"
+      ]
+    }
+  },
+  "B01": {
+    "churn_fixtures": [
+      {
+        "N_total_at_tail": 2,
+        "checkpoints": [
+          {
+            "admission_counts": {
+              "registered": 1,
+              "rejected": 0,
+              "scheduled": 1
+            },
+            "kind": "tail_80640",
+            "received_at": 0,
+            "received_mono": 0,
+            "source_counts": {
+              "investing": {
+                "registered": 1,
+                "rejected": 0,
+                "scheduled": 1
+              }
+            }
+          },
+          {
+            "admission_counts": {
+              "registered": 2,
+              "rejected": 0,
+              "scheduled": 2
+            },
+            "kind": "tail_80641",
+            "received_at": 7500000,
+            "received_mono": 7500000,
+            "source_counts": {
+              "investing": {
+                "registered": 2,
+                "rejected": 0,
+                "scheduled": 2
+              }
+            }
+          }
+        ],
+        "classification_counts": {
+          "registered": 2
+        },
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "classification": "registered",
+              "received_at": 0,
+              "received_mono": 0,
+              "registered_seq": 1,
+              "source": "investing"
+            },
+            {
+              "action": "register",
+              "call_index": 1,
+              "classification": "registered",
+              "received_at": 7500000,
+              "received_mono": 7500000,
+              "registered_seq": 2,
+              "source": "investing"
+            }
+          ]
+        },
+        "minute_batches": 1,
+        "scheduled_registered": 2,
+        "scheduled_target": 2,
+        "source_registered": {
+          "investing": 2
+        },
+        "stride_minutes": 1,
+        "tail_classification": "registered"
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "minutes": 1,
+      "normal_calls": 2,
+      "sources": [
+        "investing"
+      ]
+    }
+  },
+  "B02": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "epoch_sources": [
+              {
+                "connection_counts": {
+                  "started": 1,
+                  "unbound": 1
+                },
+                "frozen_invocations": 0,
+                "lifecycle_counts": {
+                  "awaiting_report": 1,
+                  "finalized": 1
+                },
+                "live_invocations": 2,
+                "registered_invocations": 2,
+                "source": "investing"
+              }
+            ]
+          }
+        ],
+        "classification_counts": {
+          "finalized": 1,
+          "registered": 2
+        },
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "cycle_position": 0,
+              "id": "a",
+              "registered_seq": 1,
+              "source": "investing"
+            },
+            {
+              "action": "link_round",
+              "classification": "linked",
+              "registered_seq": 1
+            },
+            {
+              "action": "finish",
+              "classification": "finalized",
+              "registered_seq": 1
+            },
+            {
+              "action": "register",
+              "cycle_position": 1,
+              "id": "b",
+              "registered_seq": 2,
+              "source": "investing"
+            }
+          ]
+        },
+        "id_getsizeof_bytes": 42,
+        "id_kind": "short_ascii",
+        "id_utf8_bytes": 1,
+        "name": "churn_most_finished_short_ascii",
+        "state_cycle": [
+          {
+            "action": "finish",
+            "position": 0,
+            "source": "investing"
+          },
+          {
+            "action": "unbound",
+            "position": 1,
+            "source": "investing"
+          }
+        ],
+        "state_track": "most_finished"
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "churn_names": [
+        "churn_most_finished_short_ascii"
+      ],
+      "cycle_length": 2,
+      "finished": 1,
+      "unbound": 1
+    }
+  },
+  "B03": {
+    "churn_fixtures": [
+      {
+        "N_total_at_tail": 4,
+        "auxiliary_registered": 2,
+        "checkpoints": [
+          {
+            "N_total": 2,
+            "budget": {
+              "D": 4096
+            },
+            "kind": "detail_open",
+            "received_at": 1,
+            "received_mono": 1,
+            "retained_details": 1
+          },
+          {
+            "N_total": 2,
+            "budget": {
+              "D": 0
+            },
+            "kind": "detail_released",
+            "received_at": 2,
+            "received_mono": 2,
+            "retained_details": 0
+          },
+          {
+            "identity_samples": [
+              {
+                "expected": "tombstoned",
+                "id": "probe",
+                "observed": "tombstoned"
+              }
+            ],
+            "kind": "probe_expire_at",
+            "received_at": 14400000001,
+            "received_mono": 14400000001
+          },
+          {
+            "N_total": 4,
+            "kind": "tail_80641"
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "classification": "registered",
+              "received_at": 0,
+              "received_mono": 0,
+              "registered_seq": 1
+            },
+            {
+              "action": "finish",
+              "call_index": 1,
+              "classification": "finalized",
+              "detail_charge_bytes": 4096,
+              "registered_seq": 1
+            },
+            {
+              "action": "register",
+              "call_index": 2,
+              "classification": "registered",
+              "id": "probe",
+              "received_at": 1,
+              "received_mono": 1,
+              "registered_seq": 2
+            },
+            {
+              "action": "close",
+              "call_index": 3,
+              "classification": "closed",
+              "received_at": 2,
+              "received_mono": 2,
+              "registered_seq": 1
+            },
+            {
+              "action": "register",
+              "call_index": 4,
+              "classification": "registered",
+              "registered_seq": 3
+            },
+            {
+              "action": "register",
+              "call_index": 5,
+              "classification": "registered",
+              "registered_seq": 4
+            }
+          ]
+        },
+        "max_retained_details_observed": 1,
+        "name": "churn_burst_ascii128",
+        "scheduled_registered": 2
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "burst_details": 1,
+      "normal_calls": 2
+    }
+  },
+  "B04": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "checkpoint_id": "x:t0",
+            "kind": "tail_80640",
+            "received_at": 0,
+            "received_mono": 0
+          },
+          {
+            "checkpoint_id": "x:t1",
+            "kind": "tail_80641",
+            "received_at": 7500000,
+            "received_mono": 7500000
+          },
+          {
+            "checkpoint_id": "x:h1",
+            "kind": "hour",
+            "received_at": 3600000000,
+            "received_mono": 3600000000
+          },
+          {
+            "checkpoint_id": "x:d1",
+            "kind": "day",
+            "received_at": 86400000000,
+            "received_mono": 86400000000
+          }
+        ],
+        "evidence_gaps": [],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "received_at": 0,
+              "received_mono": 0
+            },
+            {
+              "action": "register",
+              "call_index": 1,
+              "received_at": 7500000,
+              "received_mono": 7500000
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "days": 1,
+      "hours": 1,
+      "normal_calls": 2
+    }
+  },
+  "B05": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "checkpoint_id": "x:b",
+            "event_order": 0,
+            "kind": "highwater_before",
+            "observation": "passive",
+            "received_at": 1,
+            "received_mono": 1
+          },
+          {
+            "checkpoint_id": "x:a",
+            "event_order": 2,
+            "kind": "highwater_after",
+            "observation": "passive",
+            "received_at": 1,
+            "received_mono": 1
+          },
+          {
+            "checkpoint_id": "x:public",
+            "event_order": 3,
+            "kind": "hour",
+            "observation": "public_advance",
+            "received_at": 2,
+            "received_mono": 2
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "event_order": 1,
+              "received_at": 1,
+              "received_mono": 1
+            }
+          ],
+          "public_query_trace": [
+            {
+              "checkpoint_id": "x:public",
+              "event_order": 3,
+              "received_at": 2,
+              "received_mono": 2
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B06": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "N_live": 1,
+            "N_res": 1,
+            "N_tomb": 0,
+            "N_total": 1,
+            "admission_counts": {
+              "registered": 1,
+              "rejected": 0,
+              "scheduled": 1
+            },
+            "last_seq": 1,
+            "registered_records": 1,
+            "source_counts": {
+              "investing": {
+                "registered": 1,
+                "rejected": 0,
+                "scheduled": 1
+              }
+            },
+            "source_registered": {
+              "investing": 1
+            }
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "registered_seq": 1,
+              "source": "investing"
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B07": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "checkpoint_id": "x:l",
+            "identity_samples": [
+              {
+                "category": "finished",
+                "expected": "live",
+                "id": "a",
+                "observed": "live",
+                "phase": "live",
+                "registered_seq": 1,
+                "source": "investing"
+              }
+            ]
+          },
+          {
+            "checkpoint_id": "x:t",
+            "identity_samples": [
+              {
+                "category": "finished",
+                "expected": "tombstoned",
+                "id": "a",
+                "observed": "tombstoned",
+                "phase": "tomb",
+                "registered_seq": 1,
+                "source": "investing"
+              }
+            ]
+          },
+          {
+            "N_total": 1,
+            "checkpoint_id": "x:p",
+            "identity_index_audit": {
+              "samples": [
+                {
+                  "checkpoint_id": "x:p",
+                  "id": "a",
+                  "other_indexes_absent": {
+                    "close": true,
+                    "cohort": true,
+                    "expiry": true,
+                    "live": true,
+                    "open": true,
+                    "overdue": true,
+                    "owned_id": true,
+                    "previous_job": true,
+                    "prune": true,
+                    "recent": true
+                  },
+                  "owner": false,
+                  "seq_positions": [],
+                  "tomb": false
+                }
+              ]
+            },
+            "identity_samples": [
+              {
+                "category": "finished",
+                "expected": "expired_or_untracked",
+                "id": "a",
+                "observed": "expired_or_untracked",
+                "phase": "pruned",
+                "registered_seq": 1,
+                "source": "investing"
+              }
+            ],
+            "kind": "tail_80641"
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "id": "a",
+              "registered_seq": 1,
+              "source": "investing"
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B08": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "close_through": null,
+            "cumulative_end": null,
+            "identity_samples": [
+              {
+                "expected": "live",
+                "id": "a",
+                "observed": "live"
+              }
+            ],
+            "kind": "probe_close_before",
+            "received_at": 9,
+            "received_mono": 9,
+            "retained_details": 1
+          },
+          {
+            "close_through": 10,
+            "cumulative_end": 10,
+            "frozen_totals_before_after": [
+              {
+                "at": {
+                  "finished": 1
+                },
+                "before": {
+                  "finished": 0
+                },
+                "id": "a",
+                "requery": {
+                  "finished": 1
+                },
+                "source": "investing"
+              }
+            ],
+            "identity_samples": [
+              {
+                "expected": "tombstoned",
+                "id": "a",
+                "observed": "tombstoned"
+              }
+            ],
+            "kind": "probe_close_at",
+            "received_at": 10,
+            "received_mono": 10,
+            "retained_details": 0
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "finish",
+              "classification": "finalized",
+              "close_at": 10,
+              "close_mono": 10,
+              "id": "a",
+              "source": "investing"
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B09": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "coverage_complete": true,
+            "diagnostic_counters": {
+              "expired_start": 0,
+              "retention_expired": 0
+            },
+            "identity_samples": [
+              {
+                "category": "linked",
+                "expected": "live",
+                "id": "a",
+                "observed": "live"
+              }
+            ],
+            "kind": "probe_expire_before",
+            "received_at": 14399999999,
+            "received_mono": 14399999999,
+            "uncertain_sources": []
+          },
+          {
+            "coverage_complete": false,
+            "diagnostic_counters": {
+              "expired_start": 1,
+              "retention_expired": 1
+            },
+            "identity_samples": [
+              {
+                "category": "linked",
+                "expected": "tombstoned",
+                "id": "a",
+                "observed": "tombstoned"
+              }
+            ],
+            "kind": "probe_expire_at",
+            "received_at": 14400000000,
+            "received_mono": 14400000000,
+            "uncertain_sources": [
+              "investing"
+            ]
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "category": "linked",
+              "id": "a",
+              "received_at": 0,
+              "received_mono": 0,
+              "registered_seq": 1,
+              "source": "investing"
+            },
+            {
+              "action": "late_start",
+              "classification": "expired_start",
+              "id": "a",
+              "received_at": 14400000000,
+              "received_mono": 14400000000,
+              "source": "investing"
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B10": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "N_res": 1,
+            "N_total": 1,
+            "kind": "hour",
+            "minute_index": 60,
+            "other_recorded_resident_removals": 0,
+            "pruned_since_previous_hour": 0
+          },
+          {
+            "N_res": 0,
+            "N_total": 1,
+            "kind": "hour",
+            "minute_index": 120,
+            "other_recorded_resident_removals": 0,
+            "pruned_since_previous_hour": 1
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "id": "a",
+              "registered_seq": 1,
+              "source": "investing"
+            }
+          ]
+        },
+        "tomb_due_ledger": [
+          {
+            "due_hour": 2,
+            "id": "a",
+            "registered_seq": 1,
+            "source": "investing"
+          }
+        ]
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "hours": 2,
+      "pre_prune_hours": 1
+    }
+  },
+  "B11": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "N_res": 1,
+            "checkpoint_id": "x:b",
+            "identity_samples": [
+              {
+                "expected": "tombstoned",
+                "id": "a",
+                "observed": "tombstoned"
+              }
+            ],
+            "kind": "probe_prune_before",
+            "received_at": 9,
+            "received_mono": 9
+          },
+          {
+            "N_res": 0,
+            "checkpoint_id": "x:a",
+            "identity_index_audit": {
+              "samples": [
+                {
+                  "checkpoint_id": "x:a",
+                  "id": "a",
+                  "other_indexes_absent": {
+                    "close": true,
+                    "cohort": true,
+                    "expiry": true,
+                    "live": true,
+                    "open": true,
+                    "overdue": true,
+                    "owned_id": true,
+                    "previous_job": true,
+                    "prune": true,
+                    "recent": true
+                  },
+                  "owner": false,
+                  "seq_positions": [],
+                  "tomb": false
+                }
+              ]
+            },
+            "identity_samples": [
+              {
+                "expected": "expired_or_untracked",
+                "id": "a",
+                "observed": "expired_or_untracked"
+              }
+            ],
+            "kind": "probe_prune_at",
+            "prune_observed_through": 10,
+            "prune_witness": {
+              "accepted_between": 0,
+              "after_N_res": 0,
+              "as_of": 10,
+              "as_of_mono": 10,
+              "before_N_res": 1,
+              "pruned_count": 1,
+              "sample_ids": [
+                "a"
+              ],
+              "unprocessed_tomb_count": 0
+            },
+            "received_at": 10,
+            "received_mono": 10
+          }
+        ]
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B12": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "identity_samples": [
+              {
+                "expected": "included",
+                "id": "a",
+                "observed": "included"
+              }
+            ],
+            "kind": "probe_recent_before",
+            "received_at": 9,
+            "received_mono": 9,
+            "recent_expected_counts": {
+              "investing": {
+                "at": {
+                  "connection": {},
+                  "lifecycle": {},
+                  "registered": 0
+                },
+                "before": {
+                  "connection": {
+                    "started": 1
+                  },
+                  "lifecycle": {
+                    "finalized": 1
+                  },
+                  "registered": 1
+                }
+              }
+            },
+            "recent_rows": {
+              "investing": {
+                "connection": {
+                  "started": 1
+                },
+                "lifecycle": {
+                  "finalized": 1
+                },
+                "registered": 1
+              }
+            }
+          },
+          {
+            "identity_samples": [
+              {
+                "expected": "excluded",
+                "id": "a",
+                "observed": "excluded"
+              }
+            ],
+            "kind": "probe_recent_at",
+            "received_at": 10,
+            "received_mono": 10,
+            "recent_expected_counts": {
+              "investing": {
+                "at": {
+                  "connection": {},
+                  "lifecycle": {},
+                  "registered": 0
+                },
+                "before": {
+                  "connection": {
+                    "started": 1
+                  },
+                  "lifecycle": {
+                    "finalized": 1
+                  },
+                  "registered": 1
+                }
+              }
+            },
+            "recent_rows": {
+              "investing": {
+                "connection": {},
+                "lifecycle": {},
+                "registered": 0
+              }
+            }
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "connection": "started",
+              "id": "a",
+              "received_at": 0,
+              "received_mono": 0,
+              "registered_seq": 1,
+              "source": "investing"
+            },
+            {
+              "action": "finish",
+              "bucket_end": 10,
+              "bucket_end_mono": 10,
+              "classification": "finalized",
+              "id": "a",
+              "source": "investing"
+            }
+          ]
+        },
+        "recent_input_ledger": [
+          {
+            "bucket_end": 10,
+            "bucket_end_mono": 10,
+            "connection": "started",
+            "id": "a",
+            "lifecycle": "finalized",
+            "registered_at": 0,
+            "registered_mono": 0,
+            "source": "investing"
+          }
+        ]
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B13": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "budget": {
+              "A": 1,
+              "AR": 2,
+              "B": 10,
+              "B_minus_E": 5,
+              "D": 0,
+              "E": 5,
+              "F_4": 1,
+              "G": 4,
+              "Q_4": 2,
+              "R": 1,
+              "R_T": 0,
+              "T": 0,
+              "TR": 0,
+              "capacity": {
+                "charged_bytes": 2,
+                "rebuild_new_bytes": 0,
+                "rebuild_old_bytes": 0
+              },
+              "rebuild_count": 0,
+              "unknown_types": []
+            },
+            "checkpoint_id": "unit:0",
+            "kind": "unit"
+          }
+        ]
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "required_budget_points": [
+        "unit"
+      ]
+    }
+  },
+  "B14": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "close_through": null,
+            "cumulative_end": null,
+            "last_received_at": 9,
+            "last_received_mono": 9,
+            "prune_observed_through": null,
+            "received_at": 9,
+            "received_mono": 9
+          },
+          {
+            "close_through": 10,
+            "cumulative_end": 10,
+            "frozen_totals_before_after": [
+              {
+                "at": {
+                  "finished": 1
+                },
+                "before": {
+                  "finished": 0
+                },
+                "id": "a",
+                "requery": {
+                  "finished": 1
+                },
+                "source": "investing"
+              }
+            ],
+            "last_received_at": 9,
+            "last_received_mono": 9,
+            "prune_observed_through": 10,
+            "prune_witness": {
+              "as_of": 10,
+              "as_of_mono": 10,
+              "pruned_count": 1,
+              "unprocessed_tomb_count": 0
+            },
+            "received_at": 10,
+            "received_mono": 10
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "finish",
+              "classification": "finalized",
+              "close_at": 10,
+              "close_mono": 10,
+              "id": "a",
+              "source": "investing"
+            },
+            {
+              "action": "tomb",
+              "id": "a",
+              "prune_due_at": 10,
+              "prune_due_mono": 10
+            },
+            {
+              "action": "prune",
+              "id": "a",
+              "received_at": 10,
+              "received_mono": 10
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B15": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "cursor_probes": [
+              {
+                "after_seq": 1,
+                "classification": "snapshot",
+                "entry_seqs": [
+                  2
+                ],
+                "has_more": false,
+                "next_seq": null
+              },
+              {
+                "after_seq": 2,
+                "classification": "snapshot",
+                "entry_seqs": [],
+                "has_more": false,
+                "next_seq": null
+              }
+            ],
+            "event_order": 1,
+            "identity_index_audit": {
+              "samples": [
+                {
+                  "checkpoint_id": "x",
+                  "id": "old",
+                  "other_indexes_absent": {
+                    "close": true,
+                    "cohort": true,
+                    "expiry": true,
+                    "live": true,
+                    "open": true,
+                    "overdue": true,
+                    "owned_id": true,
+                    "previous_job": true,
+                    "prune": true,
+                    "recent": true
+                  },
+                  "owner": false,
+                  "seq_positions": [],
+                  "tomb": false
+                }
+              ]
+            },
+            "latest_open_seq": 2,
+            "oldest_retained_seq": 2,
+            "open_seqs": [
+              2
+            ],
+            "retained_seqs": [
+              2
+            ]
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "event_order": 1,
+              "registered_seq": 2
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B16": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "checkpoint_id": "x:p",
+            "observation": "passive",
+            "passive_cohort_projection": [
+              {
+                "counts": {
+                  "connection": {
+                    "started": 1
+                  },
+                  "lifecycle": {
+                    "finalized": 1
+                  },
+                  "registered": 1
+                },
+                "public_checkpoint_id": "x:q",
+                "range": {
+                  "end": 10,
+                  "start": 1
+                },
+                "source": "investing"
+              }
+            ]
+          },
+          {
+            "checkpoint_id": "x:q",
+            "cohort_exact_from": 1,
+            "frozen_through": 9,
+            "old_cohort_probe": {
+              "classification": "cohort_expired",
+              "diagnostics": {
+                "codes": [
+                  "cohort_expired"
+                ]
+              },
+              "start": 0
+            },
+            "received_at": 10,
+            "received_mono": 10,
+            "recent_cohorts": {
+              "investing": {
+                "counts": {
+                  "connection": {
+                    "started": 1
+                  },
+                  "lifecycle": {
+                    "finalized": 1
+                  },
+                  "registered": 1
+                },
+                "equations_hold": {
+                  "connection": true,
+                  "lifecycle": true
+                },
+                "range": {
+                  "end": 10,
+                  "start": 1
+                }
+              }
+            }
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "connection": "started",
+              "id": "a",
+              "lifecycle": "finalized",
+              "received_at": 1,
+              "received_mono": 1,
+              "source": "investing"
+            },
+            {
+              "action": "finish",
+              "classification": "finalized",
+              "id": "a",
+              "received_at": 2,
+              "received_mono": 2,
+              "source": "investing"
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B17": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "checkpoint_id": "x:p",
+            "passive_epoch_projection": [
+              {
+                "connection_counts": {
+                  "started": 1
+                },
+                "frozen_invocations": 0,
+                "lifecycle_counts": {
+                  "awaiting_report": 1
+                },
+                "live_invocations": 1,
+                "public_checkpoint_id": "x:q",
+                "registered_invocations": 1,
+                "source": "investing"
+              }
+            ]
+          },
+          {
+            "N_live": 1,
+            "N_total": 1,
+            "checkpoint_id": "x:q",
+            "epoch_sources": [
+              {
+                "connection_counts": {
+                  "started": 1
+                },
+                "equations_hold": {
+                  "connection": true,
+                  "lifecycle": true
+                },
+                "frozen_invocations": 0,
+                "lifecycle_counts": {
+                  "awaiting_report": 1
+                },
+                "live_invocations": 1,
+                "registered_invocations": 1,
+                "source": "investing"
+              }
+            ]
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "connection": "started",
+              "id": "a",
+              "lifecycle": "awaiting_report",
+              "source": "investing"
+            }
+          ]
+        },
+        "source_registered": {
+          "investing": 1
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B18": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "admission_stopped": false,
+            "admission_stopped_at": null,
+            "clock_isolation": {
+              "active": false,
+              "candidate_pairs": 0,
+              "reanchor_count": 0,
+              "since_at": null,
+              "since_mono": null,
+              "unverified_from_at": null,
+              "unverified_through_at": null
+            },
+            "coverage_complete": true,
+            "diagnostic_counters": {
+              "clock_unverified": 0,
+              "expired_finish": 0,
+              "expired_identity_unverified": 0,
+              "expired_start": 0,
+              "expired_wrapper": 0,
+              "init_failed": 0,
+              "retention_expired": 0
+            },
+            "event_order": 0,
+            "uncertain_sources": []
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": []
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B19": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "measurement_refs": [
+              "prune_transition"
+            ],
+            "transition_counts": {
+              "prune": 1
+            }
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "classification": "prune"
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit",
+    "scenarios": [
+      {
+        "D": 0,
+        "K": 0,
+        "measured_transition": "prune",
+        "name": "prune_transition",
+        "status": "PASS",
+        "time_gate": "PASS",
+        "timing": {
+          "gc_disabled": {
+            "max_us": 1,
+            "n": 1,
+            "p99_us": 1,
+            "raw_ns": [
+              1000
+            ]
+          },
+          "gc_enabled": {
+            "max_us": 1,
+            "n": 1,
+            "p99_us": 1,
+            "raw_ns": [
+              1000
+            ]
+          }
+        },
+        "tracemalloc": {
+          "current_after": 100,
+          "current_before": 100,
+          "peak": 101
+        },
+        "visit_limit": 64,
+        "visits": 1
+      }
+    ]
+  },
+  "B20": {
+    "mode": "predicate_unit",
+    "scenarios": [
+      {
+        "classification_ok": true,
+        "fault_evidence": {
+          "affected_sources": [
+            "investing"
+          ],
+          "expected_coverage": {
+            "complete": false,
+            "uncertain_sources": [
+              "investing"
+            ]
+          },
+          "fault_kind": "merge_failure",
+          "fault_trace": [
+            {
+              "action": "aggregation_snapshot",
+              "classification": "CumulativeMergeFailureForTest",
+              "source": "investing",
+              "watermark_after": {
+                "close": 1,
+                "prune": null
+              }
+            },
+            {
+              "action": "retry",
+              "classification": "published",
+              "source": "investing",
+              "watermark_after": {
+                "close": 2,
+                "prune": null
+              }
+            },
+            {
+              "action": "register",
+              "classification": "registered",
+              "id": "new",
+              "source": "investing"
+            }
+          ],
+          "normal_schedule_after": 80641,
+          "normal_schedule_before": 80641,
+          "normal_schedule_counted": false,
+          "retry_admission": {
+            "attempted": 1,
+            "registered": 1,
+            "rejected": 0
+          },
+          "watermark_after": {
+            "close": 1,
+            "prune": null
+          },
+          "watermark_before": {
+            "close": 1,
+            "prune": null
+          }
+        },
+        "first_call": {
+          "classification": "CumulativeMergeFailureForTest"
+        },
+        "name": "fault_merge_failure",
+        "sample_checks": {
+          "checked": 1,
+          "failures": []
+        }
+      }
+    ],
+    "test_scale": {
+      "fault_kinds": [
+        "merge_failure"
+      ]
+    }
+  },
+  "B21": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "N_res": 0,
+            "event_order": 3,
+            "kind": "hour",
+            "pruned_since_previous_hour": 1
+          },
+          {
+            "N_res": 0,
+            "event_order": 3,
+            "identity_samples": [
+              {
+                "expected": "expired_or_untracked",
+                "id": "initial",
+                "observed": "expired_or_untracked"
+              }
+            ],
+            "kind": "tail_80641"
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "event_order": 1,
+              "id": "initial"
+            },
+            {
+              "action": "expire",
+              "event_order": 2,
+              "id": "initial"
+            },
+            {
+              "action": "prune",
+              "event_order": 3,
+              "id": "initial"
+            }
+          ]
+        },
+        "max_resident_observed": 1,
+        "resident_events": [
+          {
+            "N_res": 1,
+            "action": "register",
+            "event_order": 1,
+            "id": "initial"
+          },
+          {
+            "N_res": 1,
+            "action": "expire",
+            "event_order": 2,
+            "id": "initial"
+          },
+          {
+            "N_res": 0,
+            "action": "prune",
+            "event_order": 3,
+            "id": "initial"
+          }
+        ],
+        "resident_trace": [
+          1,
+          1,
+          0
+        ]
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "B22": {
+    "capacity_proof": {
+      "F4_ownership": {
+        "items": [
+          {
+            "bytes": 18874368,
+            "owner": "F_4",
+            "path": "fixed"
+          }
+        ],
+        "total_bytes": 18874368
+      },
+      "H_job": 1,
+      "H_res": 1,
+      "Q_cap_bytes": 5704,
+      "Q_obs_bytes": 5000,
+      "budget_q_size_steps": {
+        "at_count": 1,
+        "block_width": 257,
+        "computed_q_at_limit": 3656,
+        "detail_cap": 1,
+        "dict_steps": [
+          [
+            0,
+            64,
+            64
+          ],
+          [
+            1,
+            224,
+            184
+          ]
+        ],
+        "list_header_bytes": 56,
+        "list_slot_bytes": 8,
+        "set_steps": [
+          [
+            0,
+            216
+          ]
+        ]
+      },
+      "formula": "_budget_q(H_res)+512*H_res+1536*H_job",
+      "job_key_limit": 1
+    },
+    "churn_fixtures": [
+      {
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "classification": "registered",
+              "job_id": "j",
+              "source": "investing"
+            }
+          ]
+        },
+        "job_key_counts": {
+          "investing:j": 1
+        }
+      }
+    ],
+    "mode": "predicate_unit",
+    "test_scale": {
+      "job_key_limit": 1,
+      "max_records": 1
+    }
+  },
+  "B23": {
+    "mode": "predicate_unit",
+    "pressure_fixtures": [
+      {
+        "after": {
+          "B": 10,
+          "E": 9,
+          "G": 8
+        },
+        "before": {
+          "B": 10,
+          "E": 9,
+          "G": 8,
+          "N_res": 1
+        },
+        "control_existing_key": {
+          "classification": "registered",
+          "job_id": "j0",
+          "trace_call_index": 3
+        },
+        "first_rejection": {
+          "byte_precheck": {
+            "candidate_E": 11,
+            "would_exceed": true
+          },
+          "candidate_job_id": "j1",
+          "cause": "byte",
+          "index_audit": {
+            "absent_paths": [
+              "close",
+              "cohort",
+              "expiry",
+              "live",
+              "open",
+              "overdue",
+              "owned_id",
+              "owner",
+              "previous_job",
+              "prune",
+              "recent",
+              "seq",
+              "tomb"
+            ],
+            "after": {
+              "N_total": 1,
+              "last_seq": 1,
+              "paths": {
+                "close": false,
+                "cohort": false,
+                "expiry": false,
+                "live": false,
+                "open": false,
+                "overdue": false,
+                "owned_id": false,
+                "owner": false,
+                "previous_job": false,
+                "prune": false,
+                "recent": false,
+                "seq": false,
+                "tomb": false
+              }
+            },
+            "before": {
+              "N_total": 1,
+              "last_seq": 1,
+              "paths": {
+                "close": false,
+                "cohort": false,
+                "expiry": false,
+                "live": false,
+                "open": false,
+                "overdue": false,
+                "owned_id": false,
+                "owner": false,
+                "previous_job": false,
+                "prune": false,
+                "recent": false,
+                "seq": false,
+                "tomb": false
+              }
+            },
+            "owned_bytes": {
+              "candidate_after": 0,
+              "candidate_before": 0
+            }
+          },
+          "no_insertion": true,
+          "slot_test": {
+            "candidate_N_res": 2,
+            "would_exceed": false
+          },
+          "trace_call_index": 1
+        },
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "register",
+              "call_index": 0,
+              "classification": "registered",
+              "job_id": "j0",
+              "source": "bs"
+            },
+            {
+              "action": "register",
+              "call_index": 1,
+              "classification": "rejected",
+              "job_id": "j1",
+              "source": "bs"
+            },
+            {
+              "action": "register",
+              "call_index": 2,
+              "classification": "rejected",
+              "job_id": "j2",
+              "source": "bs"
+            },
+            {
+              "action": "register",
+              "call_index": 3,
+              "classification": "registered",
+              "job_id": "j0",
+              "source": "bs"
+            }
+          ]
+        },
+        "job_key_counts": {
+          "bs:j0": 1
+        },
+        "name": "pressure_unique_job_keys_byte_stop",
+        "post_latch": {
+          "resumed_after_release": false
+        }
+      }
+    ]
+  },
+  "C01": {
+    "churn_fixtures": [
+      {
+        "highwater_checks": {
+          "both_events": 1,
+          "checks": [
+            {
+              "N_total_after": 1,
+              "N_total_before": 0,
+              "after": {
+                "H_job": 1,
+                "H_res": 1
+              },
+              "before": {
+                "H_job": 0,
+                "H_res": 0
+              },
+              "minute_index": 0,
+              "received_at": 1,
+              "received_mono": 1,
+              "register_seq": 0
+            }
+          ],
+          "events": 1,
+          "job_events": 1,
+          "register_attempts": [
+            {
+              "after": {
+                "H_job": 1,
+                "H_res": 1,
+                "N_total": 1
+              },
+              "before": {
+                "H_job": 0,
+                "H_res": 0,
+                "N_total": 0
+              },
+              "classification": "registered",
+              "input": {
+                "minute_index": 0,
+                "received_at": 1,
+                "received_mono": 1
+              },
+              "register_seq": 0
+            }
+          ],
+          "resident_events": 1
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "C02": {
+    "capacity_proof": {
+      "checkpoints": [
+        {
+          "Q_4_bytes": 0,
+          "Q_actual_bytes": 0,
+          "checkpoint_id": "x:b",
+          "container_backings": []
+        },
+        {
+          "Q_4_bytes": 2,
+          "Q_actual_bytes": 1,
+          "checkpoint_id": "x:a",
+          "container_backings": [
+            {
+              "Q_attributed_bytes": 1,
+              "charged_limit_bytes": 2,
+              "getsizeof_bytes": 1,
+              "header_accounted_elsewhere_bytes": 0,
+              "includes_deleted_dummy": false,
+              "name": "records",
+              "object_id": 1
+            }
+          ]
+        }
+      ]
+    },
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "capacity_ref": "x:b",
+            "checkpoint_id": "x:b",
+            "kind": "highwater_before",
+            "register_seq": 0
+          },
+          {
+            "capacity_ref": "x:a",
+            "checkpoint_id": "x:a",
+            "kind": "highwater_after",
+            "register_seq": 0
+          }
+        ],
+        "highwater_checks": {
+          "backing_changes": 1,
+          "checks": [
+            {
+              "after": {
+                "B": 10,
+                "E": 3,
+                "G": 2,
+                "H_job": 1,
+                "Q_4": 2,
+                "Q_actual": 1
+              },
+              "backing_changed": true,
+              "before": {
+                "B": 10,
+                "E": 1,
+                "G": 0,
+                "H_job": 0,
+                "Q_4": 0,
+                "Q_actual": 0
+              },
+              "normalized_layout": {
+                "after": [
+                  {
+                    "includes_deleted_dummy": false,
+                    "path": "records",
+                    "q_attributed_bytes": 1,
+                    "share_group": "records",
+                    "size_bytes": 1
+                  }
+                ],
+                "before": []
+              },
+              "preserved": true,
+              "register_seq": 0
+            }
+          ],
+          "first_unverified": null,
+          "first_violation": null,
+          "preserved_pairs": 1,
+          "register_attempts": [
+            {
+              "normalized_layout": {
+                "after": [
+                  {
+                    "includes_deleted_dummy": false,
+                    "path": "records",
+                    "q_attributed_bytes": 1,
+                    "share_group": "records",
+                    "size_bytes": 1
+                  }
+                ],
+                "before": []
+              },
+              "register_seq": 0,
+              "selected": true
+            }
+          ],
+          "unverified_events": 0,
+          "violations": 0
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "C03": {
+    "capacity_proof": {
+      "checkpoints": [
+        {
+          "checkpoint_id": "x:b"
+        },
+        {
+          "checkpoint_id": "x:a"
+        }
+      ]
+    },
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "capacity_ref": "x:b",
+            "checkpoint_id": "x:b",
+            "event_order": 0,
+            "kind": "highwater_before",
+            "minute_index": 0,
+            "observation": "passive",
+            "received_at": 1,
+            "received_mono": 1,
+            "register_seq": 0
+          },
+          {
+            "capacity_ref": "x:a",
+            "checkpoint_id": "x:a",
+            "event_order": 2,
+            "kind": "highwater_after",
+            "minute_index": 0,
+            "observation": "passive",
+            "received_at": 1,
+            "received_mono": 1,
+            "register_seq": 0
+          }
+        ],
+        "fixture_provenance": {
+          "api_trace": [
+            {
+              "action": "link_round",
+              "event_order": 3
+            }
+          ],
+          "public_query_trace": [
+            {
+              "event_order": 4
+            }
+          ]
+        },
+        "highwater_checks": {
+          "register_attempts": [
+            {
+              "event_order": 1,
+              "input": {
+                "minute_index": 0,
+                "received_at": 1,
+                "received_mono": 1
+              },
+              "register_seq": 0,
+              "selected": true
+            }
+          ]
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "C04": {
+    "churn_fixtures": [
+      {
+        "highwater_checks": {
+          "register_attempts": [
+            {
+              "after": {
+                "B": 10,
+                "E": 2,
+                "G": 2,
+                "H_job": 1,
+                "H_res": 1,
+                "N_res": 1,
+                "N_total": 1
+              },
+              "before": {
+                "B": 10,
+                "E": 1,
+                "G": 1,
+                "H_job": 0,
+                "H_res": 0,
+                "N_res": 0,
+                "N_total": 0
+              },
+              "classification": "registered",
+              "input": {
+                "auxiliary": false,
+                "invocation_id": "a",
+                "job_id": "j",
+                "minute_index": 0,
+                "received_at": 1,
+                "received_mono": 1,
+                "source": "investing",
+                "started_at": 1,
+                "started_mono": 1
+              },
+              "normalized_layout": {
+                "after": [
+                  {
+                    "includes_deleted_dummy": false,
+                    "path": "records",
+                    "q_attributed_bytes": 1,
+                    "share_group": "records",
+                    "size_bytes": 1
+                  }
+                ],
+                "before": []
+              },
+              "register_seq": 0,
+              "selected": true
+            }
+          ],
+          "replay": {
+            "compared_steps": 1,
+            "comparison_digest_by_seq": [
+              {
+                "pass1_sha256": "d15a7296efcf99a0d5985c65fe74129ab8a0aeb57a4dd311645665291e81330f",
+                "pass2_sha256": "d15a7296efcf99a0d5985c65fe74129ab8a0aeb57a4dd311645665291e81330f",
+                "register_seq": 0,
+                "selected": true
+              }
+            ],
+            "mismatch": null,
+            "performed": true,
+            "stopped_after_seq": 0
+          }
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "C05": {
+    "churn_fixtures": [
+      {
+        "highwater_checks": {
+          "checks": [
+            {
+              "preserved": false,
+              "register_seq": 0
+            }
+          ],
+          "register_attempts": [
+            {
+              "after": {},
+              "before": {},
+              "classification": "registered",
+              "input": {
+                "invocation_id": "a"
+              },
+              "normalized_layout": {
+                "after": [],
+                "before": []
+              },
+              "register_seq": 0,
+              "selected": false
+            }
+          ],
+          "replay": {
+            "compared_steps": 0,
+            "comparison_digest_by_seq": [],
+            "mismatch": null,
+            "pass1_seconds": 1,
+            "pass2_seconds": 0,
+            "performed": false,
+            "stopped_after_seq": null
+          }
+        }
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "C06": {
+    "capacity_proof": {
+      "checkpoints": [
+        {
+          "B_bytes": 10,
+          "E_bytes": 4,
+          "G_bytes": 3,
+          "H_job": 1,
+          "H_res": 1,
+          "Q_4_bytes": 2,
+          "Q_actual_bytes": 1,
+          "capacity_covered": true,
+          "checkpoint_id": "x:h",
+          "container_backings": [
+            {
+              "Q_attributed_bytes": 1,
+              "charged_limit_bytes": 2,
+              "getsizeof_bytes": 1,
+              "header_accounted_elsewhere_bytes": 0,
+              "includes_deleted_dummy": false,
+              "name": "records",
+              "object_id": 1
+            }
+          ],
+          "fixture_name": "x",
+          "kind": "hour",
+          "minute_index": 60,
+          "resident_covered": true
+        }
+      ]
+    },
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "capacity_ref": "x:h",
+            "checkpoint_id": "x:h",
+            "kind": "hour",
+            "minute_index": 60
+          }
+        ],
+        "name": "x"
+      }
+    ],
+    "mode": "predicate_unit"
+  },
+  "C07": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "budget": {
+              "capacity": {
+                "charged_bytes": 2,
+                "rebuild_new_bytes": 0,
+                "rebuild_old_bytes": 0
+              }
+            },
+            "rebuild_count": 0
+          }
+        ]
+      }
+    ],
+    "mode": "predicate_unit",
+    "rebuild_events": [],
+    "scenarios": [
+      {
+        "name": "rebuild_double_backing",
+        "reason": "N/A (no rebuild in this implementation)",
+        "status": "N/A"
+      }
+    ]
+  },
+  "C08": {
+    "churn_fixtures": [
+      {
+        "checkpoints": [
+          {
+            "budget": {
+              "capacity": {
+                "rebuild_new_bytes": 3,
+                "rebuild_old_bytes": 2
+              }
+            },
+            "checkpoint_id": "rebuild:0",
+            "rebuild_count": 1
+          }
+        ]
+      }
+    ],
+    "mode": "predicate_unit",
+    "rebuild_events": [
+      {
+        "after": {
+          "B": 10,
+          "E": 4,
+          "G": 3,
+          "Q_4": 5,
+          "Q_actual": 3
+        },
+        "before": {
+          "B": 10,
+          "E": 3,
+          "G": 2,
+          "Q_4": 5,
+          "Q_actual": 2
+        },
+        "checkpoint_id": "rebuild:0",
+        "during": {
+          "B": 10,
+          "E": 6,
+          "G": 5,
+          "Q_4": 5,
+          "Q_actual": 5
+        },
+        "failure_retry": {
+          "atomic": true,
+          "retry_succeeded": true
+        },
+        "new_bytes": 3,
+        "old_bytes": 2,
+        "temporary": {
+          "current_after": 100,
+          "current_before": 100,
+          "peak": 101,
+          "peak_delta": 1
+        }
+      }
+    ]
+  },
+  "C09": {
+    "capacity_proof": {
+      "checkpoints": [
+        {
+          "Q_4_bytes": 2,
+          "Q_actual_bytes": 1,
+          "container_backings": [
+            {
+              "Q_attributed_bytes": 1,
+              "charged_limit_bytes": 2,
+              "getsizeof_bytes": 1,
+              "header_accounted_elsewhere_bytes": 0,
+              "includes_deleted_dummy": true,
+              "name": "records",
+              "object_id": 1
+            }
+          ],
+          "deleted_dummy_object_ids": [
+            1
+          ],
+          "kind": "prune",
+          "temporary_ref": "prune_transition"
+        }
+      ],
+      "unknown_ownership": []
+    },
+    "mode": "predicate_unit",
+    "scenarios": [
+      {
+        "name": "prune_transition",
+        "tracemalloc": {
+          "current_after": 100,
+          "current_before": 100,
+          "peak": 101
+        }
+      }
+    ]
+  },
+  "C10": {
+    "budget_agreement_ref": null,
+    "calibration": {
+      "observations": [
+        {
+          "call_seconds": 1,
+          "clone_seconds": 1,
+          "error_seconds": 0,
+          "kind": "churn",
+          "pass1_seconds": 1,
+          "pass2_seconds": 1,
+          "prepare_seconds": 1,
+          "selected_pairs": 1
+        }
+      ],
+      "reason": null,
+      "status": "complete"
+    },
+    "environment": {
+      "command": "python scripts/d7_ledger_measure_gate.py"
+    },
+    "eta": {
+      "assumptions": [
+        "unit"
+      ],
+      "basis": "observed",
+      "budget_seconds": 14400,
+      "decision": "within_budget",
+      "seconds": 10,
+      "uncertainty_seconds": 1
+    },
+    "mode": "predicate_unit",
+    "total_elapsed_seconds": 10
+  },
+  "_source": "행별 명세 r2 예시 + Codex 3회차 전수 보정(목록은 답에)"
+}
