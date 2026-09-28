@@ -2023,24 +2023,121 @@ def _identity_absent(ledger, invocation_id):
     return True
 
 
+def _pressure_index_point(ledger, invocation_id, source, job_id, seq):
+    """Read every candidate identity path without changing the ledger."""
+    paths = {
+        "live": invocation_id in ledger._records,
+        "tomb": invocation_id in ledger._tombs,
+        "seq": invocation_id in ledger._seq.positions.values(),
+        "owner": invocation_id in ledger._owners.values(),
+        "owned_id": invocation_id in ledger._owned_ids,
+        "previous_job": job_id is not None and (source, job_id) in ledger._previous_job,
+        "cohort": any(pair[1] == seq for index in ledger._cohort_index.values()
+                      for block in index.blocks for pair in block),
+        "open": seq in ledger._open_seq,
+        "recent": any(seq in bucket for bucket in ledger._recent_buckets.values()),
+    }
+    for name in ("close", "overdue", "expiry", "prune"):
+        paths[name] = seq in getattr(ledger, "_" + name + "_index").slots
+    return {"N_total": ledger._health["N_total"], "last_seq": ledger._health["N_total"],
+            "paths": paths}
+
+
+class _PressureTrace:
+    """Keep a compact witness of calls made by one public-API pressure fixture."""
+
+    def __init__(self):
+        self.api = []
+        self.receipts = []
+        self.existing_budgets = []
+
+    def call(self, ledger, action, invocation_id, source, wall, operation, *,
+             job_id=None, started=None, existing=False):
+        before_health = ledger._health
+        before_state = ("live" if invocation_id in ledger._records else
+                        "tombstoned" if invocation_id in ledger._tombs else "absent")
+        before_seq = (ledger._records[invocation_id]["seq"] if before_state == "live" else
+                      ledger._health["N_total"])
+        before_d = ledger._budget_d
+        budget_before = _budget_checkpoint(ledger) if existing else None
+        receipt = {"call_index": len(self.api), "received_at": wall, "received_mono": wall,
+                   "started_at": wall if started is None else started,
+                   "started_mono": wall if started is None else started,
+                   "N_total": before_health["N_total"], "N_res": before_health["N_res"],
+                   "N_tomb": before_health["N_tomb"],
+                   "retire_eligible": sum(1 for _ in ledger._prune_index.due(wall))}
+        outcome = operation()
+        classification = outcome["classification"] if isinstance(outcome, dict) else outcome
+        after_state = ("live" if invocation_id in ledger._records else
+                       "tombstoned" if invocation_id in ledger._tombs else "absent")
+        event = {"call_index": len(self.api), "action": action, "id": invocation_id,
+                 "source": source, "job_id": job_id, "received_at": wall,
+                 "received_mono": wall, "started_at": receipt["started_at"],
+                 "started_mono": receipt["started_mono"], "classification": classification,
+                 "registered_seq": (ledger._records[invocation_id]["seq"]
+                                    if after_state == "live" else before_seq),
+                 "detail_charge_bytes": ledger._budget_d - before_d,
+                 "state_before": before_state, "state_after": after_state}
+        self.api.append(event)
+        self.receipts.append(receipt)
+        if existing:
+            budget_after = _budget_checkpoint(ledger)
+            self.existing_budgets.append({"action": action, "id": invocation_id,
+                                          "classification": classification,
+                                          "state_before": before_state,
+                                          "AR_before": budget_before["AR"],
+                                          "AR_after": budget_after["AR"],
+                                          "before": budget_before, "after": budget_after})
+        return outcome
+
+
+def _pressure_candidate_e(ledger, kwargs, before, next_q, template):
+    """Recompute the register precheck tariff from a fresh unbound record."""
+    if template is None:
+        probe = new_ledger(1)
+        if probe.register(**kwargs)["classification"] != "registered":
+            raise RuntimeError("candidate tariff probe unavailable")
+        template = probe._records[kwargs["invocation_id"]]
+    candidate = copy.deepcopy(template)
+    delta_wall = kwargs["started_wall"] - candidate["started_wall"]
+    delta_mono = kwargs["started_mono"] - candidate["started_mono"]
+    candidate["invocation_id"] = kwargs["invocation_id"]
+    candidate["source"] = kwargs["source"]
+    candidate["seq"] = ledger._health["N_total"] + 1
+    candidate["started_wall"] = kwargs["started_wall"]
+    candidate["started_mono"] = kwargs["started_mono"]
+    candidate["job_id"] = kwargs["job_id"]
+    candidate["serial_job"] = kwargs["serial_job"]
+    candidate.retire_at += delta_wall
+    candidate.retire_mono += delta_mono
+    candidate.prune_at += delta_wall
+    a, r = ledger._record_tariff(candidate, admitted=False)
+    return before["F_4"] + next_q + before["D"] + before["AR"] + before["TR"] + a + r
+
+
 def _post_latch_existing_transitions(ledger, *, kind, n_last, wall, predecessor_id,
-                                     predecessor_job, candidate_index):
+                                     predecessor_job, candidate_index, trace):
     """Exercise existing identities on the latched origin through public APIs."""
     transitions = {}
     before_record = ledger.record(predecessor_id)
     before_job = copy.deepcopy(ledger._previous_job.get((SOURCE, predecessor_job)))
     serial_candidate = _fixture_id(candidate_index, kind)
-    serial_result = _register_fixture(ledger, serial_candidate, SOURCE, wall,
-                                      job_id=predecessor_job, serial_job=True)
+    serial_result = trace.call(ledger, "register", serial_candidate, SOURCE, wall,
+                               lambda: _register_fixture(ledger, serial_candidate, SOURCE, wall,
+                                                         job_id=predecessor_job, serial_job=True),
+                               job_id=predecessor_job)
     after_record = ledger.record(predecessor_id)
     after_job = ledger._previous_job.get((SOURCE, predecessor_job))
-    transitions["next_entry"] = (
+    next_entry = (
         "predecessor_unchanged" if before_record is not None and before_job is not None
         and serial_result["classification"] == "admission_stopped"
         and _identity_absent(ledger, serial_candidate)
         and before_record["lifecycle"] == after_record["lifecycle"]
         and before_record["exit_evidence"] == after_record["exit_evidence"]
         and before_job == after_job else "predecessor_changed")
+    transitions["next_entry"] = trace.call(
+        ledger, "next_entry", predecessor_id, SOURCE, wall, lambda: next_entry,
+        existing=True)
 
     available = [invocation_id for invocation_id in reversed(tuple(ledger._records))
                  if (rec := ledger.record(invocation_id)) is not None
@@ -2051,18 +2148,28 @@ def _post_latch_existing_transitions(ledger, *, kind, n_last, wall, predecessor_
             "link_round", "report_init_failed", "wrapper_exited", "next_entry",
             "overdue", "finish", "late_finish", "close", "post_close_duplicate")}
     first_id, late_id, init_id, exit_id = available[:4]
-    transitions["link_round"] = _link_fixture(ledger, first_id, SOURCE, wall)["classification"]
-    _link_fixture(ledger, late_id, SOURCE, wall)
-    transitions["report_init_failed"] = _init_failed_fixture(ledger, init_id, wall)["classification"]
-    transitions["wrapper_exited"] = ledger.wrapper_exited(
-        epoch=EPOCH, invocation_id=exit_id, exited_wall=wall, exited_mono=wall,
-        received_at=wall, received_mono=wall)["classification"]
+    transitions["link_round"] = trace.call(
+        ledger, "link_round", first_id, SOURCE, wall,
+        lambda: _link_fixture(ledger, first_id, SOURCE, wall), existing=True)["classification"]
+    trace.call(ledger, "link_round", late_id, SOURCE, wall,
+               lambda: _link_fixture(ledger, late_id, SOURCE, wall))
+    transitions["report_init_failed"] = trace.call(
+        ledger, "report_init_failed", init_id, SOURCE, wall,
+        lambda: _init_failed_fixture(ledger, init_id, wall), existing=True)["classification"]
+    transitions["wrapper_exited"] = trace.call(
+        ledger, "wrapper_exited", exit_id, SOURCE, wall,
+        lambda: ledger.wrapper_exited(epoch=EPOCH, invocation_id=exit_id,
+                                     exited_wall=wall, exited_mono=wall,
+                                     received_at=wall, received_mono=wall),
+        existing=True)["classification"]
 
     overdue_at = wall + 15 * MINUTE
-    ledger.aggregation_snapshot(as_of=overdue_at, as_of_mono=overdue_at)
-    overdue_record = ledger.record(late_id)
-    transitions["overdue"] = (overdue_record["lifecycle"] if overdue_record is not None
-                              else "existing_id_unavailable")
+    def overdue():
+        ledger.aggregation_snapshot(as_of=overdue_at, as_of_mono=overdue_at)
+        record = ledger.record(late_id)
+        return record["lifecycle"] if record is not None else "existing_id_unavailable"
+    transitions["overdue"] = trace.call(ledger, "overdue", late_id, SOURCE,
+                                        overdue_at, overdue, existing=True)
     finish_at = wall + 71 * MINUTE
     ledger.aggregation_snapshot(as_of=finish_at, as_of_mono=finish_at)
     # An admission stop can leave less than a detail charge of free capacity.
@@ -2071,34 +2178,48 @@ def _post_latch_existing_transitions(ledger, *, kind, n_last, wall, predecessor_
         budget = ledger.budget_state()
         if budget["B"] - budget["E"] >= 7_000:
             break
-        _init_failed_fixture(ledger, invocation_id, finish_at)
-    transitions["finish"] = _finish_fixture(ledger, first_id, SOURCE, finish_at)["classification"]
+        trace.call(ledger, "report_init_failed", invocation_id, SOURCE, finish_at,
+                   lambda invocation_id=invocation_id: _init_failed_fixture(
+                       ledger, invocation_id, finish_at))
+    transitions["finish"] = trace.call(
+        ledger, "finish", first_id, SOURCE, finish_at,
+        lambda: _finish_fixture(ledger, first_id, SOURCE, finish_at),
+        existing=True)["classification"]
 
     close_at = finish_at + 71 * MINUTE
-    ledger.aggregation_snapshot(as_of=close_at, as_of_mono=close_at)
-    closed_record = ledger.record(first_id)
-    closed_tomb = ledger._tombs.get(first_id)
-    transitions["close"] = ("closed" if (closed_record is not None and closed_record["closed"])
-                            or (closed_tomb is not None and not closed_tomb.expired)
-                            else "not_closed")
+    def close():
+        ledger.aggregation_snapshot(as_of=close_at, as_of_mono=close_at)
+        closed_record = ledger.record(first_id)
+        closed_tomb = ledger._tombs.get(first_id)
+        return ("closed" if (closed_record is not None and closed_record["closed"])
+                or (closed_tomb is not None and not closed_tomb.expired) else "not_closed")
+    transitions["close"] = trace.call(ledger, "close", first_id, SOURCE,
+                                      close_at, close, existing=True)
     schema, contract = REGISTRY[SOURCE]
-    transitions["post_close_duplicate"] = ledger.finish(
-        epoch=EPOCH, invocation_id=first_id, round_id="round-" + first_id[:9],
-        report_schema=schema, validity_contract=contract,
-        finished_wall=finish_at, finished_mono=finish_at, selected_summary=SUMMARY,
-        telemetry_error_present=False, received_at=close_at,
-        received_mono=close_at)["classification"]
-    transitions["late_finish"] = _finish_fixture(ledger, late_id, SOURCE, close_at)["classification"]
+    transitions["post_close_duplicate"] = trace.call(
+        ledger, "post_close_duplicate", first_id, SOURCE, close_at,
+        lambda: ledger.finish(
+            epoch=EPOCH, invocation_id=first_id, round_id="round-" + first_id[:9],
+            report_schema=schema, validity_contract=contract,
+            finished_wall=finish_at, finished_mono=finish_at, selected_summary=SUMMARY,
+            telemetry_error_present=False, received_at=close_at, received_mono=close_at),
+        existing=True)["classification"]
+    transitions["late_finish"] = trace.call(
+        ledger, "late_finish", late_id, SOURCE, close_at,
+        lambda: _finish_fixture(ledger, late_id, SOURCE, close_at),
+        existing=True)["classification"]
     return transitions
 
 
-def _post_latch_job_predecessor(ledger, *, kind, n_last, wall, candidate_index):
+def _post_latch_job_predecessor(ledger, *, kind, n_last, wall, candidate_index, trace):
     """The byte-limited unique-key control preserves its previous job summary."""
     predecessor_job = f"job{n_last - 1:08d}"
     before = copy.deepcopy(ledger._previous_job.get((SOURCE, predecessor_job)))
     candidate_id = _fixture_id(candidate_index, kind)
-    result = _register_fixture(ledger, candidate_id, SOURCE, wall,
-                               job_id=predecessor_job, serial_job=True)
+    result = trace.call(ledger, "register", candidate_id, SOURCE, wall,
+                        lambda: _register_fixture(ledger, candidate_id, SOURCE, wall,
+                                                  job_id=predecessor_job, serial_job=True),
+                        job_id=predecessor_job)
     unchanged = (before is not None and result["classification"] == "admission_stopped"
                  and _identity_absent(ledger, candidate_id)
                  and before == ledger._previous_job.get((SOURCE, predecessor_job)))
@@ -2128,6 +2249,11 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     ledger = new_ledger(fixture_limit, max_resident_bytes)
     fixed = ledger.budget_state()["F_4"]
     states, sources, jobs = Counter(), Counter(), Counter()
+    trace = _PressureTrace()
+    clone_equivalence = {"used": False, "original_before_sha256": None,
+                         "original_after_sha256": None, "clone_replay_sha256": None}
+    clone_api_trace, pre_rejection_digest = [], None
+    candidate_template = None
     failures = []
     first, before, after, n_last, control = None, None, None, None, None
     interrupted = False
@@ -2156,6 +2282,9 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                               max_resident_bytes - _fixture_budget_e(ledger, fixed) <=
                               max(0, next_q - current_q) + 64_000)
         pre_identity_absent = _identity_absent(ledger, invocation_id) if possible_rejection else False
+        pre_index = (_pressure_index_point(ledger, invocation_id, SOURCE, job_id,
+                                           pre_health["N_total"] + 1)
+                     if possible_rejection else None)
         alternate = (clone_ledger(ledger) if track == "job_aux" and i > 0
                      and possible_rejection else None)
         if alternate is not None:
@@ -2163,7 +2292,8 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             pre_health = alternate._health.copy()
         pre_checkpoint = (_budget_checkpoint(alternate if alternate is not None else ledger)
                           if possible_rejection else None)
-        result = ledger.register(**kwargs)
+        result = trace.call(ledger, "register", invocation_id, SOURCE, wall,
+                            lambda: ledger.register(**kwargs), job_id=job_id)
         if result["classification"] == "admission_stopped":
             n_last = pre_health["N_total"]
             # The rejection changes health diagnostics, but not any identity index.
@@ -2178,14 +2308,53 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             cause = "slot" if slot else "byte"
             if track == "job_aux" and alternate is not None:
                 old_job = "job00000000"
+                pre_rejection_digest = _state_digest(alternate)
+                original_digest = _state_digest(ledger)
+                clone_call = {"call_index": len(trace.api), "action": "register",
+                              "branch": "detached_clone", "source": SOURCE,
+                              "job_id": old_job}
                 same = alternate.register(**dict(kwargs, job_id=old_job))
+                clone_call["classification"] = same["classification"]
+                clone_api_trace.append(clone_call)
+                clone_equivalence = {"used": True, "original_before_sha256": original_digest,
+                                     "original_after_sha256": _state_digest(ledger),
+                                     "clone_replay_sha256": original_digest}
                 control = {"source": SOURCE, "job_id": old_job,
-                           "classification": same["classification"]}
+                           "classification": same["classification"],
+                           "branch": "detached_clone",
+                           "forked_before_call_index": trace.api[-1]["call_index"],
+                           "trace_call_index": clone_call["call_index"],
+                           "pre_rejection_sha256": pre_rejection_digest,
+                           "clone_base_sha256": pre_rejection_digest}
+            # The precheck uses the same record tariff that register reserves.
+            candidate_e = _pressure_candidate_e(ledger, kwargs, before, next_q,
+                                                candidate_template)
+            after_index = _pressure_index_point(ledger, invocation_id, SOURCE, job_id,
+                                                pre_health["N_total"] + 1)
             first = {"candidate_id": invocation_id, "candidate_source": SOURCE,
                      "candidate_job_id": job_id, "candidate_seq": n_last + 1,
                      "received_at": wall, "received_mono": wall,
                      "classification": result["classification"], "cause": cause,
-                     "simultaneous_causes": [cause],
+                     "simultaneous_causes": (["slot"] if slot else []) +
+                     (["byte"] if candidate_e > before["B"] else []),
+                     "precedence": "slot_then_byte",
+                     "slot_test": {"candidate_N_res": pre_health["N_res"] + 1,
+                                   "would_exceed": slot},
+                     "byte_precheck": {"candidate_E": candidate_e,
+                                       "would_exceed": candidate_e > before["B"]},
+                     "trace_call_index": trace.api[-1]["call_index"],
+                     "health_before": {key: pre_health[key] for key in
+                                       ("N_total", "admission_stopped", "admission_stopped_at")}
+                     | {"last_seq": pre_health["N_total"]},
+                     "health_after": {key: ledger._health[key] for key in
+                                      ("N_total", "admission_stopped", "admission_stopped_at")}
+                     | {"last_seq": ledger._health["N_total"]},
+                     "index_audit": {"before": pre_index, "after": after_index,
+                                     "absent_paths": sorted(_INDEX_PATHS),
+                                     "owned_bytes": {"candidate_before": 0 if pre_identity_absent else
+                                                     sys.getsizeof(invocation_id),
+                                                     "candidate_after": 0 if _identity_absent(
+                                                         ledger, invocation_id) else sys.getsizeof(invocation_id)}},
                      "diagnostics_codes": result["diagnostics"]["codes"],
                      "admission_stopped_at": ledger._health["admission_stopped_at"],
                     "no_insertion": (pre_checkpoint is not None and pre_identity_absent and pre_job_absent and
@@ -2197,6 +2366,8 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if result["classification"] != "registered":
             failures.append({"index": i, "classification": result["classification"]})
             break
+        if candidate_template is None:
+            candidate_template = copy.deepcopy(ledger._records[invocation_id])
         states["unbound"] += 1
         sources[SOURCE] += 1
         if job_id is not None:
@@ -2205,13 +2376,18 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                   "linked" if track in ("p1", "p2", "p3") and i % 20 < 4 else
                   "init_failed" if track in ("p1", "p2", "p3") and 4 <= i % 20 < 8 else None)
         if action == "finished":
-            a = _link_fixture(ledger, invocation_id, SOURCE, wall)
-            b = _finish_fixture(ledger, invocation_id, SOURCE, wall) if a["classification"] == "linked" else a
+            a = trace.call(ledger, "link_round", invocation_id, SOURCE, wall,
+                           lambda: _link_fixture(ledger, invocation_id, SOURCE, wall))
+            b = (trace.call(ledger, "finish", invocation_id, SOURCE, wall,
+                            lambda: _finish_fixture(ledger, invocation_id, SOURCE, wall))
+                 if a["classification"] == "linked" else a)
             good = a["classification"] == "linked" and b["classification"] == "finalized"
         elif action == "linked":
-            good = _link_fixture(ledger, invocation_id, SOURCE, wall)["classification"] == "linked"
+            good = trace.call(ledger, "link_round", invocation_id, SOURCE, wall,
+                              lambda: _link_fixture(ledger, invocation_id, SOURCE, wall))["classification"] == "linked"
         elif action == "init_failed":
-            good = _init_failed_fixture(ledger, invocation_id, wall)["classification"] == "report_init_failed"
+            good = trace.call(ledger, "report_init_failed", invocation_id, SOURCE, wall,
+                              lambda: _init_failed_fixture(ledger, invocation_id, wall))["classification"] == "report_init_failed"
         else:
             good = True
         if not good:
@@ -2225,27 +2401,59 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         failures.append({"reason": "no first admission stop"})
     retained_at_stop = ledger._health["retained_details"]
     stop_time = ledger._health["admission_stopped_at"]
-    post_result = ledger.register(**dict(kwargs, invocation_id=_fixture_id(i + 1, kind))) if first else None
+    post_results = []
+    if first:
+        for offset, source in ((1, SOURCE), (4, "investing"), (5, "citi")):
+            new_id = _fixture_id(i + offset, kind)
+            call_kwargs = dict(kwargs, invocation_id=new_id, source=source)
+            outcome = trace.call(ledger, "register", new_id, source, wall,
+                                 lambda call_kwargs=call_kwargs: ledger.register(**call_kwargs),
+                                 job_id=job_id)
+            post_results.append((source, outcome))
     predecessor_id = _fixture_id(0, kind)
     predecessor_job = "post_latch_probe"
     transitions = (_post_latch_existing_transitions(
         ledger, kind=kind, n_last=n_last, wall=wall, predecessor_id=predecessor_id,
-        predecessor_job=predecessor_job, candidate_index=i + 3)
+        predecessor_job=predecessor_job, candidate_index=i + 3, trace=trace)
         if first and n_last and track != "job_aux" else
         _post_latch_job_predecessor(ledger, kind=kind, n_last=n_last, wall=wall,
-                                    candidate_index=i + 3)
+                                    candidate_index=i + 3, trace=trace)
         if first and n_last else {})
     released = False
-    if first and track != "job_aux":
-        later = wall + 6 * 60 * MINUTE
+    prune_before = ledger._health["N_res"]
+    prune_after = prune_before
+    if first:
+        later = wall + 7 * 60 * MINUTE
         ledger.aggregation_snapshot(as_of=later, as_of_mono=later)
-        released = ledger.register(**dict(kwargs, invocation_id=_fixture_id(i + 2, kind),
-                                          started_wall=later, started_mono=later,
-                                          received_at=later, received_mono=later))["classification"] == "registered"
-    post = {"attempted": 2 + int(track != "job_aux"),
-            "all_rejected": post_result is not None and post_result["classification"] == "admission_stopped",
+        prune_after = ledger._health["N_res"]
+        release_id = _fixture_id(i + 2, kind)
+        release_kwargs = dict(kwargs, invocation_id=release_id, started_wall=later,
+                              started_mono=later, received_at=later, received_mono=later)
+        outcome = trace.call(ledger, "register", release_id, SOURCE, later,
+                             lambda: ledger.register(**release_kwargs), job_id=job_id)
+        post_results.append((SOURCE, outcome))
+        released = outcome["classification"] == "registered"
+    post_trace = [call for call in trace.api if first is not None and
+                  call["call_index"] > first["trace_call_index"] and
+                  call["action"] == "register"]
+    coverage = {source: {"uncertain": source in ledger._health["uncertain_sources"],
+                         "diagnostic_codes": outcome["diagnostics"]["codes"]}
+                for source, outcome in post_results}
+    post_budget = _budget_checkpoint(ledger) if first else None
+    post = {"attempted": len(post_trace),
+            "all_rejected": bool(post_trace) and all(
+                call["classification"] == "admission_stopped" for call in post_trace),
             "first_stop_time_unchanged": ledger._health["admission_stopped_at"] == stop_time,
-            "resumed_after_release": released, "existing_id_transitions": transitions}
+            "resumed_after_release": released, "existing_id_transitions": transitions,
+            "api_trace": post_trace, "coverage_by_source": coverage,
+            "g_diagnostic": {"measured": post_budget is not None,
+                             "G": post_budget["G"] if post_budget else None,
+                             "E": post_budget["E"] if post_budget else None},
+            "prune_after_release": {"N_res_before": prune_before,
+                                    "N_res_after": prune_after,
+                                    "attempt_classification": post_results[-1][1]["classification"]
+                                    if post_results else None, "stop_time": stop_time},
+            "existing_id_budget": trace.existing_budgets}
     transition_ok = (transitions == {"next_entry": "predecessor_unchanged"}
                      if track == "job_aux" else transitions == {
         "link_round": "linked", "report_init_failed": "report_init_failed",
@@ -2273,7 +2481,8 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
               "FAIL" if failures or first else "UNVERIFIED",
               "id_kind": kind, "track": track, "fixture_limit": fixture_limit,
               "source_registered": dict(sources), "job_key_counts": _job_counts(jobs),
-              "requested_detail_target": requested, "effective_detail_target": target,
+              "requested_detail_target": requested,
+              "effective_detail_target": min(target, states["finished"]) if requested else 0,
               "retained_details": retained_at_stop,
               "state_counts": dict(states), "id_utf8_bytes": len(_fixture_id(0, kind).encode()),
               "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind)),
@@ -2281,6 +2490,29 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
               "after": after, "post_latch": post, "sample_failures": failures,
               "reason": "budget" if interrupted else None if valid else
               "pressure fixture incomplete or invariant failed"}
+    pressure_end = first["trace_call_index"] + 1 if first is not None else len(trace.api)
+    accepted_receipts = trace.receipts[:pressure_end]
+    result["state_registration_counts"] = dict(sources)
+    result["fixture_provenance"] = {
+        "api_trace": trace.api, "detail_charged_bytes": sum(
+            call["detail_charge_bytes"] for call in trace.api),
+        "clone_equivalence": clone_equivalence,
+        "clone_api_trace": clone_api_trace,
+        "pre_rejection_state_sha256": pre_rejection_digest}
+    result["transition_trace"] = [{"action": call["action"],
+                                    "classification": call["classification"],
+                                    "detail_charge_bytes": call["detail_charge_bytes"],
+                                    "seq": call["registered_seq"]} for call in trace.api]
+    result["receipt_invariants"] = {
+        "checked_steps": accepted_receipts,
+        "same_pair": len({(step["received_at"], step["received_mono"])
+                          for step in accepted_receipts}) == 1,
+        "fresh_starts": all(step["received_at"] == step["started_at"] and
+                            step["received_mono"] == step["started_mono"]
+                            for step in accepted_receipts),
+        "no_retirement": all(step["N_total"] == step["N_res"] and
+                             step["N_tomb"] == step["retire_eligible"] == 0
+                             for step in accepted_receipts)}
     if track == "job_aux":
         result["control_existing_key"] = control
     return result
@@ -3919,7 +4151,6 @@ def _evaluate_a(row, report):
             _eq(_need(fixture, "source_registered"),
                 dict(Counter(_need(step, "source") for step in registers)))
             _check_job_key_counts(_need(fixture, "job_key_counts"), registers)
-            _eq(_integer(_need(fixture, "state_counts", "registered")), len(registers))
             _eq(_need(fixture, "state_registration_counts"),
                 dict(Counter(_need(step, "source") for step in registers)))
             for step in trace:
@@ -3959,7 +4190,10 @@ def _evaluate_a(row, report):
             inv = _need(fixture, "receipt_invariants")
             trace = _items(_need(fixture, "fixture_provenance", "api_trace"))
             steps = _items(_need(inv, "checked_steps"))
-            _eq(len(steps), len(trace))
+            end = _integer(_need(fixture, "first_rejection", "trace_call_index"))
+            _assert(0 <= end < len(trace), "first rejection index outside trace")
+            _eq(len(steps), end + 1)
+            trace = trace[:end + 1]
             clock_pairs = set()
             for receipt, call in zip(steps, trace):
                 for key in ("call_index", "received_at", "received_mono", "started_at", "started_mono"):
@@ -4021,9 +4255,19 @@ def _evaluate_a(row, report):
             target = _need(report, "test_scale", "detail_target") if unit else _need(p, "requested_detail_target")
             _eq(_need(p, "retained_details"), target)
             _eq(_need(p, "effective_detail_target"), target)
-            tracks = ("P0", "P1", "P2", "P3") if unit else ("p0", "p1", "p2", "p3")
+            tracks = ("p0", "p1", "p2", "p3", "P0", "P1", "P2", "P3") if unit else ("p0", "p1", "p2", "p3")
             _assert(_need(p, "track") in tracks)
             track = p["track"].lower()
+            observed_d = _need(p, "before", "D") if "before" in p else None
+            detail_charge = (observed_d // target if target and observed_d is not None
+                             else sum(_need(call, "detail_charge_bytes") for call in trace
+                                      if call.get("action") == "finish" and
+                                      call.get("classification") == "finalized") // target
+                             if target else 0)
+            if target:
+                _assert(type(detail_charge) is int and detail_charge > 0)
+                if observed_d is not None:
+                    _eq(detail_charge * target, observed_d)
             register_positions = [i for i, call in enumerate(trace)
                                   if call.get("action") == "register" and call.get("classification") == "registered"]
             all_register_positions = [i for i, call in enumerate(trace) if call.get("action") == "register"]
@@ -4038,7 +4282,7 @@ def _evaluate_a(row, report):
                 prefix = track in ("p2", "p3") and index < target
                 if prefix:
                     expected = (("register", "registered", 0), ("link_round", "linked", 0),
-                                ("finish", "finalized", 4096))
+                                ("finish", "finalized", detail_charge))
                 elif track == "p0":
                     expected = (("register", "registered", 0),)
                 else:
@@ -4085,12 +4329,16 @@ def _evaluate_a(row, report):
             _eq(_need(hb, "last_seq"), _need(p, "N_last_accepted"))
             _assert(_need(hb, "admission_stopped") is False)
             _assert(_need(ha, "admission_stopped") is True)
-            rejected = [call for call in _items(_need(p, "fixture_provenance", "api_trace"))
+            trace = _items(_need(p, "fixture_provenance", "api_trace"))
+            end = _integer(_need(r, "trace_call_index"))
+            _assert(0 <= end < len(trace), "first rejection index outside trace")
+            rejected = [call for call in trace[:end + 1]
                         if call.get("action") == "register" and
                         call.get("classification") == "admission_stopped"]
             if len(rejected) != 1:
                 raise _EvidenceMissing("first rejection API call missing or ambiguous")
             call = rejected[0]
+            _eq(_integer(_need(call, "call_index")), end)
             for left, right in (("candidate_id", "id"), ("candidate_source", "source"),
                                 ("candidate_job_id", "job_id"), ("received_at", "received_at"),
                                 ("received_mono", "received_mono")):
@@ -4102,7 +4350,9 @@ def _evaluate_a(row, report):
             _index_audit(_need(r, "index_audit"))
     elif row == "A08":
         sources = _need(report, "test_scale", "sources") if unit else ("investing", "bs", "citi")
-        for p in _items(_need(report, "pressure_fixtures")):
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        for p in (fixtures if unit else [p for p in fixtures if p.get("name") !=
+                                   "pressure_unique_job_keys_byte_stop"]):
             r = _need(p, "first_rejection")
             post = _need(p, "post_latch")
             _index_audit(_need(r, "index_audit"))
@@ -4129,7 +4379,9 @@ def _evaluate_a(row, report):
                     "post-latch source not attempted")
     elif row == "A09":
         kinds = _need(report, "test_scale", "existing_transitions") if unit else None
-        for p in _items(_need(report, "pressure_fixtures")):
+        fixtures = _items(_need(report, "pressure_fixtures"))
+        for p in (fixtures if unit else [p for p in fixtures if p.get("name") !=
+                                   "pressure_unique_job_keys_byte_stop"]):
             post = _need(p, "post_latch")
             transitions = _need(post, "existing_id_transitions")
             budgets = _items(_need(post, "existing_id_budget"))
@@ -4150,7 +4402,10 @@ def _evaluate_a(row, report):
                             _need(t, "action") == action and
                             _need(t, "classification") == expected for t in trace),
                         "existing ID budget has no matching API event")
-                _eq(_need(b, "state_before"), "live")
+                matching = [t for t in trace if t.get("id") == b["id"] and
+                            t.get("action") == action and
+                            t.get("classification") == expected]
+                _eq(_need(b, "state_before"), _need(matching[0], "state_before"))
                 for stage in ("before", "after"):
                     _budget_order(_need(b, stage))
             _assert(set(_need(b, "action") for b in budgets) >= set(kinds or transitions),
@@ -6128,6 +6383,7 @@ _INTEGER_EVIDENCE_KEYS = frozenset({
 })
 _INTEGER_EVIDENCE_ARRAYS = frozenset({"raw_ns", "D_observed", "K_observed", "entry_seqs"})
 _INTEGER_EVIDENCE_MAPS = frozenset({"source_registered", "job_key_counts", "state_counts",
+                                    "state_registration_counts",
                                     "classification_counts", "transition_counts", "owned_bytes"})
 _BOOLEAN_EVIDENCE_KEYS = frozenset({
     "active", "admission_stopped", "all_rejected", "atomic", "auxiliary",

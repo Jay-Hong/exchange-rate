@@ -266,6 +266,7 @@
           "simultaneous_causes": [
             "byte"
           ],
+          "trace_call_index": 0,
           "slot_test": {
             "candidate_N_res": 2,
             "would_exceed": false
@@ -275,6 +276,7 @@
           "api_trace": [
             {
               "action": "register",
+              "call_index": 0,
               "classification": "admission_stopped",
               "id": "b",
               "job_id": "j",
@@ -481,7 +483,8 @@
             {
               "action": "link_round",
               "classification": "linked",
-              "id": "a"
+              "id": "a",
+              "state_before": "live"
             }
           ]
         },

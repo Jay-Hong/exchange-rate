@@ -1083,3 +1083,44 @@ def test_b23_existing_key_is_matched_by_source_and_job_pair():
     p["control_existing_key"]["source"] = "investing"
     p["fixture_provenance"]["clone_api_trace"][0]["source"] = "investing"
     assert gate.evaluate_row("B23", doc, attachments={})["status"] == "FAIL"
+
+
+# ───────── 15. X2 A단위: 실제 압력 원본 → 행별 투영 → 판정 ─────────
+# 작은 한도로 게이트의 run_pressure_fixture 를 실제로 돌리고, 결과 원본을 predicate_unit 행 입력으로 옮겨
+# A02·A03·A05–A09·B23 이 PASS 인지 본다. 투영은 관측값을 바꾸지 않는다(구간 절단·표기·규모 표시만).
+# 투영은 Codex X2 A 보고(codex_x2_a_report.md)의 project() 에서 구간 절단·표기 변환을 뺀 것(판정기 몫).
+
+from app import d7_round_ledger as _lg  # noqa: E402
+
+_A_F4 = _lg.RoundLedger("E1", aggregation_started_at=0).budget_state()["F_4"]
+_A_KW = dict(limit=4096, max_resident_bytes=_A_F4 + 1_000_000)
+
+
+def _project_pressure(row, pressure):
+    """관측값·구간·표기를 바꾸지 않는다. predicate_unit 이 요구하는 규모 표시(test_scale)만 원본에서 읽어 붙인다.
+    A03·A06 의 '첫 거절까지' 범위와 track 표기(p0 등)는 판정기가 스스로 다뤄야 한다(full 보고서엔 투영이 없다)."""
+    fixture = copy.deepcopy(pressure)
+    scale = {}
+    if row == "A05":
+        scale["detail_target"] = fixture["effective_detail_target"]
+    if row == "A08":
+        scale["sources"] = list(fixture["post_latch"]["coverage_by_source"])
+    if row == "A09":
+        scale["existing_transitions"] = list(fixture["post_latch"]["existing_id_transitions"])
+    return {"mode": "predicate_unit", "pressure_fixtures": [fixture],
+            "limits": {"max_records": fixture["fixture_limit"]}, "test_scale": scale}
+
+
+_A_CASES = [
+    ("pressure_p0_short_ascii", ("A02", "A03", "A06", "A07", "A08", "A09")),
+    ("pressure_p2_short_ascii", ("A05",)),
+    ("pressure_unique_job_keys_byte_stop", ("B23",)),
+]
+
+
+@pytest.mark.parametrize("name,rows", _A_CASES, ids=[c[0] for c in _A_CASES])
+def test_real_pressure_fixture_projects_to_pass(name, rows):
+    pressure = gate.run_pressure_fixture(name, **_A_KW)
+    for row in rows:
+        result = gate.evaluate_row(row, _project_pressure(row, pressure), attachments={})
+        assert result["status"] == "PASS", (name, row, result)

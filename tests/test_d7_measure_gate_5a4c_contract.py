@@ -146,9 +146,10 @@ def test_selected_pressure_run_is_full_small_and_never_accepts():
 # ───────── C′1 압력: 원인·무삽입·latch ─────────
 
 def _check_pressure_shape(p):
-    assert set(p) == PRESSURE_KEYS
-    assert set(p["first_rejection"]) == FIRST_REJECTION_KEYS
-    assert set(p["post_latch"]) == POST_LATCH_KEYS
+    # X2 A단위가 판정기용 원자료 필드를 더한다 — 기존 필드의 유실만 막고 추가는 허용한다.
+    assert set(p) >= PRESSURE_KEYS
+    assert set(p["first_rejection"]) >= FIRST_REJECTION_KEYS
+    assert set(p["post_latch"]) >= POST_LATCH_KEYS
     for key in ("before", "after"):
         assert set(p[key]) == CHECKPOINT_KEYS, key
         assert set(p[key]["capacity"]) == {"charged_bytes", "rebuild_old_bytes", "rebuild_new_bytes"}
@@ -195,7 +196,7 @@ def test_unique_job_keys_stop_by_bytes_not_slots():
     keys = {(k["source"], k["job_id"]) for k in p["job_key_counts"]}
     assert len(keys) > 12 and all(k["registrations"] >= 1 for k in p["job_key_counts"])    # 고정 12-key 가정 위반 입력
     assert (fr["candidate_source"], fr["candidate_job_id"]) not in keys                      # 거절 원인은 새 key 요금
-    assert set(p) == PRESSURE_KEYS | {"control_existing_key"}
+    assert set(p) >= PRESSURE_KEYS | {"control_existing_key"}
     ctl = p["control_existing_key"]                                                          # 같은 상태 재현본의 기존 key 후보
     assert ctl["classification"] == "registered" and (ctl["source"], ctl["job_id"]) in keys
     assert ctl["source"] == fr["candidate_source"]
