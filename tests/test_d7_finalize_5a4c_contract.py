@@ -115,7 +115,7 @@ MUTATIONS = {
     "B11": (("del", CH0 + ["checkpoints", 1, "identity_index_audit"]),
             ("set", CH0 + ["checkpoints", 1, "prune_witness", "pruned_count"], 2)),
     "B12": (("del", CH0 + ["checkpoints", 0, "recent_expected_counts"]),
-            ("set", CH0 + ["checkpoints", 1, "recent_rows", "investing", "registered"], 1)),
+            ("set", CH0 + ["checkpoints", 1, "recent_cohort_counts", "investing", "registered"], 1)),  # X2 K11: recent_rows 는 유효성 배열
     "B13": (("del", CH0 + ["checkpoints", 0, "budget", "unknown_types"]),
             ("set", CH0 + ["checkpoints", 0, "budget", "AR"], 3)),
     "B14": (("del", CH0 + ["checkpoints", 1, "prune_witness"]),
@@ -1046,3 +1046,40 @@ def test_b22_full_report_environment_lock(field, value):
         doc["environment"][field] = value
     result = gate.evaluate_row("B22", doc, attachments={})
     assert result["status"] == "UNVERIFIED" and ("CPython" in result["reason"] or field in result["reason"])
+
+
+
+# ───────── 14. X2 0단위 계약 정합(게이트 산출 형식 ↔ 판정기) ─────────
+# conflicts_K.json 은 Codex 충돌 표(codex_x2_u0_conflicts.md)의 (b)·(c) 12건마다 PASS 입력과 FAIL/U 입력을
+# 담는다. 형식은 clauses 와 같아 §11 적용기로 돌린다. 명세 정정 3건(K03·K11·K14)은
+# design/.../codex_5a4c_row_predicates_r2_amend1.md.
+
+CONFLICTS = json.loads((ROOT / "tests" / "fixtures" / "d7_5a4c" / "conflicts_K.json").read_text(encoding="utf-8"))
+
+
+def test_conflict_cases_cover_the_twelve_contract_fixes():
+    ids = {c["clause"].split(".")[0] for c in CONFLICTS}
+    assert ids == {"K01", "K02", "K03", "K04", "K05", "K06", "K08", "K10", "K11", "K12", "K13", "K14"}
+    assert len(CONFLICTS) == 24
+    for k in ids:
+        expects = {c["expect"] for c in CONFLICTS if c["clause"].split(".")[0] == k}
+        assert "PASS" in expects and expects & {"FAIL", "UNVERIFIED"}, k
+
+
+@pytest.mark.parametrize("case", CONFLICTS, ids=lambda c: f"{c['row']}-{c['clause']}")
+def test_conflict_contract_case(case, monkeypatch, tmp_path):
+    if case["expect"] == "PASS" and not case["ops"]:
+        assert gate.evaluate_row(case["row"], _ex(case["row"]), attachments={})["status"] == "PASS"
+        return
+    assert _clause_result(case, monkeypatch, tmp_path) == case["expect"]
+
+
+def test_b23_existing_key_is_matched_by_source_and_job_pair():
+    """K14 보강(Codex X2 0단위 커밋 검토 반례): 기존 key 는 (source, job_id) 쌍이다. 등록된 key 는 (bs, j0) 인데
+    clone 대조와 clone trace 의 source 를 함께 investing 으로 바꾸면 존재하지 않는 (investing, j0) 이므로 PASS 가 아니다."""
+    doc = _ex("B23")
+    p = doc["pressure_fixtures"][0]
+    assert p["job_key_counts"] == [{"job_id": "j0", "registrations": 1, "source": "bs"}]
+    p["control_existing_key"]["source"] = "investing"
+    p["fixture_provenance"]["clone_api_trace"][0]["source"] = "investing"
+    assert gate.evaluate_row("B23", doc, attachments={})["status"] == "FAIL"

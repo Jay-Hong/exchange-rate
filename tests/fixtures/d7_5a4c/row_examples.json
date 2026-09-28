@@ -49,9 +49,13 @@
         "id_getsizeof_bytes": 42,
         "id_kind": "short_ascii",
         "id_utf8_bytes": 1,
-        "job_key_counts": {
-          "bs:j": 1
-        },
+        "job_key_counts": [
+          {
+            "job_id": "j",
+            "registrations": 1,
+            "source": "bs"
+          }
+        ],
         "name": "p",
         "retained_details": 0,
         "source_registered": {
@@ -718,18 +722,24 @@
   "B01": {
     "churn_fixtures": [
       {
-        "N_total_at_tail": 2,
+        "N_total_at_tail": 3,
+        "auxiliary_registered": 1,
         "checkpoints": [
           {
             "admission_counts": {
-              "registered": 1,
+              "registered": 2,
               "rejected": 0,
-              "scheduled": 1
+              "scheduled": 2
             },
             "kind": "tail_80640",
             "received_at": 0,
             "received_mono": 0,
             "source_counts": {
+              "bs": {
+                "registered": 1,
+                "rejected": 0,
+                "scheduled": 1
+              },
               "investing": {
                 "registered": 1,
                 "rejected": 0,
@@ -739,14 +749,19 @@
           },
           {
             "admission_counts": {
-              "registered": 2,
+              "registered": 3,
               "rejected": 0,
-              "scheduled": 2
+              "scheduled": 3
             },
             "kind": "tail_80641",
             "received_at": 7500000,
             "received_mono": 7500000,
             "source_counts": {
+              "bs": {
+                "registered": 1,
+                "rejected": 0,
+                "scheduled": 1
+              },
               "investing": {
                 "registered": 2,
                 "rejected": 0,
@@ -756,26 +771,36 @@
           }
         ],
         "classification_counts": {
-          "registered": 2
+          "registered": 3
         },
         "fixture_provenance": {
           "api_trace": [
             {
               "action": "register",
+              "auxiliary": true,
               "call_index": 0,
               "classification": "registered",
               "received_at": 0,
               "received_mono": 0,
               "registered_seq": 1,
-              "source": "investing"
+              "source": "bs"
             },
             {
               "action": "register",
               "call_index": 1,
               "classification": "registered",
+              "received_at": 0,
+              "received_mono": 0,
+              "registered_seq": 2,
+              "source": "investing"
+            },
+            {
+              "action": "register",
+              "call_index": 2,
+              "classification": "registered",
               "received_at": 7500000,
               "received_mono": 7500000,
-              "registered_seq": 2,
+              "registered_seq": 3,
               "source": "investing"
             }
           ]
@@ -784,6 +809,7 @@
         "scheduled_registered": 2,
         "scheduled_target": 2,
         "source_registered": {
+          "bs": 1,
           "investing": 2
         },
         "stride_minutes": 1,
@@ -823,7 +849,6 @@
           }
         ],
         "classification_counts": {
-          "finalized": 1,
           "registered": 2
         },
         "fixture_provenance": {
@@ -851,13 +876,18 @@
               "id": "b",
               "registered_seq": 2,
               "source": "investing"
+            },
+            {
+              "action": "init_failed",
+              "classification": "report_init_failed",
+              "registered_seq": 2
             }
           ]
         },
         "id_getsizeof_bytes": 42,
         "id_kind": "short_ascii",
         "id_utf8_bytes": 1,
-        "name": "churn_most_finished_short_ascii",
+        "name": "churn_init_failed_most_finished_short_ascii",
         "state_cycle": [
           {
             "action": "finish",
@@ -870,13 +900,13 @@
             "source": "investing"
           }
         ],
-        "state_track": "most_finished"
+        "state_track": "most_finished_init_failed"
       }
     ],
     "mode": "predicate_unit",
     "test_scale": {
       "churn_names": [
-        "churn_most_finished_short_ascii"
+        "churn_init_failed_most_finished_short_ascii"
       ],
       "cycle_length": 2,
       "finished": 1,
@@ -1365,17 +1395,21 @@
             "N_res": 1,
             "N_total": 1,
             "kind": "hour",
-            "minute_index": 60,
+            "minute_index": 59,
             "other_recorded_resident_removals": 0,
-            "pruned_since_previous_hour": 0
+            "pruned_since_previous_hour": 0,
+            "received_at": 3600000000,
+            "received_mono": 3600000000
           },
           {
             "N_res": 0,
             "N_total": 1,
             "kind": "hour",
-            "minute_index": 120,
+            "minute_index": 119,
             "other_recorded_resident_removals": 0,
-            "pruned_since_previous_hour": 1
+            "pruned_since_previous_hour": 1,
+            "received_at": 7200000000,
+            "received_mono": 7200000000
           }
         ],
         "fixture_provenance": {
@@ -1383,6 +1417,8 @@
             {
               "action": "register",
               "id": "a",
+              "received_at": 0,
+              "received_mono": 0,
               "registered_seq": 1,
               "source": "investing"
             }
@@ -1492,6 +1528,17 @@
             "kind": "probe_recent_before",
             "received_at": 9,
             "received_mono": 9,
+            "recent_cohort_counts": {
+              "investing": {
+                "connection": {
+                  "started": 1
+                },
+                "lifecycle": {
+                  "finalized": 1
+                },
+                "registered": 1
+              }
+            },
             "recent_expected_counts": {
               "investing": {
                 "at": {
@@ -1510,17 +1557,21 @@
                 }
               }
             },
-            "recent_rows": {
-              "investing": {
-                "connection": {
-                  "started": 1
+            "recent_rows": [
+              {
+                "collection": {
+                  "M": 0,
+                  "N": 0,
+                  "U": 0,
+                  "V": 1
                 },
-                "lifecycle": {
-                  "finalized": 1
-                },
-                "registered": 1
+                "pair": "USD/KRW",
+                "source": "investing",
+                "writing": {
+                  "V": 1
+                }
               }
-            }
+            ]
           },
           {
             "identity_samples": [
@@ -1533,6 +1584,13 @@
             "kind": "probe_recent_at",
             "received_at": 10,
             "received_mono": 10,
+            "recent_cohort_counts": {
+              "investing": {
+                "connection": {},
+                "lifecycle": {},
+                "registered": 0
+              }
+            },
             "recent_expected_counts": {
               "investing": {
                 "at": {
@@ -1551,13 +1609,21 @@
                 }
               }
             },
-            "recent_rows": {
-              "investing": {
-                "connection": {},
-                "lifecycle": {},
-                "registered": 0
+            "recent_rows": [
+              {
+                "collection": {
+                  "M": 0,
+                  "N": 0,
+                  "U": 0,
+                  "V": 0
+                },
+                "pair": "USD/KRW",
+                "source": "investing",
+                "writing": {
+                  "V": 0
+                }
               }
-            }
+            ]
           }
         ],
         "fixture_provenance": {
@@ -1800,10 +1866,10 @@
                   "registered": 1
                 },
                 "public_checkpoint_id": "x:q",
-                "range": {
-                  "end": 10,
-                  "start": 1
-                },
+                "range": [
+                  1,
+                  10
+                ],
                 "source": "investing"
               }
             ]
@@ -1819,7 +1885,10 @@
                   "cohort_expired"
                 ]
               },
-              "start": 0
+              "range": [
+                0,
+                1
+              ]
             },
             "received_at": 10,
             "received_mono": 10,
@@ -1838,10 +1907,10 @@
                   "connection": true,
                   "lifecycle": true
                 },
-                "range": {
-                  "end": 10,
-                  "start": 1
-                }
+                "range": [
+                  1,
+                  10
+                ]
               }
             }
           }
@@ -2237,9 +2306,13 @@
             }
           ]
         },
-        "job_key_counts": {
-          "investing:j": 1
-        }
+        "job_key_counts": [
+          {
+            "job_id": "j",
+            "registrations": 1,
+            "source": "investing"
+          }
+        ]
       }
     ],
     "mode": "predicate_unit",
@@ -2264,8 +2337,13 @@
           "N_res": 1
         },
         "control_existing_key": {
+          "branch": "detached_clone",
           "classification": "registered",
+          "clone_base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "forked_before_call_index": 1,
           "job_id": "j0",
+          "pre_rejection_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "source": "bs",
           "trace_call_index": 3
         },
         "first_rejection": {
@@ -2353,29 +2431,37 @@
             {
               "action": "register",
               "call_index": 1,
-              "classification": "rejected",
+              "classification": "admission_stopped",
               "job_id": "j1",
               "source": "bs"
             },
             {
               "action": "register",
               "call_index": 2,
-              "classification": "rejected",
+              "classification": "admission_stopped",
               "job_id": "j2",
               "source": "bs"
-            },
+            }
+          ],
+          "clone_api_trace": [
             {
               "action": "register",
+              "branch": "detached_clone",
               "call_index": 3,
               "classification": "registered",
               "job_id": "j0",
               "source": "bs"
             }
-          ]
+          ],
+          "pre_rejection_state_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         },
-        "job_key_counts": {
-          "bs:j0": 1
-        },
+        "job_key_counts": [
+          {
+            "job_id": "j0",
+            "registrations": 1,
+            "source": "bs"
+          }
+        ],
         "name": "pressure_unique_job_keys_byte_stop",
         "post_latch": {
           "resumed_after_release": false
@@ -2924,5 +3010,5 @@
     "mode": "predicate_unit",
     "total_elapsed_seconds": 10
   },
-  "_source": "행별 명세 r2 예시 + Codex 3회차 전수 보정(목록은 답에)"
+  "_source": "행별 명세 r2 예시 + Codex 3회차 전수 보정(목록은 답에) + X2 0단위 형식 정합"
 }

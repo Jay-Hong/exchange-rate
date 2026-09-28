@@ -1,0 +1,3557 @@
+[
+ {
+  "base": "example",
+  "clause": "K01",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "a",
+         "job_id": "j",
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 1,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "b",
+         "job_id": "j",
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 2,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        }
+       ],
+       "clone_equivalence": {
+        "clone_replay_sha256": null,
+        "original_after_sha256": null,
+        "original_before_sha256": null,
+        "used": false
+       },
+       "detail_charged_bytes": 0
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "job_key_counts": [
+       {
+        "job_id": "j",
+        "registrations": 2,
+        "source": "bs"
+       }
+      ],
+      "name": "p",
+      "retained_details": 0,
+      "source_registered": {
+       "bs": 2
+      },
+      "state_counts": {
+       "registered": 2
+      },
+      "state_registration_counts": {
+       "bs": 2
+      },
+      "track": "P0"
+     }
+    ]
+   ]
+  ],
+  "row": "A02",
+  "why": "동일 길이 두 ID의 대표 크기 PASS; 한 ID 길이 불일치 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K01",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "a",
+         "job_id": "j",
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 1,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "bb",
+         "job_id": "j",
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 2,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        }
+       ],
+       "clone_equivalence": {
+        "clone_replay_sha256": null,
+        "original_after_sha256": null,
+        "original_before_sha256": null,
+        "used": false
+       },
+       "detail_charged_bytes": 0
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "job_key_counts": [
+       {
+        "job_id": "j",
+        "registrations": 2,
+        "source": "bs"
+       }
+      ],
+      "name": "p",
+      "retained_details": 0,
+      "source_registered": {
+       "bs": 2
+      },
+      "state_counts": {
+       "registered": 2
+      },
+      "state_registration_counts": {
+       "bs": 2
+      },
+      "track": "P0"
+     }
+    ]
+   ]
+  ],
+  "row": "A02",
+  "why": "동일 길이 두 ID의 대표 크기 PASS; 한 ID 길이 불일치 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K02",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "classification": "registered",
+         "job_id": "j",
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "classification": "registered",
+         "job_id": "k",
+         "source": "investing"
+        }
+       ]
+      },
+      "job_key_counts": [
+       {
+        "job_id": "j",
+        "registrations": 1,
+        "source": "investing"
+       },
+       {
+        "job_id": "k",
+        "registrations": 1,
+        "source": "investing"
+       }
+      ]
+     }
+    ]
+   ]
+  ],
+  "row": "B22",
+  "why": "두 job key 목록과 등록 trace 일치 PASS; 중복 key FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K02",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "classification": "registered",
+         "job_id": "j",
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "classification": "registered",
+         "job_id": "k",
+         "source": "investing"
+        }
+       ]
+      },
+      "job_key_counts": [
+       {
+        "job_id": "j",
+        "registrations": 1,
+        "source": "investing"
+       },
+       {
+        "job_id": "k",
+        "registrations": 1,
+        "source": "investing"
+       },
+       {
+        "job_id": "j",
+        "registrations": 1,
+        "source": "investing"
+       }
+      ]
+     }
+    ]
+   ]
+  ],
+  "row": "B22",
+  "why": "두 job key 목록과 등록 trace 일치 PASS; 중복 key FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K03",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "a",
+         "job_id": "j",
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 1,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "b",
+         "job_id": null,
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 2,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        }
+       ],
+       "clone_equivalence": {
+        "clone_replay_sha256": null,
+        "original_after_sha256": null,
+        "original_before_sha256": null,
+        "used": false
+       },
+       "detail_charged_bytes": 0
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "job_key_counts": [
+       {
+        "job_id": "j",
+        "registrations": 1,
+        "source": "bs"
+       }
+      ],
+      "name": "p",
+      "retained_details": 0,
+      "source_registered": {
+       "bs": 2
+      },
+      "state_counts": {
+       "registered": 2
+      },
+      "state_registration_counts": {
+       "bs": 2
+      },
+      "track": "P0"
+     }
+    ]
+   ]
+  ],
+  "row": "A02",
+  "why": "job_id 없는 등록은 source/state에만 계수; 실제 job 누락 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K03",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "a",
+         "job_id": "j",
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 1,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "registered",
+         "detail_charge_bytes": 0,
+         "id": "b",
+         "job_id": null,
+         "received_at": 10,
+         "received_mono": 10,
+         "registered_seq": 2,
+         "source": "bs",
+         "started_at": 10,
+         "started_mono": 10,
+         "state_after": "live",
+         "state_before": "absent"
+        }
+       ],
+       "clone_equivalence": {
+        "clone_replay_sha256": null,
+        "original_after_sha256": null,
+        "original_before_sha256": null,
+        "used": false
+       },
+       "detail_charged_bytes": 0
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "job_key_counts": [],
+      "name": "p",
+      "retained_details": 0,
+      "source_registered": {
+       "bs": 2
+      },
+      "state_counts": {
+       "registered": 2
+      },
+      "state_registration_counts": {
+       "bs": 2
+      },
+      "track": "P0"
+     }
+    ]
+   ]
+  ],
+  "row": "A02",
+  "why": "job_id 없는 등록은 source/state에만 계수; 실제 job 누락 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K04",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "epoch_sources": [
+         {
+          "connection_counts": {
+           "started": 1,
+           "unbound": 1
+          },
+          "frozen_invocations": 0,
+          "lifecycle_counts": {
+           "awaiting_report": 1,
+           "finalized": 1
+          },
+          "live_invocations": 2,
+          "registered_invocations": 2,
+          "source": "investing"
+         }
+        ]
+       }
+      ],
+      "classification_counts": {
+       "finalized": 1,
+       "registered": 2
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "a",
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 1
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 1
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "b",
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 2
+        }
+       ]
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "name": "churn_init_failed_most_finished_unicode128",
+      "state_cycle": [
+       {
+        "action": "finish",
+        "position": 0,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 1,
+        "source": "investing"
+       }
+      ],
+      "state_track": "most_finished_init_failed"
+     }
+    ]
+   ],
+   [
+    "set",
+    [
+     "test_scale"
+    ],
+    {
+     "churn_names": [
+      "churn_init_failed_most_finished_unicode128"
+     ],
+     "cycle_length": 2,
+     "finished": 1,
+     "unbound": 1
+    }
+   ]
+  ],
+  "row": "B02",
+  "why": "첫 unbound API 분류 report_init_failed PASS; 다른 분류 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K04",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "epoch_sources": [
+         {
+          "connection_counts": {
+           "started": 1,
+           "unbound": 1
+          },
+          "frozen_invocations": 0,
+          "lifecycle_counts": {
+           "awaiting_report": 1,
+           "finalized": 1
+          },
+          "live_invocations": 2,
+          "registered_invocations": 2,
+          "source": "investing"
+         }
+        ]
+       }
+      ],
+      "classification_counts": {
+       "finalized": 1,
+       "registered": 2
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "a",
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 1
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 1
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "b",
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "init_failed",
+         "registered_seq": 2
+        }
+       ]
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "name": "churn_init_failed_most_finished_unicode128",
+      "state_cycle": [
+       {
+        "action": "finish",
+        "position": 0,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 1,
+        "source": "investing"
+       }
+      ],
+      "state_track": "most_finished_init_failed"
+     }
+    ]
+   ],
+   [
+    "set",
+    [
+     "test_scale"
+    ],
+    {
+     "churn_names": [
+      "churn_init_failed_most_finished_unicode128"
+     ],
+     "cycle_length": 2,
+     "finished": 1,
+     "unbound": 1
+    }
+   ]
+  ],
+  "row": "B02",
+  "why": "첫 unbound API 분류 report_init_failed PASS; 다른 분류 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K05",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "epoch_sources": [
+         {
+          "connection_counts": {
+           "started": 1,
+           "unbound": 1
+          },
+          "frozen_invocations": 0,
+          "lifecycle_counts": {
+           "awaiting_report": 1,
+           "finalized": 1
+          },
+          "live_invocations": 2,
+          "registered_invocations": 2,
+          "source": "investing"
+         }
+        ]
+       }
+      ],
+      "classification_counts": {
+       "finalized": 1,
+       "registered": 4
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "a",
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 1
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 1
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "b",
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 2
+        },
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "c",
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 3
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 3
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "d",
+         "registered_seq": 4,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 4
+        }
+       ]
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "name": "churn_init_failed_most_finished_unicode128",
+      "state_cycle": [
+       {
+        "action": "finish",
+        "position": 0,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 1,
+        "source": "investing"
+       }
+      ],
+      "state_track": "most_finished_init_failed"
+     }
+    ]
+   ],
+   [
+    "set",
+    [
+     "test_scale"
+    ],
+    {
+     "churn_names": [
+      "churn_init_failed_most_finished_unicode128"
+     ],
+     "cycle_length": 2,
+     "cycles": 2,
+     "finished": 1,
+     "unbound": 1
+    }
+   ]
+  ],
+  "row": "B02",
+  "why": "두 주기 첫 unbound에 각 1회 PASS; 한 주기 중복 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K05",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "epoch_sources": [
+         {
+          "connection_counts": {
+           "started": 1,
+           "unbound": 1
+          },
+          "frozen_invocations": 0,
+          "lifecycle_counts": {
+           "awaiting_report": 1,
+           "finalized": 1
+          },
+          "live_invocations": 2,
+          "registered_invocations": 2,
+          "source": "investing"
+         }
+        ]
+       }
+      ],
+      "classification_counts": {
+       "finalized": 1,
+       "registered": 4
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "a",
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 1
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 1
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "b",
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 2
+        },
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "c",
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 3
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 3
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "d",
+         "registered_seq": 4,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 4
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 4
+        }
+       ]
+      },
+      "id_getsizeof_bytes": 42,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 1,
+      "name": "churn_init_failed_most_finished_unicode128",
+      "state_cycle": [
+       {
+        "action": "finish",
+        "position": 0,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 1,
+        "source": "investing"
+       }
+      ],
+      "state_track": "most_finished_init_failed"
+     }
+    ]
+   ],
+   [
+    "set",
+    [
+     "test_scale"
+    ],
+    {
+     "churn_names": [
+      "churn_init_failed_most_finished_unicode128"
+     ],
+     "cycle_length": 2,
+     "cycles": 2,
+     "finished": 1,
+     "unbound": 1
+    }
+   ]
+  ],
+  "row": "B02",
+  "why": "두 주기 첫 unbound에 각 1회 PASS; 한 주기 중복 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K06",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "epoch_sources": [
+         {
+          "connection_counts": {
+           "started": 1,
+           "unbound": 1
+          },
+          "frozen_invocations": 0,
+          "lifecycle_counts": {
+           "awaiting_report": 1,
+           "finalized": 1
+          },
+          "live_invocations": 2,
+          "registered_invocations": 2,
+          "source": "investing"
+         }
+        ]
+       }
+      ],
+      "classification_counts": {
+       "registered": 20
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "00",
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 1
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 1
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "01",
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 2
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 2
+        },
+        {
+         "action": "register",
+         "cycle_position": 2,
+         "id": "02",
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 3
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 3
+        },
+        {
+         "action": "register",
+         "cycle_position": 3,
+         "id": "03",
+         "registered_seq": 4,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 4
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 4
+        },
+        {
+         "action": "register",
+         "cycle_position": 4,
+         "id": "04",
+         "registered_seq": 5,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 5
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 5
+        },
+        {
+         "action": "register",
+         "cycle_position": 5,
+         "id": "05",
+         "registered_seq": 6,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 6
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 6
+        },
+        {
+         "action": "register",
+         "cycle_position": 6,
+         "id": "06",
+         "registered_seq": 7,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 7
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 7
+        },
+        {
+         "action": "register",
+         "cycle_position": 7,
+         "id": "07",
+         "registered_seq": 8,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 8
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 8
+        },
+        {
+         "action": "register",
+         "cycle_position": 8,
+         "id": "08",
+         "registered_seq": 9,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 9
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 9
+        },
+        {
+         "action": "register",
+         "cycle_position": 9,
+         "id": "09",
+         "registered_seq": 10,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 10
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 10
+        },
+        {
+         "action": "register",
+         "cycle_position": 10,
+         "id": "10",
+         "registered_seq": 11,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 11
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 11
+        },
+        {
+         "action": "register",
+         "cycle_position": 11,
+         "id": "11",
+         "registered_seq": 12,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 12
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 12
+        },
+        {
+         "action": "register",
+         "cycle_position": 12,
+         "id": "12",
+         "registered_seq": 13,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 13
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 13
+        },
+        {
+         "action": "register",
+         "cycle_position": 13,
+         "id": "13",
+         "registered_seq": 14,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 14
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 14
+        },
+        {
+         "action": "register",
+         "cycle_position": 14,
+         "id": "14",
+         "registered_seq": 15,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 15
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 15
+        },
+        {
+         "action": "register",
+         "cycle_position": 15,
+         "id": "15",
+         "registered_seq": 16,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 16
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 16
+        },
+        {
+         "action": "register",
+         "cycle_position": 16,
+         "id": "16",
+         "registered_seq": 17,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 17
+        },
+        {
+         "action": "register",
+         "cycle_position": 17,
+         "id": "17",
+         "registered_seq": 18,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 18
+        },
+        {
+         "action": "register",
+         "cycle_position": 18,
+         "id": "18",
+         "registered_seq": 19,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 19
+        },
+        {
+         "action": "register",
+         "cycle_position": 19,
+         "id": "19",
+         "registered_seq": 20,
+         "source": "investing"
+        }
+       ]
+      },
+      "id_getsizeof_bytes": 43,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 2,
+      "name": "churn_init_failed_most_finished_short_ascii",
+      "state_cycle": [
+       {
+        "action": "finish",
+        "position": 0,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 1,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 2,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 3,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 4,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 5,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 6,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 7,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 8,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 9,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 10,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 11,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 12,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 13,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 14,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 15,
+        "source": "investing"
+       },
+       {
+        "action": "link",
+        "position": 16,
+        "source": "investing"
+       },
+       {
+        "action": "link",
+        "position": 17,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 18,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 19,
+        "source": "investing"
+       }
+      ],
+      "state_track": "most_finished_init_failed"
+     }
+    ]
+   ],
+   [
+    "set",
+    [
+     "test_scale"
+    ],
+    {
+     "churn_names": [
+      "churn_init_failed_most_finished_short_ascii"
+     ],
+     "cycle_length": 20,
+     "finished": 16,
+     "unbound": 2
+    }
+   ]
+  ],
+  "row": "B02",
+  "why": "init 변형의 16/2/2 PASS; 분포 15/2/3 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K06",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "epoch_sources": [
+         {
+          "connection_counts": {
+           "started": 1,
+           "unbound": 1
+          },
+          "frozen_invocations": 0,
+          "lifecycle_counts": {
+           "awaiting_report": 1,
+           "finalized": 1
+          },
+          "live_invocations": 2,
+          "registered_invocations": 2,
+          "source": "investing"
+         }
+        ]
+       }
+      ],
+      "classification_counts": {
+       "registered": 20
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "cycle_position": 0,
+         "id": "00",
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 1
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 1
+        },
+        {
+         "action": "register",
+         "cycle_position": 1,
+         "id": "01",
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 2
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 2
+        },
+        {
+         "action": "register",
+         "cycle_position": 2,
+         "id": "02",
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 3
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 3
+        },
+        {
+         "action": "register",
+         "cycle_position": 3,
+         "id": "03",
+         "registered_seq": 4,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 4
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 4
+        },
+        {
+         "action": "register",
+         "cycle_position": 4,
+         "id": "04",
+         "registered_seq": 5,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 5
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 5
+        },
+        {
+         "action": "register",
+         "cycle_position": 5,
+         "id": "05",
+         "registered_seq": 6,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 6
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 6
+        },
+        {
+         "action": "register",
+         "cycle_position": 6,
+         "id": "06",
+         "registered_seq": 7,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 7
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 7
+        },
+        {
+         "action": "register",
+         "cycle_position": 7,
+         "id": "07",
+         "registered_seq": 8,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 8
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 8
+        },
+        {
+         "action": "register",
+         "cycle_position": 8,
+         "id": "08",
+         "registered_seq": 9,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 9
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 9
+        },
+        {
+         "action": "register",
+         "cycle_position": 9,
+         "id": "09",
+         "registered_seq": 10,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 10
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 10
+        },
+        {
+         "action": "register",
+         "cycle_position": 10,
+         "id": "10",
+         "registered_seq": 11,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 11
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 11
+        },
+        {
+         "action": "register",
+         "cycle_position": 11,
+         "id": "11",
+         "registered_seq": 12,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 12
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 12
+        },
+        {
+         "action": "register",
+         "cycle_position": 12,
+         "id": "12",
+         "registered_seq": 13,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 13
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 13
+        },
+        {
+         "action": "register",
+         "cycle_position": 13,
+         "id": "13",
+         "registered_seq": 14,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 14
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 14
+        },
+        {
+         "action": "register",
+         "cycle_position": 14,
+         "id": "14",
+         "registered_seq": 15,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 15
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 15
+        },
+        {
+         "action": "register",
+         "cycle_position": 15,
+         "id": "15",
+         "registered_seq": 16,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 16
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "registered_seq": 16
+        },
+        {
+         "action": "register",
+         "cycle_position": 16,
+         "id": "16",
+         "registered_seq": 17,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 17
+        },
+        {
+         "action": "register",
+         "cycle_position": 17,
+         "id": "17",
+         "registered_seq": 18,
+         "source": "investing"
+        },
+        {
+         "action": "link_round",
+         "classification": "linked",
+         "registered_seq": 18
+        },
+        {
+         "action": "register",
+         "cycle_position": 18,
+         "id": "18",
+         "registered_seq": 19,
+         "source": "investing"
+        },
+        {
+         "action": "init_failed",
+         "classification": "report_init_failed",
+         "registered_seq": 19
+        },
+        {
+         "action": "register",
+         "cycle_position": 19,
+         "id": "19",
+         "registered_seq": 20,
+         "source": "investing"
+        }
+       ]
+      },
+      "id_getsizeof_bytes": 43,
+      "id_kind": "short_ascii",
+      "id_utf8_bytes": 2,
+      "name": "churn_init_failed_most_finished_short_ascii",
+      "state_cycle": [
+       {
+        "action": "finish",
+        "position": 0,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 1,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 2,
+        "source": "investing"
+       },
+       {
+        "action": "finish",
+        "position": 3,
+        "source": "investing"
+       },
+       {
+        "action": "link",
+        "position": 4,
+        "source": "investing"
+       },
+       {
+        "action": "link",
+        "position": 5,
+        "source": "investing"
+       },
+       {
+        "action": "link",
+        "position": 6,
+        "source": "investing"
+       },
+       {
+        "action": "link",
+        "position": 7,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 8,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 9,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 10,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 11,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 12,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 13,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 14,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 15,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 16,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 17,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 18,
+        "source": "investing"
+       },
+       {
+        "action": "unbound",
+        "position": 19,
+        "source": "investing"
+       }
+      ],
+      "state_track": "most_finished_init_failed"
+     }
+    ]
+   ],
+   [
+    "set",
+    [
+     "test_scale"
+    ],
+    {
+     "churn_names": [
+      "churn_init_failed_most_finished_short_ascii"
+     ],
+     "cycle_length": 20,
+     "finished": 16,
+     "unbound": 2
+    }
+   ]
+  ],
+  "row": "B02",
+  "why": "종료형 init 변형 16/2/2 PASS; 미종료형 4/4/12 분포 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K08",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "N_total_at_tail": 4,
+      "auxiliary_registered": 2,
+      "checkpoints": [
+       {
+        "admission_counts": {
+         "registered": 3,
+         "rejected": 0,
+         "scheduled": 3
+        },
+        "kind": "tail_80640",
+        "received_at": 0,
+        "received_mono": 0,
+        "source_counts": {
+         "bs": {
+          "registered": 2,
+          "rejected": 0,
+          "scheduled": 2
+         },
+         "investing": {
+          "registered": 1,
+          "rejected": 0,
+          "scheduled": 1
+         }
+        }
+       },
+       {
+        "admission_counts": {
+         "registered": 4,
+         "rejected": 0,
+         "scheduled": 4
+        },
+        "kind": "tail_80641",
+        "received_at": 7500000,
+        "received_mono": 7500000,
+        "source_counts": {
+         "bs": {
+          "registered": 2,
+          "rejected": 0,
+          "scheduled": 2
+         },
+         "investing": {
+          "registered": 2,
+          "rejected": 0,
+          "scheduled": 2
+         }
+        }
+       }
+      ],
+      "classification_counts": {
+       "registered": 4
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "auxiliary": true,
+         "call_index": 0,
+         "classification": "registered",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 1,
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "auxiliary": true,
+         "call_index": 1,
+         "classification": "registered",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 2,
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 2,
+         "classification": "registered",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "call_index": 3,
+         "classification": "registered",
+         "received_at": 7500000,
+         "received_mono": 7500000,
+         "registered_seq": 4,
+         "source": "investing"
+        }
+       ]
+      },
+      "minute_batches": 1,
+      "scheduled_registered": 2,
+      "scheduled_target": 2,
+      "source_registered": {
+       "bs": 2,
+       "investing": 2
+      },
+      "stride_minutes": 1,
+      "tail_classification": "registered"
+     }
+    ]
+   ]
+  ],
+  "row": "B01",
+  "why": "보조 1건과 정상 2건의 total/정상 분리 PASS; 보조 source 오계수 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K08",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "N_total_at_tail": 4,
+      "auxiliary_registered": 2,
+      "checkpoints": [
+       {
+        "admission_counts": {
+         "registered": 3,
+         "rejected": 0,
+         "scheduled": 3
+        },
+        "kind": "tail_80640",
+        "received_at": 0,
+        "received_mono": 0,
+        "source_counts": {
+         "bs": {
+          "registered": 1,
+          "rejected": 0,
+          "scheduled": 2
+         },
+         "investing": {
+          "registered": 1,
+          "rejected": 0,
+          "scheduled": 1
+         }
+        }
+       },
+       {
+        "admission_counts": {
+         "registered": 4,
+         "rejected": 0,
+         "scheduled": 4
+        },
+        "kind": "tail_80641",
+        "received_at": 7500000,
+        "received_mono": 7500000,
+        "source_counts": {
+         "bs": {
+          "registered": 2,
+          "rejected": 0,
+          "scheduled": 2
+         },
+         "investing": {
+          "registered": 2,
+          "rejected": 0,
+          "scheduled": 2
+         }
+        }
+       }
+      ],
+      "classification_counts": {
+       "registered": 4
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "auxiliary": true,
+         "call_index": 0,
+         "classification": "registered",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 1,
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "auxiliary": true,
+         "call_index": 1,
+         "classification": "registered",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 2,
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 2,
+         "classification": "registered",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "call_index": 3,
+         "classification": "registered",
+         "received_at": 7500000,
+         "received_mono": 7500000,
+         "registered_seq": 4,
+         "source": "investing"
+        }
+       ]
+      },
+      "minute_batches": 1,
+      "scheduled_registered": 2,
+      "scheduled_target": 2,
+      "source_registered": {
+       "bs": 2,
+       "investing": 2
+      },
+      "stride_minutes": 1,
+      "tail_classification": "registered"
+     }
+    ]
+   ]
+  ],
+  "row": "B01",
+  "why": "보조 1건과 정상 2건의 total/정상 분리 PASS; 보조 source 오계수 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K10",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "N_res": 1,
+        "N_total": 1,
+        "kind": "hour",
+        "minute_index": 59,
+        "other_recorded_resident_removals": 0,
+        "pruned_since_previous_hour": 0,
+        "received_at": 3600000001,
+        "received_mono": 3600000001
+       },
+       {
+        "N_res": 0,
+        "N_total": 1,
+        "kind": "hour",
+        "minute_index": 119,
+        "other_recorded_resident_removals": 0,
+        "pruned_since_previous_hour": 1,
+        "received_at": 7200000001,
+        "received_mono": 7200000001
+       }
+      ],
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "id": "a",
+         "received_at": 1,
+         "received_mono": 1,
+         "registered_seq": 1,
+         "source": "investing"
+        }
+       ]
+      },
+      "tomb_due_ledger": [
+       {
+        "due_hour": 2,
+        "id": "a",
+        "registered_seq": 1,
+        "source": "investing"
+       }
+      ]
+     }
+    ]
+   ]
+  ],
+  "row": "B10",
+  "why": "hour 1의 index 59와 60분 경계 PASS; index 58 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K10",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "N_res": 1,
+        "N_total": 1,
+        "kind": "hour",
+        "minute_index": 58,
+        "other_recorded_resident_removals": 0,
+        "pruned_since_previous_hour": 0,
+        "received_at": 3600000001,
+        "received_mono": 3600000001
+       },
+       {
+        "N_res": 0,
+        "N_total": 1,
+        "kind": "hour",
+        "minute_index": 119,
+        "other_recorded_resident_removals": 0,
+        "pruned_since_previous_hour": 1,
+        "received_at": 7200000001,
+        "received_mono": 7200000001
+       }
+      ],
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "id": "a",
+         "received_at": 1,
+         "received_mono": 1,
+         "registered_seq": 1,
+         "source": "investing"
+        }
+       ]
+      },
+      "tomb_due_ledger": [
+       {
+        "due_hour": 2,
+        "id": "a",
+        "registered_seq": 1,
+        "source": "investing"
+       }
+      ]
+     }
+    ]
+   ]
+  ],
+  "row": "B10",
+  "why": "hour 1의 index 59와 60분 경계 PASS; index 58 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K11",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "identity_samples": [
+         {
+          "expected": "included",
+          "id": "a",
+          "observed": "included"
+         }
+        ],
+        "kind": "probe_recent_before",
+        "received_at": 9,
+        "received_mono": 9,
+        "recent_cohort_counts": {
+         "investing": {
+          "connection": {
+           "started": 3
+          },
+          "lifecycle": {
+           "finalized": 3
+          },
+          "registered": 3
+         }
+        },
+        "recent_expected_counts": {
+         "investing": {
+          "at": {
+           "connection": {
+            "started": 2
+           },
+           "lifecycle": {
+            "finalized": 2
+           },
+           "registered": 2
+          },
+          "before": {
+           "connection": {
+            "started": 3
+           },
+           "lifecycle": {
+            "finalized": 3
+           },
+           "registered": 3
+          }
+         }
+        },
+        "recent_rows": [
+         {
+          "collection": {
+           "M": 0,
+           "N": 0,
+           "U": 0,
+           "V": 3
+          },
+          "pair": "USD/KRW",
+          "source": "investing",
+          "writing": {
+           "V": 3
+          }
+         }
+        ]
+       },
+       {
+        "identity_samples": [
+         {
+          "expected": "excluded",
+          "id": "a",
+          "observed": "excluded"
+         }
+        ],
+        "kind": "probe_recent_at",
+        "received_at": 10,
+        "received_mono": 10,
+        "recent_cohort_counts": {
+         "investing": {
+          "connection": {
+           "started": 2
+          },
+          "lifecycle": {
+           "finalized": 2
+          },
+          "registered": 2
+         }
+        },
+        "recent_expected_counts": {
+         "investing": {
+          "at": {
+           "connection": {
+            "started": 2
+           },
+           "lifecycle": {
+            "finalized": 2
+           },
+           "registered": 2
+          },
+          "before": {
+           "connection": {
+            "started": 3
+           },
+           "lifecycle": {
+            "finalized": 3
+           },
+           "registered": 3
+          }
+         }
+        },
+        "recent_rows": [
+         {
+          "collection": {
+           "M": 0,
+           "N": 0,
+           "U": 0,
+           "V": 2
+          },
+          "pair": "USD/KRW",
+          "source": "investing",
+          "writing": {
+           "V": 2
+          }
+         }
+        ]
+       }
+      ],
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "a",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "bucket_end": 10,
+         "bucket_end_mono": 10,
+         "classification": "finalized",
+         "id": "a",
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "b",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "bucket_end": 20,
+         "bucket_end_mono": 20,
+         "classification": "finalized",
+         "id": "b",
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "c",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "bucket_end": 20,
+         "bucket_end_mono": 20,
+         "classification": "finalized",
+         "id": "c",
+         "source": "investing"
+        }
+       ]
+      },
+      "recent_input_ledger": [
+       {
+        "bucket_end": 10,
+        "bucket_end_mono": 10,
+        "connection": "started",
+        "id": "a",
+        "lifecycle": "finalized",
+        "registered_at": 0,
+        "registered_mono": 0,
+        "source": "investing"
+       },
+       {
+        "bucket_end": 20,
+        "bucket_end_mono": 20,
+        "connection": "started",
+        "id": "b",
+        "lifecycle": "finalized",
+        "registered_at": 0,
+        "registered_mono": 0,
+        "source": "investing"
+       },
+       {
+        "bucket_end": 20,
+        "bucket_end_mono": 20,
+        "connection": "started",
+        "id": "c",
+        "lifecycle": "finalized",
+        "registered_at": 0,
+        "registered_mono": 0,
+        "source": "investing"
+       }
+      ]
+     }
+    ]
+   ]
+  ],
+  "row": "B12",
+  "why": "최근 W 등록 3→2와 유효성 배열·별도 계수 PASS; 계수 누락 U"
+ },
+ {
+  "base": "example",
+  "clause": "K11",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "identity_samples": [
+         {
+          "expected": "included",
+          "id": "a",
+          "observed": "included"
+         }
+        ],
+        "kind": "probe_recent_before",
+        "received_at": 9,
+        "received_mono": 9,
+        "recent_cohort_counts": {
+         "investing": {
+          "connection": {
+           "started": 3
+          },
+          "lifecycle": {
+           "finalized": 3
+          },
+          "registered": 3
+         }
+        },
+        "recent_expected_counts": {
+         "investing": {
+          "at": {
+           "connection": {
+            "started": 2
+           },
+           "lifecycle": {
+            "finalized": 2
+           },
+           "registered": 2
+          },
+          "before": {
+           "connection": {
+            "started": 3
+           },
+           "lifecycle": {
+            "finalized": 3
+           },
+           "registered": 3
+          }
+         }
+        },
+        "recent_rows": [
+         {
+          "collection": {
+           "M": 0,
+           "N": 0,
+           "U": 0,
+           "V": 3
+          },
+          "pair": "USD/KRW",
+          "source": "investing",
+          "writing": {
+           "V": 3
+          }
+         }
+        ]
+       },
+       {
+        "identity_samples": [
+         {
+          "expected": "excluded",
+          "id": "a",
+          "observed": "excluded"
+         }
+        ],
+        "kind": "probe_recent_at",
+        "received_at": 10,
+        "received_mono": 10,
+        "recent_expected_counts": {
+         "investing": {
+          "at": {
+           "connection": {
+            "started": 2
+           },
+           "lifecycle": {
+            "finalized": 2
+           },
+           "registered": 2
+          },
+          "before": {
+           "connection": {
+            "started": 3
+           },
+           "lifecycle": {
+            "finalized": 3
+           },
+           "registered": 3
+          }
+         }
+        },
+        "recent_rows": [
+         {
+          "collection": {
+           "M": 0,
+           "N": 0,
+           "U": 0,
+           "V": 2
+          },
+          "pair": "USD/KRW",
+          "source": "investing",
+          "writing": {
+           "V": 2
+          }
+         }
+        ]
+       }
+      ],
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "a",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 1,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "bucket_end": 10,
+         "bucket_end_mono": 10,
+         "classification": "finalized",
+         "id": "a",
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "b",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 2,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "bucket_end": 20,
+         "bucket_end_mono": 20,
+         "classification": "finalized",
+         "id": "b",
+         "source": "investing"
+        },
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "c",
+         "received_at": 0,
+         "received_mono": 0,
+         "registered_seq": 3,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "bucket_end": 20,
+         "bucket_end_mono": 20,
+         "classification": "finalized",
+         "id": "c",
+         "source": "investing"
+        }
+       ]
+      },
+      "recent_input_ledger": [
+       {
+        "bucket_end": 10,
+        "bucket_end_mono": 10,
+        "connection": "started",
+        "id": "a",
+        "lifecycle": "finalized",
+        "registered_at": 0,
+        "registered_mono": 0,
+        "source": "investing"
+       },
+       {
+        "bucket_end": 20,
+        "bucket_end_mono": 20,
+        "connection": "started",
+        "id": "b",
+        "lifecycle": "finalized",
+        "registered_at": 0,
+        "registered_mono": 0,
+        "source": "investing"
+       },
+       {
+        "bucket_end": 20,
+        "bucket_end_mono": 20,
+        "connection": "started",
+        "id": "c",
+        "lifecycle": "finalized",
+        "registered_at": 0,
+        "registered_mono": 0,
+        "source": "investing"
+       }
+      ]
+     }
+    ]
+   ]
+  ],
+  "row": "B12",
+  "why": "최근 W 등록 3→2와 유효성 배열·별도 계수 PASS; 계수 누락 U"
+ },
+ {
+  "base": "example",
+  "clause": "K12",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "checkpoint_id": "x:p",
+        "observation": "passive",
+        "passive_cohort_projection": [
+         {
+          "counts": {
+           "connection": {
+            "started": 1
+           },
+           "lifecycle": {
+            "finalized": 1
+           },
+           "registered": 1
+          },
+          "public_checkpoint_id": "x:q",
+          "range": [
+           1,
+           10
+          ],
+          "source": "investing"
+         }
+        ]
+       },
+       {
+        "checkpoint_id": "x:q",
+        "cohort_exact_from": 1,
+        "frozen_through": 9,
+        "old_cohort_probe": {
+         "classification": "cohort_expired",
+         "diagnostics": {
+          "codes": [
+           "cohort_expired",
+           "older_than_exact_window"
+          ]
+         },
+         "range": [
+          0,
+          1
+         ]
+        },
+        "received_at": 10,
+        "received_mono": 10,
+        "recent_cohorts": {
+         "investing": {
+          "counts": {
+           "connection": {
+            "started": 1
+           },
+           "lifecycle": {
+            "finalized": 1
+           },
+           "registered": 1
+          },
+          "equations_hold": {
+           "connection": true,
+           "lifecycle": true
+          },
+          "range": [
+           1,
+           10
+          ]
+         }
+        }
+       }
+      ],
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "a",
+         "lifecycle": "finalized",
+         "received_at": 1,
+         "received_mono": 1,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "id": "a",
+         "received_at": 2,
+         "received_mono": 2,
+         "source": "investing"
+        }
+       ]
+      }
+     }
+    ]
+   ]
+  ],
+  "row": "B16",
+  "why": "배열 range+cohort 계수+만료 진단 PASS; 계수 누락 U"
+ },
+ {
+  "base": "example",
+  "clause": "K12",
+  "expect": "UNVERIFIED",
+  "ops": [
+   [
+    "set",
+    [
+     "churn_fixtures"
+    ],
+    [
+     {
+      "checkpoints": [
+       {
+        "checkpoint_id": "x:p",
+        "observation": "passive",
+        "passive_cohort_projection": [
+         {
+          "counts": {
+           "connection": {
+            "started": 1
+           },
+           "lifecycle": {
+            "finalized": 1
+           },
+           "registered": 1
+          },
+          "public_checkpoint_id": "x:q",
+          "range": [
+           1,
+           10
+          ],
+          "source": "investing"
+         }
+        ]
+       },
+       {
+        "checkpoint_id": "x:q",
+        "cohort_exact_from": 1,
+        "frozen_through": 9,
+        "old_cohort_probe": {
+         "classification": "cohort_expired",
+         "diagnostics": {
+          "codes": [
+           "cohort_expired",
+           "older_than_exact_window"
+          ]
+         },
+         "range": [
+          0,
+          1
+         ]
+        },
+        "received_at": 10,
+        "received_mono": 10,
+        "recent_cohorts": {
+         "investing": {
+          "equations_hold": {
+           "connection": true,
+           "lifecycle": true
+          },
+          "range": [
+           1,
+           10
+          ]
+         }
+        }
+       }
+      ],
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "classification": "registered",
+         "connection": "started",
+         "id": "a",
+         "lifecycle": "finalized",
+         "received_at": 1,
+         "received_mono": 1,
+         "source": "investing"
+        },
+        {
+         "action": "finish",
+         "classification": "finalized",
+         "id": "a",
+         "received_at": 2,
+         "received_mono": 2,
+         "source": "investing"
+        }
+       ]
+      }
+     }
+    ]
+   ]
+  ],
+  "row": "B16",
+  "why": "배열 range+cohort 계수+만료 진단 PASS; 계수 누락 U"
+ },
+ {
+  "base": "example",
+  "clause": "K13",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "after": {
+       "B": 10,
+       "E": 9,
+       "G": 8
+      },
+      "before": {
+       "B": 10,
+       "E": 9,
+       "G": 8,
+       "N_res": 1
+      },
+      "control_existing_key": {
+       "branch": "detached_clone",
+       "classification": "registered",
+       "clone_base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "forked_before_call_index": 1,
+       "job_id": "j0",
+       "pre_rejection_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "source": "bs",
+       "trace_call_index": 3
+      },
+      "first_rejection": {
+       "byte_precheck": {
+        "candidate_E": 11,
+        "would_exceed": true
+       },
+       "candidate_job_id": "j1",
+       "cause": "byte",
+       "index_audit": {
+        "absent_paths": [
+         "close",
+         "cohort",
+         "expiry",
+         "live",
+         "open",
+         "overdue",
+         "owned_id",
+         "owner",
+         "previous_job",
+         "prune",
+         "recent",
+         "seq",
+         "tomb"
+        ],
+        "after": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "before": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "owned_bytes": {
+         "candidate_after": 0,
+         "candidate_before": 0
+        }
+       },
+       "no_insertion": true,
+       "slot_test": {
+        "candidate_N_res": 2,
+        "would_exceed": false
+       },
+       "trace_call_index": 1
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "admission_stopped",
+         "job_id": "j1",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 2,
+         "classification": "admission_stopped",
+         "job_id": "j2",
+         "source": "bs"
+        }
+       ],
+       "clone_api_trace": [
+        {
+         "action": "register",
+         "branch": "detached_clone",
+         "call_index": 3,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        }
+       ],
+       "pre_rejection_state_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_key_counts": [
+       {
+        "job_id": "j0",
+        "registrations": 1,
+        "source": "bs"
+       }
+      ],
+      "name": "pressure_unique_job_keys_byte_stop",
+      "post_latch": {
+       "all_rejected": true,
+       "resumed_after_release": false
+      }
+     }
+    ]
+   ]
+  ],
+  "row": "B23",
+  "why": "admission_stopped 분류와 latch 비재개 PASS; 후속 성공 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K13",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "after": {
+       "B": 10,
+       "E": 9,
+       "G": 8
+      },
+      "before": {
+       "B": 10,
+       "E": 9,
+       "G": 8,
+       "N_res": 1
+      },
+      "control_existing_key": {
+       "branch": "detached_clone",
+       "classification": "registered",
+       "clone_base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "forked_before_call_index": 1,
+       "job_id": "j0",
+       "pre_rejection_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "source": "bs",
+       "trace_call_index": 3
+      },
+      "first_rejection": {
+       "byte_precheck": {
+        "candidate_E": 11,
+        "would_exceed": true
+       },
+       "candidate_job_id": "j1",
+       "cause": "byte",
+       "index_audit": {
+        "absent_paths": [
+         "close",
+         "cohort",
+         "expiry",
+         "live",
+         "open",
+         "overdue",
+         "owned_id",
+         "owner",
+         "previous_job",
+         "prune",
+         "recent",
+         "seq",
+         "tomb"
+        ],
+        "after": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "before": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "owned_bytes": {
+         "candidate_after": 0,
+         "candidate_before": 0
+        }
+       },
+       "no_insertion": true,
+       "slot_test": {
+        "candidate_N_res": 2,
+        "would_exceed": false
+       },
+       "trace_call_index": 1
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "admission_stopped",
+         "job_id": "j1",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 2,
+         "classification": "registered",
+         "job_id": "j2",
+         "source": "bs"
+        }
+       ],
+       "clone_api_trace": [
+        {
+         "action": "register",
+         "branch": "detached_clone",
+         "call_index": 3,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        }
+       ],
+       "pre_rejection_state_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_key_counts": [
+       {
+        "job_id": "j0",
+        "registrations": 1,
+        "source": "bs"
+       }
+      ],
+      "name": "pressure_unique_job_keys_byte_stop",
+      "post_latch": {
+       "all_rejected": true,
+       "resumed_after_release": false
+      }
+     }
+    ]
+   ]
+  ],
+  "row": "B23",
+  "why": "admission_stopped 분류와 latch 비재개 PASS; 후속 성공 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K14",
+  "expect": "PASS",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "after": {
+       "B": 10,
+       "E": 9,
+       "G": 8
+      },
+      "before": {
+       "B": 10,
+       "E": 9,
+       "G": 8,
+       "N_res": 1
+      },
+      "control_existing_key": {
+       "branch": "detached_clone",
+       "classification": "registered",
+       "clone_base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "forked_before_call_index": 1,
+       "job_id": "j0",
+       "pre_rejection_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "source": "bs",
+       "trace_call_index": 4
+      },
+      "first_rejection": {
+       "byte_precheck": {
+        "candidate_E": 11,
+        "would_exceed": true
+       },
+       "candidate_job_id": "j1",
+       "cause": "byte",
+       "index_audit": {
+        "absent_paths": [
+         "close",
+         "cohort",
+         "expiry",
+         "live",
+         "open",
+         "overdue",
+         "owned_id",
+         "owner",
+         "previous_job",
+         "prune",
+         "recent",
+         "seq",
+         "tomb"
+        ],
+        "after": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "before": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "owned_bytes": {
+         "candidate_after": 0,
+         "candidate_before": 0
+        }
+       },
+       "no_insertion": true,
+       "slot_test": {
+        "candidate_N_res": 2,
+        "would_exceed": false
+       },
+       "trace_call_index": 1
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "admission_stopped",
+         "job_id": "j1",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 2,
+         "classification": "admission_stopped",
+         "job_id": "j2",
+         "source": "bs"
+        }
+       ],
+       "clone_api_trace": [
+        {
+         "action": "register",
+         "branch": "detached_clone",
+         "call_index": 4,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        }
+       ],
+       "pre_rejection_state_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_key_counts": [
+       {
+        "job_id": "j0",
+        "registrations": 1,
+        "source": "bs"
+       }
+      ],
+      "name": "pressure_unique_job_keys_byte_stop",
+      "post_latch": {
+       "resumed_after_release": false
+      }
+     }
+    ]
+   ]
+  ],
+  "row": "B23",
+  "why": "검증된 clone 성공과 원장 거절 PASS; 원장 latch 후 성공 FAIL"
+ },
+ {
+  "base": "example",
+  "clause": "K14",
+  "expect": "FAIL",
+  "ops": [
+   [
+    "set",
+    [
+     "pressure_fixtures"
+    ],
+    [
+     {
+      "after": {
+       "B": 10,
+       "E": 9,
+       "G": 8
+      },
+      "before": {
+       "B": 10,
+       "E": 9,
+       "G": 8,
+       "N_res": 1
+      },
+      "control_existing_key": {
+       "branch": "detached_clone",
+       "classification": "registered",
+       "clone_base_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "forked_before_call_index": 1,
+       "job_id": "j0",
+       "pre_rejection_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "source": "bs",
+       "trace_call_index": 4
+      },
+      "first_rejection": {
+       "byte_precheck": {
+        "candidate_E": 11,
+        "would_exceed": true
+       },
+       "candidate_job_id": "j1",
+       "cause": "byte",
+       "index_audit": {
+        "absent_paths": [
+         "close",
+         "cohort",
+         "expiry",
+         "live",
+         "open",
+         "overdue",
+         "owned_id",
+         "owner",
+         "previous_job",
+         "prune",
+         "recent",
+         "seq",
+         "tomb"
+        ],
+        "after": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "before": {
+         "N_total": 1,
+         "last_seq": 1,
+         "paths": {
+          "close": false,
+          "cohort": false,
+          "expiry": false,
+          "live": false,
+          "open": false,
+          "overdue": false,
+          "owned_id": false,
+          "owner": false,
+          "previous_job": false,
+          "prune": false,
+          "recent": false,
+          "seq": false,
+          "tomb": false
+         }
+        },
+        "owned_bytes": {
+         "candidate_after": 0,
+         "candidate_before": 0
+        }
+       },
+       "no_insertion": true,
+       "slot_test": {
+        "candidate_N_res": 2,
+        "would_exceed": false
+       },
+       "trace_call_index": 1
+      },
+      "fixture_provenance": {
+       "api_trace": [
+        {
+         "action": "register",
+         "call_index": 0,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 1,
+         "classification": "admission_stopped",
+         "job_id": "j1",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 2,
+         "classification": "admission_stopped",
+         "job_id": "j2",
+         "source": "bs"
+        },
+        {
+         "action": "register",
+         "call_index": 4,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        }
+       ],
+       "clone_api_trace": [
+        {
+         "action": "register",
+         "branch": "detached_clone",
+         "call_index": 4,
+         "classification": "registered",
+         "job_id": "j0",
+         "source": "bs"
+        }
+       ],
+       "pre_rejection_state_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      },
+      "job_key_counts": [
+       {
+        "job_id": "j0",
+        "registrations": 1,
+        "source": "bs"
+       }
+      ],
+      "name": "pressure_unique_job_keys_byte_stop",
+      "post_latch": {
+       "resumed_after_release": false
+      }
+     }
+    ]
+   ]
+  ],
+  "row": "B23",
+  "why": "검증된 clone 성공과 원장 거절 PASS; 원장 latch 후 성공 FAIL"
+ }
+]

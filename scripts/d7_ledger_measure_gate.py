@@ -3756,6 +3756,26 @@ def _registered_calls(trace):
             _need(step, "classification") == "registered"]
 
 
+def _check_job_key_counts(recorded, calls):
+    """Compare the public list with successful registrations having a job ID."""
+    entries = _items(recorded, 0)
+    actual = Counter()
+    for call in calls:
+        job = _need(call, "job_id")
+        if job is not None:
+            actual[(_need(call, "source"), job)] += 1
+    observed = {}
+    for entry in entries:
+        key = (_need(entry, "source"), _need(entry, "job_id"))
+        if not all(isinstance(part, str) and part for part in key):
+            raise _EvidenceMissing("job key missing or malformed")
+        _assert(key not in observed, "duplicate job key")
+        count = _integer(_need(entry, "registrations"))
+        _assert(count > 0, "job registration count must be positive")
+        observed[key] = count
+    _eq(observed, dict(actual), "job key count differs from registration trace")
+
+
 def _eq(actual, expected, reason="recorded value disagrees with source evidence"):
     def bool_for_integer(a, b):
         if (type(a) is bool and type(b) is int) or (type(a) is int and type(b) is bool):
@@ -3893,12 +3913,12 @@ def _evaluate_a(row, report):
                 raise _EvidenceMissing("registered ID missing or malformed")
             _assert(len(set(ids)) == len(ids) and not seen.intersection(ids), "ID collision")
             seen.update(ids)
-            _eq(_need(fixture, "id_utf8_bytes"), sum(len(i.encode()) for i in ids))
-            _eq(_need(fixture, "id_getsizeof_bytes"), sum(sys.getsizeof(i) for i in ids))
+            for identity in ids:
+                _eq(_need(fixture, "id_utf8_bytes"), len(identity.encode()))
+                _eq(_need(fixture, "id_getsizeof_bytes"), sys.getsizeof(identity))
             _eq(_need(fixture, "source_registered"),
                 dict(Counter(_need(step, "source") for step in registers)))
-            _eq(_need(fixture, "job_key_counts"),
-                dict(Counter(f"{_need(step, 'source')}:{_need(step, 'job_id')}" for step in registers)))
+            _check_job_key_counts(_need(fixture, "job_key_counts"), registers)
             _eq(_integer(_need(fixture, "state_counts", "registered")), len(registers))
             _eq(_need(fixture, "state_registration_counts"),
                 dict(Counter(_need(step, "source") for step in registers)))
@@ -4302,19 +4322,24 @@ def _b_followup(row, report, fixtures, unit):
                     _eq([_need(t, "action") for t in events], ["register", "link_round"])
                     _eq(_need(events[1], "classification"), "linked")
                 elif action == "unbound":
-                    if (not unit and _need(f, "name").startswith("churn_init_failed_")
-                            and i == first_unbound):
+                    if ((_need(f, "state_track").endswith("_init_failed") or
+                         _need(f, "name").startswith("churn_init_failed_"))
+                            and position == first_unbound):
                         _eq([_need(t, "action") for t in events], ["register", "init_failed"])
-                        _eq(_need(events[1], "classification"), "init_failed")
+                        _eq(_need(events[1], "classification"), "report_init_failed")
                     else:
                         _eq([_need(t, "action") for t in events], ["register"])
                 else:
                     raise _EvidenceMissing(f"cycle action at {position} has no trace rule")
-            if not unit and _need(f, "name").startswith("churn_init_failed_"):
+            if (_need(f, "state_track").endswith("_init_failed") or
+                    _need(f, "name").startswith("churn_init_failed_")):
                 if first_unbound is None: raise _EvidenceMissing("Unicode unbound target absent")
-                seq = _need(registers[first_unbound], "registered_seq")
-                _eq(sum(t.get("registered_seq") == seq and t.get("classification") == "init_failed"
-                        for t in trace), 1)
+                failures_by_seq = Counter(t.get("registered_seq") for t in trace
+                                          if t.get("classification") == "report_init_failed")
+                for reg in registers[:limit]:
+                    seq = _need(reg, "registered_seq")
+                    _eq(failures_by_seq[seq],
+                        int(_need(reg, "cycle_position") == first_unbound))
     elif row == "B03":
         for f in fixtures:
             trace = _items(_need(f, "fixture_provenance", "api_trace"))
@@ -4581,7 +4606,7 @@ def _b_followup(row, report, fixtures, unit):
                     for source in sources:
                         expected = counts.get(source, {"registered": 0, "connection": {}, "lifecycle": {}})
                         _eq(_need(cp, "recent_expected_counts", source, part), expected)
-                        _eq(_need(cp, "recent_rows", source), expected)
+                        _eq(_need(cp, "recent_cohort_counts", source), expected)
 
 
 def _evaluate_b(row, report):
@@ -4616,12 +4641,23 @@ def _evaluate_b(row, report):
             for cp, count in ((b, n - 1), (a, n)):
                 _eq((_need(cp, "received_at"), _need(cp, "received_mono")),
                     (_need(normal[count - 1], "received_at"), _need(normal[count - 1], "received_mono")))
+                prefix = [t for t in trace if t.get("action") == "register" and
+                          _integer(_need(t, "call_index")) <= _need(normal[count - 1], "call_index")]
+                _eq(len([t for t in prefix if not t.get("auxiliary", False)]), count)
+                _eq(len(prefix), count + f.get("auxiliary_registered", 0))
+                accepted = [t for t in prefix if t.get("classification") == "registered"]
                 admission = _need(cp, "admission_counts")
                 _eq((_need(admission, "scheduled"), _need(admission, "registered"), _need(admission, "rejected")),
-                    (count, count, 0))
-                _eq(_need(cp, "source_counts"),
-                    {source: {"scheduled": qty, "registered": qty, "rejected": 0}
-                     for source, qty in Counter(t["source"] for t in normal[:count]).items()})
+                    (len(prefix), len(accepted), len(prefix) - len(accepted)))
+                source_counts = _need(cp, "source_counts")
+                _eq(set(source_counts), set(REGISTRY) if not unit else
+                    {_need(t, "source") for t in prefix})
+                for source, counts in source_counts.items():
+                    scheduled = sum(t.get("source") == source for t in prefix)
+                    registered_count = sum(t.get("source") == source and
+                                           t.get("classification") == "registered" for t in prefix)
+                    _eq(counts, {"scheduled": scheduled, "registered": registered_count,
+                                 "rejected": scheduled - registered_count})
     elif row == "B02":
         scale = _need(report, "test_scale") if unit else {}
         names = _need(scale, "churn_names") if unit else None
@@ -4638,37 +4674,55 @@ def _evaluate_b(row, report):
             if unit:
                 _eq(actions.get("finish", 0), _need(scale, "finished"))
                 _eq(actions.get("unbound", 0), _need(scale, "unbound"))
+                if length == 20:
+                    track = _need(f, "state_track")
+                    _assert(track in ("most_finished", "most_finished_init_failed",
+                                      "most_unfinished", "most_unfinished_init_failed"),
+                            "unknown state track")
+                    _eq(dict(actions), {"finish": 16, "link": 2, "unbound": 2}
+                        if track.startswith("most_finished") else
+                        {"finish": 4, "link": 4, "unbound": 12},
+                        "state track distribution changed")
             else:
+                track = _need(f, "state_track")
+                _assert(track in ("most_finished", "most_finished_init_failed",
+                                  "most_unfinished", "most_unfinished_init_failed"),
+                        "unknown state track")
                 expected = ({"finish": 16, "link": 2, "unbound": 2}
-                            if _need(f, "state_track") == "most_finished" else
+                            if track.startswith("most_finished") else
                             {"finish": 4, "link": 4, "unbound": 12})
                 _eq(dict(actions), expected, "full state cycle distribution changed")
             trace = _items(_need(f, "fixture_provenance", "api_trace"))
             registers = [t for t in trace if t.get("action") == "register"]
-            _eq(len(registers), length if unit else 80641)
+            _eq(len(registers), length * _need(scale, "cycles") if unit and "cycles" in scale else
+                length if unit else 80641)
             finished_seqs = {t.get("registered_seq") for t in trace
                              if t.get("action") == "finish" and t.get("classification") == "finalized"}
-            for i, t in enumerate(registers[:length] if unit else registers[:80640]):
+            for i, t in enumerate(registers if unit else registers[:80640]):
                 position = i % length
                 _eq(_need(t, "cycle_position"), position)
                 _eq(_need(t, "source"), _need(cycle[position], "source"))
                 if cycle[position]["action"] == "finish":
                     seq = _need(t, "registered_seq")
                     _assert(seq in finished_seqs)
-            if not unit and _need(f, "name").startswith("churn_init_failed_"):
+            if (_need(f, "state_track").endswith("_init_failed") or
+                    _need(f, "name").startswith("churn_init_failed_")):
                 first_unbound = next((i for i, item in enumerate(cycle)
                                       if item.get("action") == "unbound"), None)
                 if first_unbound is None: raise _EvidenceMissing("init failure target absent")
-                seq = _need(registers[first_unbound], "registered_seq")
-                _eq(sum(t.get("registered_seq") == seq and t.get("classification") == "init_failed"
-                        for t in trace), 1, "Unicode first unbound failure absent")
+                failures_by_seq = Counter(t.get("registered_seq") for t in trace
+                                          if t.get("classification") == "report_init_failed")
+                for reg in (registers if unit else registers[:80640]):
+                    seq = _need(reg, "registered_seq")
+                    _eq(failures_by_seq[seq],
+                        int(_need(reg, "cycle_position") == first_unbound),
+                        "periodic first unbound failure differs")
             _eq(_need(f, "classification_counts", "registered"), len(registers))
-            _eq(_need(f, "classification_counts", "finalized"),
-                sum(t.get("action") == "finish" and t.get("classification") == "finalized"
-                    for t in trace))
+            # classification_counts records register outcomes; completion evidence is in the API trace.
             ids = [_need(t, "id") for t in registers]
-            _eq(_need(f, "id_utf8_bytes"), len(ids[0].encode()))
-            _eq(_need(f, "id_getsizeof_bytes"), sys.getsizeof(ids[0]))
+            for identity in ids:
+                _eq(_need(f, "id_utf8_bytes"), len(identity.encode()))
+                _eq(_need(f, "id_getsizeof_bytes"), sys.getsizeof(identity))
     elif row == "B03":
         d = _need(report, "test_scale", "burst_details") if unit else 2048
         n = _need(report, "test_scale", "normal_calls") if unit else 80641
@@ -4859,9 +4913,12 @@ def _evaluate_b(row, report):
                          entry.get("source")) in identities)
             checkpoints = [c for c in _items(_need(f, "checkpoints")) if c.get("kind") == "hour"]
             _eq(len(checkpoints), hours)
+            first = _items([t for t in trace if t.get("action") == "register"])[0]
             previous_res, previous_total = 0, 0
             for hour, cp in enumerate(checkpoints, 1):
-                _eq(_need(cp, "minute_index"), 60 * hour)
+                _eq(_need(cp, "minute_index"), 60 * hour - 1)
+                for axis in ("received_at", "received_mono"):
+                    _eq(_need(cp, axis), _integer(_need(first, axis)) + hour * 60 * MINUTE)
                 pruned = _integer(_need(cp, "pruned_since_previous_hour"))
                 _eq(pruned, due[hour])
                 _assert(pruned == 0 if hour <= pre else pruned > 0)
@@ -4900,16 +4957,31 @@ def _evaluate_b(row, report):
             _eq(_need(b, "received_at"), _need(finish, "bucket_end") - 1)
             _eq(_need(a, "received_at"), _need(finish, "bucket_end"))
             for cp, state, part in ((b, "included", "before"), (a, "excluded", "at")):
+                rows = _items(_need(cp, "recent_rows"))
+                row_keys = []
+                for item in rows:
+                    row_keys.append((_need(item, "source"), _need(item, "pair")))
+                    _assert(isinstance(_need(item, "collection"), dict) and
+                            isinstance(_need(item, "writing"), dict),
+                            "recent validity row malformed")
+                _eq(len(set(row_keys)), len(row_keys), "recent validity row duplicated")
                 _eq(_need(cp, "identity_samples", 0, "id"), _need(finish, "id"))
                 _eq(_need(cp, "identity_samples", 0, "observed"), state)
                 source = _need(finish, "source")
                 expected = _need(cp, "recent_expected_counts", source, part)
-                _eq(_need(cp, "recent_rows", source), expected)
-                _eq(_need(expected, "registered"), 1 if part == "before" else 0)
-                _eq(_need(expected, "connection", _need(reg, "connection")) if part == "before" else
-                    _need(expected, "connection"), 1 if part == "before" else {})
-                _eq(_need(expected, "lifecycle", _need(finish, "classification")) if part == "before" else
-                    _need(expected, "lifecycle"), 1 if part == "before" else {})
+                _eq(_need(cp, "recent_cohort_counts", source), expected)
+            source = _need(finish, "source")
+            for path in (("registered",), ("connection", _need(reg, "connection")),
+                         ("lifecycle", _need(finish, "classification"))):
+                before = _need(b, "recent_cohort_counts", source)
+                at = _need(a, "recent_cohort_counts", source)
+                before_count = before
+                at_count = at
+                for key in path:
+                    before_count = before_count.get(key, 0)
+                    at_count = at_count.get(key, 0)
+                _eq(_integer(before_count) - _integer(at_count), 1,
+                    "recent boundary cohort difference is not one")
 
     _b_followup(row, report, fixtures, unit)
 
@@ -5088,13 +5160,19 @@ def _evaluate_b_rest(row, report):
                     _eq(registered, sum(_need(counts, "lifecycle").values()))
                     _assert(all(_need(actual, "equations_hold", key) is True for key in ("connection", "lifecycle")))
                     probe = _need(pub, "old_cohort_probe")
-                    _assert(_need(probe, "start") < _need(pub, "cohort_exact_from"))
+                    probe_range = _items(_need(probe, "range"), 2)
+                    _eq(len(probe_range), 2)
+                    _assert(_integer(probe_range[0]) < _need(pub, "cohort_exact_from"))
+                    _assert(_integer(probe_range[0]) < _integer(probe_range[1]))
+                    _eq(_integer(probe_range[1]), _integer(_need(pub, "cohort_exact_from")))
                     _eq(_need(probe, "classification"), "cohort_expired")
                     _assert("cohort_expired" in _need(probe, "diagnostics", "codes"))
                     _assert(not any(key in probe for key in
                                     ("counts", "registered", "connection", "lifecycle", "equations_hold")),
                             "expired cohort returned a partial denominator")
-                    start, end = (_integer(_need(actual, "range", key)) for key in ("start", "end"))
+                    range_pair = _items(_need(actual, "range"), 2)
+                    _eq(len(range_pair), 2)
+                    start, end = map(_integer, range_pair)
                     _eq(end, _integer(_need(pub, "received_at")))
                     _assert(start < end and start >= _integer(_need(pub, "cohort_exact_from")))
                     if not unit:
@@ -5358,9 +5436,8 @@ def _evaluate_b_rest(row, report):
             counts = _need(f, "job_key_counts")
             registered = [t for t in _items(_need(f, "fixture_provenance", "api_trace"))
                           if t.get("action") == "register" and t.get("classification") == "registered"]
-            observed = Counter(_need(t, "source") + ":" + _need(t, "job_id") for t in registered)
-            _eq(counts, dict(observed), "job key count differs from registration trace")
-            observed_keys.update(observed)
+            _check_job_key_counts(counts, registered)
+            observed_keys.update((_need(entry, "source"), _need(entry, "job_id")) for entry in counts)
         _assert(_need(proof, "H_job") <= len(observed_keys), "H_job lacks job-key input")
     elif row == "B23":
         fixtures = _items(_need(report, "pressure_fixtures"))
@@ -5382,30 +5459,42 @@ def _evaluate_b_rest(row, report):
             _assert(_need(p, "post_latch", "resumed_after_release") is False, "latch reopened")
             control = _need(p, "control_existing_key")
             _eq(_need(control, "classification"), "registered")
-            _assert(any(key.endswith(":" + _need(control, "job_id")) for key in _need(p, "job_key_counts")))
-            _assert(not any(key.endswith(":" + _need(r, "candidate_job_id")) for key in p["job_key_counts"]))
+            _eq(_need(control, "branch"), "detached_clone")
+            digest = _need(p, "fixture_provenance", "pre_rejection_state_sha256")
+            if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+                raise _EvidenceMissing("pre-rejection state digest absent or malformed")
+            _eq(_need(control, "pre_rejection_sha256"), digest)
+            _eq(_need(control, "pre_rejection_sha256"), _need(control, "clone_base_sha256"))
+            registered_keys = {(_need(key, "source"), _need(key, "job_id")) for key in
+                               _items(_need(p, "job_key_counts"))}
+            _assert((_need(control, "source"), _need(control, "job_id")) in registered_keys,
+                    "control key was not registered before the rejection")
             trace = _items(_need(p, "fixture_provenance", "api_trace"))
             rejected_at = _integer(_need(r, "trace_call_index"))
+            _eq(_need(control, "forked_before_call_index"), rejected_at)
             pressure = [t for t in trace if _integer(_need(t, "call_index")) <= rejected_at]
-            keys = [_need(t, "source") + ":" + _need(t, "job_id") for t in pressure]
+            keys = [(_need(t, "source"), _need(t, "job_id")) for t in pressure]
             _eq(len(keys), len(set(keys)), "unique-key pressure reused a key")
             rejection = _items([t for t in pressure if _need(t, "call_index") == rejected_at])[0]
             _eq(_need(rejection, "job_id"), _need(r, "candidate_job_id"))
-            _eq(_need(rejection, "classification"), "rejected")
+            _assert((_need(rejection, "source"), _need(rejection, "job_id")) not in registered_keys,
+                    "rejected candidate key was already registered")
+            _eq(_need(rejection, "classification"), "admission_stopped")
             _assert(all(_need(t, "classification") == "registered" for t in pressure[:-1]))
-            accepted = Counter(_need(t, "source") + ":" + _need(t, "job_id")
-                               for t in pressure if t.get("classification") == "registered")
-            _eq(_need(p, "job_key_counts"), dict(accepted),
-                "unique-key pressure count differs from accepted calls")
-            control_call = _items([t for t in trace if t.get("call_index") ==
+            _check_job_key_counts(_need(p, "job_key_counts"),
+                                  [t for t in pressure if t.get("classification") == "registered"])
+            clone_trace = _items(_need(p, "fixture_provenance", "clone_api_trace"))
+            control_call = _items([t for t in clone_trace if t.get("call_index") ==
                                    _need(control, "trace_call_index")])[0]
             _eq(_need(control_call, "job_id"), _need(control, "job_id"))
+            _eq(_need(control_call, "source"), _need(control, "source"))
             _eq(_need(control_call, "classification"), "registered")
-            _assert(_need(control_call, "call_index") > rejected_at)
+            _eq(_need(control_call, "branch"), "detached_clone")
             for point in (before, _need(p, "after")):
                 _budget_order(point)
-            _assert(all(_need(t, "classification") == "rejected" for t in
-                        trace if _need(t, "call_index") > rejected_at and t is not control_call),
+            _assert(all(_need(t, "classification") == "admission_stopped" for t in
+                        trace if t.get("action") == "register" and
+                        _need(t, "call_index") > rejected_at),
                     "byte latch resumed a new-key admission")
 
 

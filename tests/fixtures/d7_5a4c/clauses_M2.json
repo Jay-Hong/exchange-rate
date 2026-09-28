@@ -999,7 +999,7 @@
      0,
      "checkpoints",
      1,
-     "recent_rows",
+     "recent_cohort_counts",
      "investing",
      "registered"
     ],
@@ -1007,6 +1007,6 @@
    ]
   ],
   "row": "B12",
-  "why": "완전 recent 분모가 기대 장부와 다름"
+  "why": "별도 최근 cohort 계수가 입력 장부에서 재계산한 분모와 다름"
  }
 ]
