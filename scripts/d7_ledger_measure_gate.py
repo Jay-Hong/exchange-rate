@@ -5320,6 +5320,15 @@ def _evaluate_b_rest(row, report):
             _assert(any(t.get("action") == "prune" and t.get("id") in initial for t in api),
                     "initial identity never pruned")
     elif row == "B22":
+        if not unit:                       # size-step 은 판정하는 인터프리터에서 재계산하므로 보고서와 같은 CPython 이어야 한다
+            env = _need(report, "environment")
+            produced = str(_need(env, "python")).split()[0]
+            if (produced != platform.python_version()
+                    or _need(env, "implementation") != platform.python_implementation()):
+                raise _EvidenceMissing(f"report CPython {produced} differs from judging CPython "
+                                       f"{platform.python_version()}")
+            if _need(env, "python_hash_seed") != "0":
+                raise _EvidenceMissing("report CPython hash seed lock is not 0")
         proof = _need(report, "capacity_proof")
         m = _need(report, "test_scale", "max_records") if unit else 131072
         j = _need(report, "test_scale", "job_key_limit") if unit else 12
@@ -5329,8 +5338,6 @@ def _evaluate_b_rest(row, report):
         _eq(_need(steps, "list_slot_bytes"), sys.getsizeof([None]) - sys.getsizeof([]))
         _eq(_need(steps, "block_width"), 257)
         _eq(_need(steps, "detail_cap"), min(m, 2048))
-        if sys.version_info[:3] != (3, 13, 5):
-            raise _EvidenceMissing("locked CPython 3.13.5 size steps unavailable")
         actual_dict, actual_set = _runtime_budget_steps(m)
         _eq(_need(steps, "dict_steps"), actual_dict)
         _eq(_need(steps, "set_steps"), actual_set)

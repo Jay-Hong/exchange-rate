@@ -1001,3 +1001,48 @@ def test_b04_schedule_start_is_first_normal_register_not_call_zero():
         t["call_index"] += 1
     trace.insert(0, {"action": "register", "auxiliary": True, "call_index": 0, "received_at": 0, "received_mono": 0})
     assert gate.evaluate_row("B04", doc, attachments={})["status"] == "PASS"
+
+
+# ───────── 13. B22 CPython 잠금은 '보고서를 만든 인터프리터 == 판정하는 인터프리터' ─────────
+# size-step 은 판정 시 실행 중인 인터프리터에서 재계산한다. 특정 패치 버전(3.13.5)을 박아 두면
+# CI(3.13.x 다른 패치)에서 단위 예시까지 UNVERIFIED 가 된다(d2fc628 CI 실패). full 보고서는
+# environment.python 의 버전이 실행 중 버전과 같을 때만 비교하고, 다르면 UNVERIFIED.
+
+import platform  # noqa: E402  (이 절 전용)
+
+
+def test_b22_unit_example_does_not_depend_on_patch_version(monkeypatch):
+    monkeypatch.setattr(gate.sys, "version_info", (3, 13, 99, "final", 0), raising=False)
+    assert gate.evaluate_row("B22", _ex("B22"), attachments={})["status"] == "PASS"
+
+
+def _b22_full(python_version):
+    doc = _ex("B22")
+    doc["mode"] = "full"
+    doc.pop("test_scale")
+    doc["environment"] = {"python": f"{python_version} (main, Jan 1 2026, 00:00:00) [Clang]",
+                          "implementation": platform.python_implementation(), "python_hash_seed": "0"}
+    doc["churn_fixtures"] = [{"name": n, "job_key_counts": {"investing:j": 1}} for n in gate.CHURN_NAMES]  # full 범위 검사 통과용
+    return doc
+
+
+def test_b22_full_report_from_other_interpreter_is_unverified():
+    result = gate.evaluate_row("B22", _b22_full("3.12.0"), attachments={})
+    assert result["status"] == "UNVERIFIED" and "CPython" in result["reason"]
+
+
+def test_b22_full_report_from_same_interpreter_passes_version_gate():
+    result = gate.evaluate_row("B22", _b22_full(platform.python_version()), attachments={})
+    assert "CPython" not in (result["reason"] or "")
+
+
+@pytest.mark.parametrize("field,value", [("implementation", "PyPy"), ("python_hash_seed", "1"), ("python_hash_seed", None)])
+def test_b22_full_report_environment_lock(field, value):
+    """명세 B22: 환경 CPython/hash 잠금 부족은 U — 구현체가 다르거나 hash seed 가 0 이 아니면(또는 없으면) UNVERIFIED."""
+    doc = _b22_full(platform.python_version())
+    if value is None:
+        del doc["environment"][field]
+    else:
+        doc["environment"][field] = value
+    result = gate.evaluate_row("B22", doc, attachments={})
+    assert result["status"] == "UNVERIFIED" and ("CPython" in result["reason"] or field in result["reason"])
