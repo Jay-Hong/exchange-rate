@@ -12,6 +12,7 @@ import ast
 import copy
 import gc
 import hashlib
+import heapq
 import importlib
 from itertools import islice
 import json
@@ -75,6 +76,9 @@ SUMMARY = {
     "writing": {p: {"status": "not_attempted", "reason": "not_submitted_to_writer"} for p in PAIRS},
     "final_db": "not_checked",
 }
+# One valid collection distinguishes the witness ID in otherwise aggregate recent rows.
+RECENT_WITNESS_SUMMARY = copy.deepcopy(SUMMARY)
+RECENT_WITNESS_SUMMARY["collection"][PAIRS[0]] = {"status": "valid", "reason": "validated"}
 _gate_resident_budget = ContextVar("d7_gate_resident_budget", default=62_914_560)
 
 
@@ -1952,12 +1956,12 @@ def _link_fixture(ledger, invocation_id, source, wall):
                              received_at=wall, received_mono=wall)
 
 
-def _finish_fixture(ledger, invocation_id, source, wall):
+def _finish_fixture(ledger, invocation_id, source, wall, *, summary=SUMMARY):
     schema, contract = REGISTRY[source]
     return ledger.finish(epoch=EPOCH, invocation_id=invocation_id,
                          round_id="round-" + invocation_id[:9],
                          report_schema=schema, validity_contract=contract,
-                         finished_wall=wall, finished_mono=wall, selected_summary=SUMMARY,
+                         finished_wall=wall, finished_mono=wall, selected_summary=summary,
                          telemetry_error_present=False, received_at=wall, received_mono=wall)
 
 
@@ -2281,7 +2285,8 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
 
 
 def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary,
-                      *, readonly=False, graph=True):
+                      *, readonly=False, graph=True, sources=(), attempts=0,
+                      source_attempts=(), init_failed=0):
     if readonly:
         # A pre-register witness must not advance the ledger to the call's time.
         cumulative_end = ledger._cumulative_end
@@ -2292,8 +2297,48 @@ def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxili
                                            after_seq=0, limit=1)
         cumulative_end = snapshot.get("cumulative_end")
         cursor_next_seq = cursor.get("next_seq")
+    public = kind in ("hour", "day", "tail_before", "tail_after",
+                      "tail_80640", "tail_80641")
+    evidence = {}
+    if public and not readonly:
+        epoch = ledger.epoch_cohort_totals(as_of=received_at, as_of_mono=received_at)
+        evidence["epoch_sources"] = epoch.get("sources", [])
+        recent = {}
+        start = max(ledger._health["cohort_exact_from"], received_at - 60 * MINUTE)
+        if start >= received_at:
+            start = received_at - 1
+        for source in REGISTRY:
+            cohort = ledger.cohort_snapshot(source=source, cohort_start=start,
+                                            cohort_end=received_at, as_of=received_at,
+                                            as_of_mono=received_at)
+            recent[source] = {"range": [start, received_at],
+                              "classification": cohort["classification"],
+                              "equations_hold": cohort.get("equations_hold")}
+        evidence["recent_cohorts"] = recent
+        latest = ledger._open_seq[-1] if ledger._open_seq else 0
+        probes = []
+        for after_seq in (0, latest):
+            page = ledger.contributions_open(as_of=received_at, as_of_mono=received_at,
+                                             after_seq=after_seq, limit=16)
+            probes.append({"after_seq": after_seq,
+                           "entry_seqs": [entry["seq"] for entry in page["entries"]],
+                           "next_seq": page["next_seq"],
+                           "classification": page["classification"]})
+        evidence["cursor_probes"] = probes
+        if kind.startswith("tail") and ledger._health["cohort_exact_from"] > 0:
+            old = ledger.cohort_snapshot(source=SOURCE, cohort_start=0,
+                                         cohort_end=ledger._health["cohort_exact_from"],
+                                         as_of=received_at, as_of_mono=received_at)
+            evidence["old_cohort_probe"] = {"range": [0, ledger._health["cohort_exact_from"]],
+                                            "classification": old["classification"]}
+    if kind in ("probe_recent_before", "probe_recent_at") and not readonly:
+        evidence["recent_rows"] = snapshot["recent"]
     h = ledger._health
     budget = _budget_checkpoint(ledger) if graph else _budget_checkpoint_without_graph(ledger.budget_state())
+    source_counts = {source: {"scheduled": source_attempts.get(source, 0),
+                              "registered": sources.get(source, 0),
+                              "rejected": source_attempts.get(source, 0) - sources.get(source, 0)}
+                     for source in REGISTRY}
     return {"kind": kind, "minute_index": minute_index, "received_at": received_at,
             "received_mono": received_at, "scheduled_registered": scheduled,
             "auxiliary_registered": auxiliary, "N_total": h["N_total"],
@@ -2301,12 +2346,24 @@ def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxili
             "retained_details": h["retained_details"], "budget": budget,
             "last_received_at": h["last_received_at"], "last_received_mono": h["last_received_mono"],
             "cumulative_end": cumulative_end, "cursor_after_seq": 0,
+            "close_through": cumulative_end,
             "cursor_next_seq": cursor_next_seq,
             "cohort_exact_from": h["cohort_exact_from"], "frozen_through": h["frozen_through"],
             "coverage_complete": h["coverage_complete"], "uncertain_sources": list(h["uncertain_sources"]),
             "admission_stopped": h["admission_stopped"], "admission_stopped_at": h["admission_stopped_at"],
             "rebuild_count": budget["rebuild_count"],
-            "capacity_charged_bytes": budget["capacity"]["charged_bytes"]}
+            "capacity_charged_bytes": budget["capacity"]["charged_bytes"],
+            "checkpoint_id": None,
+            "observation": "passive" if readonly else "public_advance",
+            "admission_counts": {"scheduled": attempts, "registered": h["N_total"],
+                                 "rejected": attempts - h["N_total"]},
+            "source_counts": source_counts, "last_seq": h["N_total"],
+            "registered_records": h["registered_records"],
+            "diagnostic_counters": {key: h[key] for key in
+                                    ("retention_expired", "expired_start", "expired_finish",
+                                     "expired_wrapper", "expired_identity_unverified")} |
+                                   {"init_failed": init_failed},
+            **evidence}
 
 
 def churn_checkpoint_gaps(checkpoints, *, minute_batches, stride_minutes) -> list[str]:
@@ -2341,6 +2398,141 @@ def churn_checkpoint_gaps(checkpoints, *, minute_batches, stride_minutes) -> lis
                 gaps.append(f"{kind} {label}: {sum(difference.values())} checkpoint(s); "
                             f"received_at {examples}")
     return gaps
+
+
+_C2_COMMON = {"checkpoint_id", "observation", "admission_counts", "source_counts",
+              "last_seq", "registered_records", "diagnostic_counters"}
+_C2_PUBLIC = {"epoch_sources", "recent_cohorts", "cursor_probes"}
+_C2_DIAG = {"retention_expired", "expired_start", "expired_finish",
+            "expired_wrapper", "expired_identity_unverified", "init_failed"}
+_C2_PAIRS = (("probe_close_before", "probe_close_at"),
+             ("probe_expire_before", "probe_expire_at"),
+             ("probe_prune_before", "probe_prune_at"),
+             ("probe_recent_before", "probe_recent_at"))
+_C2_PROBE_CATEGORIES = {"close": {"finished"},
+                        "expire": {"linked", "unbound"},
+                        "prune": {"finished", "linked", "unbound"},
+                        "recent": {"finished"}}
+
+
+def churn_evidence_gaps(fixture_result) -> list[str]:
+    """Find absent C′2 witnesses separately from fully observed violations."""
+    gaps = []
+    checkpoints = fixture_result.get("checkpoints", [])
+    ids = [cp.get("checkpoint_id") for cp in checkpoints]
+    if any(not isinstance(value, str) or not value for value in ids) or len(ids) != len(set(ids)):
+        gaps.append("checkpoint_id missing or duplicated")
+    for index, cp in enumerate(checkpoints):
+        missing = _C2_COMMON - cp.keys()
+        if missing:
+            gaps.append(f"checkpoint {index} {cp.get('kind')}: missing {sorted(missing)}")
+        diag = cp.get("diagnostic_counters")
+        if not isinstance(diag, dict) or _C2_DIAG - diag.keys():
+            gaps.append(f"checkpoint {index} {cp.get('kind')}: diagnostic_counters missing")
+        if cp.get("kind") in ("hour", "day", "tail_before", "tail_after",
+                              "tail_80640", "tail_80641"):
+            missing = _C2_PUBLIC - cp.keys()
+            if missing:
+                gaps.append(f"checkpoint {index} {cp['kind']}: missing {sorted(missing)}")
+            if not cp.get("epoch_sources") or not isinstance(cp.get("recent_cohorts"), dict):
+                gaps.append(f"checkpoint {index} {cp['kind']}: epoch/cohort rows missing")
+            elif set(cp["recent_cohorts"]) != set(REGISTRY):
+                gaps.append(f"checkpoint {index} {cp['kind']}: cohort source missing")
+            if len(cp.get("cursor_probes", [])) < 2:
+                gaps.append(f"checkpoint {index} {cp['kind']}: cursor probes missing")
+            if cp["kind"].startswith("tail") and cp.get("cohort_exact_from", 0) > 0 and \
+                    "old_cohort_probe" not in cp:
+                gaps.append(f"checkpoint {index} {cp['kind']}: old cohort probe missing")
+        if cp.get("kind") == "hour" and type(cp.get("pruned_since_previous_hour")) is not int:
+            gaps.append(f"checkpoint {index}: pruned_since_previous_hour missing")
+        if cp.get("kind", "").startswith("probe_") and not cp.get("identity_samples"):
+            gaps.append(f"checkpoint {index} {cp['kind']}: identity_samples missing")
+        if cp.get("kind", "").startswith("probe_"):
+            for sample in cp.get("identity_samples", []):
+                if {"id", "category", "registered_seq", "expected", "observed"} - sample.keys():
+                    gaps.append(f"checkpoint {index} {cp['kind']}: identity sample incomplete")
+        if cp.get("kind") in ("probe_recent_before", "probe_recent_at"):
+            if not isinstance(cp.get("recent_rows"), list):
+                gaps.append(f"checkpoint {index} {cp['kind']}: recent_rows missing")
+            for sample in cp.get("identity_samples", []):
+                if {"expected_in_recent", "observed_in_recent", "observed_recent_marker_count"} - sample.keys():
+                    gaps.append(f"checkpoint {index} {cp['kind']}: recent sample incomplete")
+    scale = fixture_result.get("minute_batches", 10_080) * fixture_result.get("stride_minutes", 1)
+    if scale >= 360:
+        for before, at in _C2_PAIRS:
+            b = [cp for cp in checkpoints if cp.get("kind") == before]
+            a = [cp for cp in checkpoints if cp.get("kind") == at]
+            if not b or len(b) != len(a):
+                gaps.append(f"{before}/{at}: missing probe pair")
+        name = fixture_result.get("name", "")
+        for boundary in _C2_PROBE_CATEGORIES:
+            required = set(_C2_PROBE_CATEGORIES[boundary])
+            if "init_failed" in name and boundary in ("expire", "prune"):
+                required.add("init_failed")
+            if "burst" in name:
+                required.update({"close": {"burst_finished"}, "expire": {"burst_probe"},
+                                 "prune": {"burst_finished", "burst_probe"},
+                                 "recent": set()}[boundary])
+            for side in ("before", "at"):
+                probe_kind = f"probe_{boundary}_{side}"
+                observed = {sample.get("category") for cp in checkpoints
+                            if cp.get("kind") == probe_kind
+                            for sample in cp.get("identity_samples", [])}
+                if not required <= observed:
+                    gaps.append(f"{boundary} categories missing at {side}: {sorted(required - observed)}")
+    return gaps
+
+
+def _churn_evidence_violations(checkpoints) -> list[str]:
+    violations = []
+    for cp in checkpoints:
+        counts = cp.get("admission_counts", {})
+        if (counts.get("scheduled") != counts.get("registered", -1) + counts.get("rejected", -1)
+                or cp.get("last_seq") != cp.get("N_total")
+                or cp.get("registered_records") != cp.get("N_total")):
+            violations.append(f"{cp.get('kind')}: admission or sequence equation")
+        if sum(row.get("registered", 0) for row in cp.get("source_counts", {}).values()) != cp.get("N_total"):
+            violations.append(f"{cp.get('kind')}: source total")
+        if "epoch_sources" in cp:
+            sources = cp["epoch_sources"]
+            if (sum(row.get("registered_invocations", 0) for row in sources) != cp["N_total"]
+                    or sum(row.get("live_invocations", 0) for row in sources) != cp["N_live"]):
+                violations.append(f"{cp['kind']}: epoch total")
+            for row in sources:
+                total = row.get("registered_invocations")
+                if total != cp.get("source_counts", {}).get(row.get("source"), {}).get("registered"):
+                    violations.append(f"{cp['kind']}: epoch source registered count")
+                if (total != row.get("frozen_invocations", 0) + row.get("live_invocations", 0)
+                        or row.get("equations_hold") != {"connection": True, "lifecycle": True}
+                        or sum(row.get("connection_counts", {}).values()) != total
+                        or sum(row.get("lifecycle_counts", {}).values()) != total):
+                    violations.append(f"{cp['kind']}: epoch source equation")
+            for row in cp.get("recent_cohorts", {}).values():
+                if row.get("classification") != "snapshot" or row.get("equations_hold") != {
+                        "connection": True, "lifecycle": True}:
+                    violations.append(f"{cp['kind']}: recent cohort equation")
+            for probe in cp.get("cursor_probes", []):
+                seqs = probe.get("entry_seqs", [])
+                if (probe.get("classification") != "snapshot"
+                        or seqs != sorted(set(seqs))
+                        or any(seq <= probe.get("after_seq", -1) for seq in seqs)):
+                    violations.append(f"{cp['kind']}: cursor sequence")
+        for sample in cp.get("identity_samples", []):
+            if sample.get("observed") != sample.get("expected"):
+                violations.append(f"{cp['kind']}: identity {sample.get('category')}")
+            if cp.get("kind") in ("probe_recent_before", "probe_recent_at"):
+                expected_in_recent = sample.get("expected_in_recent")
+                if (type(expected_in_recent) is not bool or
+                        sample.get("observed_in_recent") != expected_in_recent or
+                        sample.get("observed_recent_marker_count") != int(expected_in_recent)):
+                    violations.append(f"{cp['kind']}: recent window {sample.get('category')}")
+        if cp.get("old_cohort_probe") and cp["old_cohort_probe"].get("classification") != "cohort_expired":
+            violations.append(f"{cp['kind']}: old cohort was not rejected")
+        if cp.get("kind") == "probe_prune_at" and cp.get("prune_witness"):
+            witness = cp["prune_witness"]
+            if witness.get("pruned_count") is None or witness["pruned_count"] < 0:
+                violations.append("prune resident count increased")
+    return violations
 
 
 def _highwater_measure(ledger, baseline_sizes, fixed):
@@ -2464,7 +2656,18 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     replaying = _replay_expected is not None
     pass_start = time.perf_counter()
     sources, jobs, classes = Counter(), Counter(), Counter()
+    source_attempts = Counter()
+    attempts = init_failed_count = 0
     checkpoints = []
+    probe_events = []
+    probe_serial = 0
+    witness_categories = set()
+    witness_seq = {}
+    witness_ids = {}
+    witness_sources = {}
+    witness_buckets = {}
+    prune_before = {}
+    previous_hour = None
     steps = []
     compared_steps = 0
     replay_mismatch = None
@@ -2473,16 +2676,91 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                  "both_events": 0, "backing_changes": 0, "preserved_pairs": 0,
                  "violations": 0, "first_violation": None, "unverified_events": 0,
                  "first_unverified": None, "checks": []}
-    def add_checkpoint(kind, minute_index, received_at):
+    def add_checkpoint(kind, minute_index, received_at, *, probe_sample=None):
+        nonlocal previous_hour
         cp = _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxiliary,
-                               graph=not replaying)
+                               graph=not replaying,
+                               sources=sources, attempts=attempts,
+                               source_attempts=source_attempts, init_failed=init_failed_count)
+        if probe_sample is not None:
+            invocation_id, category, expected = probe_sample
+            cp["identity_samples"] = [{"id": invocation_id, "category": category,
+                                       "registered_seq": witness_seq[category],
+                                       "expected": expected,
+                                       "observed": ledger.identity_status(invocation_id)}]
+            if kind in ("probe_recent_before", "probe_recent_at"):
+                source = witness_sources[category]
+                # W contains finished buckets in [floor(now)-60min, floor(now)); the old bucket leaves at the boundary.
+                window_end = received_at // MINUTE * MINUTE
+                window_start = window_end - 60 * MINUTE
+                expected_in_recent = window_start <= witness_buckets[category] < window_end
+                row = next((row for row in cp["recent_rows"]
+                            if row["source"] == source and row["pair"] == PAIRS[0]), None)
+                marker_count = row["collection"]["V"] if row is not None else None
+                sample = cp["identity_samples"][0]
+                sample["expected_in_recent"] = expected_in_recent
+                sample["observed_in_recent"] = marker_count is not None and marker_count > 0
+                sample["observed_recent_marker_count"] = marker_count
+            if kind == "probe_prune_before":
+                prune_before[invocation_id] = cp["N_res"]
+            elif kind == "probe_prune_at":
+                before_res = prune_before.get(invocation_id)
+                cp["prune_witness"] = {"before_N_res": before_res, "after_N_res": cp["N_res"],
+                                       "accepted_between": 0,
+                                       "pruned_count": before_res - cp["N_res"] if before_res is not None else None,
+                                       "as_of": received_at, "as_of_mono": received_at,
+                                       "sample_ids": [invocation_id]}
+                cp["prune_observed_through"] = (received_at if all(
+                    tomb.prune_at > received_at for tomb in ledger._tombs.values()) else None)
+        if kind == "hour":
+            cp["pruned_since_previous_hour"] = (0 if previous_hour is None else
+                previous_hour["N_res"] + cp["N_total"] - previous_hour["N_total"] - cp["N_res"])
+            previous_hour = cp
         if not replaying:
             checkpoints.append(cp)
-        if not replaying and _capacity_observer is not None:
+        if not replaying and _capacity_observer is not None and probe_sample is None:
             _capacity_observer(ledger, name, kind, minute_index, budget=cp["budget"])
+        return cp
+
+    def schedule_witness(category, invocation_id, wall):
+        nonlocal probe_serial
+        if category in witness_categories:
+            return
+        witness_categories.add(category)
+        witness_seq[category] = ledger._records[invocation_id]["seq"]
+        witness_ids[category] = invocation_id
+        witness_sources[category] = ledger._records[invocation_id]["source"]
+        witness_buckets[category] = wall // MINUTE * MINUTE
+        events = []
+        if category in ("finished", "burst_finished"):
+            close_at = (wall // MINUTE + 1) * MINUTE + 70 * MINUTE
+            events.extend((("close", close_at, "live", "tombstoned"),
+                           ("prune", close_at + 120 * MINUTE,
+                            "tombstoned", "expired_or_untracked")))
+            if category == "finished":
+                events.append(("recent", (wall // MINUTE + 61) * MINUTE,
+                               "live", "live"))
+        else:
+            expire_at = wall + 240 * MINUTE
+            events.extend((("expire", expire_at, "live", "tombstoned"),
+                           ("prune", expire_at + 120 * MINUTE,
+                            "tombstoned", "expired_or_untracked")))
+        for boundary, at, before_state, at_state in events:
+            for point, when, expected in (("before", at - 1, before_state),
+                                          ("at", at, at_state)):
+                heapq.heappush(probe_events, (when, probe_serial,
+                                              f"probe_{boundary}_{point}",
+                                              invocation_id, category, expected))
+                probe_serial += 1
+
+    def flush_probes(through, minute_index):
+        while probe_events and probe_events[0][0] <= through:
+            when, _, probe_kind, invocation_id, category, expected = heapq.heappop(probe_events)
+            add_checkpoint(probe_kind, minute_index, when,
+                           probe_sample=(invocation_id, category, expected))
     auxiliary = scheduled = max_details = 0
     def register_checked(invocation_id, source, wall, minute_index, job_id=None, *, auxiliary_call=False):
-        nonlocal pending, replay_mismatch
+        nonlocal pending, replay_mismatch, attempts
         seq = compared_steps if replaying else len(steps)
         if replaying and _replay_hook is not None:
             _replay_hook(seq, ledger, wall)
@@ -2493,11 +2771,16 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if selected_kind:
             before_kind = f"{selected_kind}_before"
             pre_cp = _churn_checkpoint(ledger, before_kind, minute_index, wall,
-                                       scheduled, auxiliary, readonly=True)
+                                       scheduled, auxiliary, readonly=True,
+                                       sources=sources, attempts=attempts,
+                                       source_attempts=source_attempts,
+                                       init_failed=init_failed_count)
             pre_point = _capacity_point(ledger, baseline_sizes, name,
                                         before_kind, minute_index, budget=pre_cp["budget"])
             if (before, before_layout) != _highwater_measure(ledger, baseline_sizes, fixed):
                 replay_mismatch = replay_mismatch or f"replay seq {seq}: pre-capture changed trajectory"
+        attempts += 1
+        source_attempts[source] += 1
         result = _register_fixture(ledger, invocation_id, source, wall, job_id)
         pending = {"seq": seq, "input": (invocation_id, source, wall, minute_index, job_id,
                                            auxiliary_call), "classification": result["classification"],
@@ -2532,7 +2815,10 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 before_kind = p["pre_cp"]["kind"]
                 after_kind = before_kind.removesuffix("_before") + "_after"
                 post_cp = _churn_checkpoint(ledger, after_kind, p["input"][3],
-                                            p["input"][2], scheduled, auxiliary, readonly=True)
+                                            p["input"][2], scheduled, auxiliary, readonly=True,
+                                            sources=sources, attempts=attempts,
+                                            source_attempts=source_attempts,
+                                            init_failed=init_failed_count)
                 if (after, after_layout) != _highwater_measure(ledger, baseline_sizes, fixed):
                     replay_mismatch = replay_mismatch or f"replay seq {seq}: post-capture changed trajectory"
                 checkpoints.extend((p["pre_cp"], post_cp))
@@ -2629,6 +2915,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             b = _finish_fixture(ledger, invocation_id, SOURCE, T) if a["classification"] == "linked" else a
             if b["classification"] != "finalized":
                 failure = {"phase": "burst_finish", "index": i, "classification": b["classification"]}
+            elif i == 0:
+                schedule_witness("burst_finished", invocation_id, T)
             if failure:
                 break
         if replaying and failure:
@@ -2646,10 +2934,13 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             if finish_step() and replaying:
                 return replay_result()
             if failure is None:
+                schedule_witness("burst_probe", _fixture_id(target, kind, "b"), T)
                 add_checkpoint("highwater", -1, T)
         release_at = T + 71 * MINUTE
+        flush_probes(release_at, -1)
         add_checkpoint("detail_released", -1, release_at)
         schedule_start = T + 7 * 60 * MINUTE
+        flush_probes(schedule_start, -1)
         ledger.aggregation_snapshot(as_of=schedule_start, as_of_mono=schedule_start)
     offsets = (0, 7_500_000, 15_000_000, 22_500_000, 30_000_000,
                37_500_000, 45_000_000, 52_500_000)
@@ -2666,12 +2957,14 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if _progress is not None and minute and minute % 60 == 0:
             _progress(minute)
         base = schedule_start + minute * churn_stride_minutes * MINUTE
+        flush_probes(base, minute)
         ledger.aggregation_snapshot(as_of=base, as_of_mono=base)
         for offset_index, (offset, source) in enumerate(zip(offsets, source_order)):
             if _stop_requested is not None and _stop_requested():
                 failure = {"phase": "budget", "minute": minute}
                 break
             wall = base + offset
+            flush_probes(wall, minute)
             invocation_id = _fixture_id(scheduled, kind, "c")
             job = job_by_source[source]
             r = register_checked(invocation_id, source, wall, minute, job)
@@ -2692,17 +2985,29 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             linked_count = 4 if track == "most_unfinished" else 2
             if position < finish_count:
                 a = _link_fixture(ledger, invocation_id, source, wall)
-                b = _finish_fixture(ledger, invocation_id, source, wall) if a["classification"] == "linked" else a
+                recent_witness = position == 0 and "finished" not in witness_categories
+                b = (_finish_fixture(ledger, invocation_id, source, wall,
+                                     summary=RECENT_WITNESS_SUMMARY if recent_witness else SUMMARY)
+                     if a["classification"] == "linked" else a)
                 if b["classification"] != "finalized":
                     failure = {"minute": minute, "phase": "finish", "classification": b["classification"]}
+                elif position == 0:
+                    schedule_witness("finished", invocation_id, wall)
             elif position < finish_count + linked_count:
                 a = _link_fixture(ledger, invocation_id, source, wall)
                 if a["classification"] != "linked":
                     failure = {"minute": minute, "phase": "link", "classification": a["classification"]}
+                elif position == finish_count:
+                    schedule_witness("linked", invocation_id, wall)
             elif init_variant and position == finish_count + linked_count:
                 a = _init_failed_fixture(ledger, invocation_id, wall)
                 if a["classification"] != "report_init_failed":
                     failure = {"minute": minute, "phase": "init_failed", "classification": a["classification"]}
+                else:
+                    init_failed_count += 1
+                    schedule_witness("init_failed", invocation_id, wall)
+            elif position == finish_count + linked_count + int(init_variant):
+                schedule_witness("unbound", invocation_id, wall)
             if failure:
                 break
         if failure is None and ledger._q_charge() > last_observed_q:
@@ -2712,12 +3017,14 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         last_hour = (minute + 1) * churn_stride_minutes // 60
         for hour_index in range(first_hour, last_hour + 1):
             boundary = schedule_start + hour_index * 60 * MINUTE
+            flush_probes(boundary, minute)
             add_checkpoint("hour", minute, boundary)
             if hour_index % 24 == 0:
                 add_checkpoint("day", minute, boundary)
         max_details = max(max_details, ledger._health["retained_details"])
     if failure is None:
         tail_time = schedule_start + churn_minutes * churn_stride_minutes * MINUTE
+        flush_probes(tail_time, churn_minutes)
         full = churn_minutes == 10_080 and churn_stride_minutes == 1
         add_checkpoint("tail_80640" if full else "tail_before", churn_minutes, tail_time)
         tail = register_checked(_fixture_id(scheduled, kind, "c"), "investing",
@@ -2731,7 +3038,14 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             failure = {"phase": "tail", "classification": tail["classification"]}
         if finish_step() and replaying:
             return replay_result()
-        add_checkpoint("tail_80641" if full else "tail_after", churn_minutes, tail_time)
+        tail_cp = add_checkpoint("tail_80641" if full else "tail_after", churn_minutes, tail_time)
+        if churn_minutes * churn_stride_minutes >= 360:
+            tail_cp["identity_samples"] = [
+                {"id": witness_ids[category],
+                 "category": category, "registered_seq": witness_seq[category],
+                 "expected": "expired_or_untracked", "observed": ledger.identity_status(
+                     witness_ids[category])}
+                for category in sorted(witness_categories)]
     if replaying:
         return replay_result()
     pass1_seconds = time.perf_counter() - pass_start
@@ -2760,6 +3074,14 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if replayed["stop_reason"] == "budget":
             failure = {"phase": "budget", "pass": 2}
     highwater["replay"] = replay
+    for index, cp in enumerate(checkpoints):
+        cp["checkpoint_id"] = f"{name}:{index}"
+        cp["capacity_ref"] = cp["checkpoint_id"]
+    evidence_result = {"name": name, "checkpoints": checkpoints, "minute_batches": churn_minutes,
+                       "stride_minutes": churn_stride_minutes}
+    evidence_gaps = churn_evidence_gaps(evidence_result) if failure is None else []
+    evidence_violations = (_churn_evidence_violations(checkpoints)
+                           if failure is None and replay["mismatch"] is None else [])
     checkpoint_gaps = churn_checkpoint_gaps(checkpoints, minute_batches=churn_minutes,
                                             stride_minutes=churn_stride_minutes)
     highwater_gaps = highwater_pair_gaps(highwater, checkpoints)
@@ -2767,7 +3089,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                             for cp in checkpoints)
     valid = (failure is None and replay["mismatch"] is None and
              (not selected_seqs or replay["performed"]) and
-             not checkpoint_gaps and not highwater_gaps and
+             not checkpoint_gaps and not highwater_gaps and not evidence_gaps and
+             not evidence_violations and
              not highwater["violations"] and not highwater["unverified_events"] and
              scheduled == 8 * churn_minutes + 1 and
              (not burst or max_details >= target) and
@@ -2787,14 +3110,20 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             highwater_gaps or [f"{highwater['unverified_events']} unverified event(s)"])
     if highwater["violations"]:
         reason = (f"{reason}; " if reason else "") + "highwater Q_actual or E limit exceeded"
+    if evidence_gaps:
+        reason = (f"{reason}; " if reason else "") + "evidence gaps: " + "; ".join(evidence_gaps[:8])
+    if evidence_violations:
+        reason = (f"{reason}; " if reason else "") + "evidence violations: " + "; ".join(evidence_violations[:8])
     if unknown_ownership:
         reason = (f"{reason}; " if reason else "") + "owned graph or baseline unverified"
     if replay["mismatch"]:
         reason = (f"{reason}; " if reason else "") + replay["mismatch"]
-    status = ("PASS" if valid else "UNVERIFIED" if checkpoint_gaps or
+    status = ("PASS" if valid else "UNVERIFIED" if checkpoint_gaps or evidence_gaps or
               highwater_gaps or highwater["unverified_events"] or
               replay["mismatch"] or (failure and failure.get("phase") == "budget") else "FAIL")
     if highwater["violations"]:
+        status = "FAIL"
+    elif evidence_violations:
         status = "FAIL"
     elif replay["mismatch"] or unknown_ownership:
         status = "UNVERIFIED"
@@ -2809,6 +3138,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             "effective_detail_target": target, "max_retained_details_observed": max_details,
             "tail_classification": tail["classification"] if tail else None,
             "checkpoints": checkpoints, "highwater_checks": highwater,
+            "evidence_gaps": evidence_gaps,
             "classification_counts": dict(classes),
             "first_failure": failure, "reason": reason}
 

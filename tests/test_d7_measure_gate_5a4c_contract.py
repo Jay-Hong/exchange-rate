@@ -13,6 +13,7 @@ import copy
 import gc
 import importlib.util
 import io
+import json
 import math
 import sys
 from pathlib import Path
@@ -73,7 +74,7 @@ CHURN_KEYS = {"name", "status", "id_kind", "state_track", "job_key_counts", "id_
               "scheduled_registered", "auxiliary_registered", "N_total_at_tail", "source_registered",
               "requested_detail_target", "effective_detail_target", "max_retained_details_observed",
               "tail_classification", "checkpoints", "classification_counts", "first_failure", "reason",
-              "highwater_checks"}
+              "highwater_checks", "evidence_gaps"}
 CHURN_CP_KEYS = {"kind", "minute_index", "received_at", "received_mono", "scheduled_registered", "auxiliary_registered",
                  "N_total", "N_live", "N_tomb", "N_res", "retained_details", "budget", "last_received_at",
                  "last_received_mono", "cumulative_end", "cursor_after_seq", "cursor_next_seq", "cohort_exact_from",
@@ -237,7 +238,7 @@ def test_small_churn_registers_every_scheduled_call(name):
     assert "tail_80640" not in kinds and "tail_80641" not in kinds                           # full 전용 표기
     assert kinds.count("hour") >= 24 and kinds.count("day") >= 1
     for cp in c["checkpoints"]:
-        assert set(cp) == CHURN_CP_KEYS
+        assert CHURN_CP_KEYS <= set(cp)                                             # C′2 필드가 더해진다
         assert cp["admission_stopped"] is False and cp["rebuild_count"] == 0
         assert cp["N_res"] == cp["N_live"] + cp["N_tomb"] <= 128
         assert cp["budget"]["E"] <= cp["budget"]["B"]
@@ -863,3 +864,262 @@ def test_capacity_proof_requires_each_preserved_pair_point():
     drop = next(i for i, p in enumerate(points) if p["kind"] == "highwater_after")
     partial = gate._capacity_proof(points[:drop] + points[drop + 1:], fixtures, ["churn_most_finished_short_ascii"])
     assert partial["status"] == "UNVERIFIED" and "missing" in (partial["reason"] or "")
+
+
+# --- C′2 체크포인트 원자료 확장 (slice5a4c_addendum_c2_evidence.md, Codex 설계 codex_c2_checkpoint_design_r1.md) ----
+C2_COMMON = {"checkpoint_id", "observation", "admission_counts", "source_counts", "last_seq", "registered_records",
+             "diagnostic_counters"}
+C2_PUBLIC = {"epoch_sources", "recent_cohorts", "cursor_probes"}
+C2_DIAG = {"retention_expired", "expired_start", "expired_finish", "expired_wrapper", "expired_identity_unverified",
+           "init_failed"}
+PROBE_PAIRS = [("probe_close_before", "probe_close_at"), ("probe_expire_before", "probe_expire_at"),
+               ("probe_prune_before", "probe_prune_at"), ("probe_recent_before", "probe_recent_at")]
+
+
+def _by_kind(c, kind):
+    return [cp for cp in c["checkpoints"] if cp["kind"] == kind]
+
+
+def test_c2_checkpoint_fields_present():
+    c = _default_churn()
+    ids = [cp["checkpoint_id"] for cp in c["checkpoints"]]
+    assert len(ids) == len(set(ids)) and all(isinstance(i, str) and i for i in ids)
+    for cp in c["checkpoints"]:
+        assert C2_COMMON <= set(cp), cp["kind"]
+        assert cp["observation"] in ("public_advance", "passive")
+        assert C2_DIAG <= set(cp["diagnostic_counters"])
+        if cp["kind"] in ("hour", "day", "tail_before", "tail_after"):
+            assert C2_PUBLIC <= set(cp), cp["kind"]
+        if cp["kind"] in ("highwater_before", "highwater_after"):
+            assert cp["observation"] == "passive"
+    for cp in _by_kind(c, "hour"):
+        assert type(cp["pruned_since_previous_hour"]) is int
+
+
+def test_c2_invariants_hold_on_normal_run():
+    c = _default_churn()
+    for cp in c["checkpoints"]:
+        ac = cp["admission_counts"]
+        assert ac["scheduled"] == ac["registered"] + ac["rejected"] and ac["rejected"] == 0
+        assert cp["last_seq"] == cp["N_total"] == cp["registered_records"]
+        assert sum(v["registered"] for v in cp["source_counts"].values()) == cp["N_total"]
+        if "epoch_sources" in cp:
+            srcs = cp["epoch_sources"]
+            assert sum(s["registered_invocations"] for s in srcs) == cp["N_total"]
+            assert sum(s["live_invocations"] for s in srcs) == cp["N_live"]
+            for s in srcs:
+                assert s["registered_invocations"] == s["frozen_invocations"] + s["live_invocations"]
+                assert s["equations_hold"] == {"connection": True, "lifecycle": True}
+            for rc in cp["recent_cohorts"].values():
+                assert rc["equations_hold"] == {"connection": True, "lifecycle": True}
+            for probe in cp["cursor_probes"]:
+                seqs = probe["entry_seqs"]
+                assert all(s > probe["after_seq"] for s in seqs) and seqs == sorted(set(seqs))
+
+
+def test_c2_prune_counts_from_resident_ledger():
+    c = _default_churn()
+    hours = _by_kind(c, "hour")
+    assert [h["pruned_since_previous_hour"] for h in hours[:3]] == [0, 0, 0]
+    assert sum(h["pruned_since_previous_hour"] for h in hours) > 0              # 비공허: 실제 prune 이 있다
+    for a, b in zip(hours, hours[1:]):
+        accepted = b["N_total"] - a["N_total"]
+        assert b["pruned_since_previous_hour"] == a["N_res"] + accepted - b["N_res"]
+
+
+@pytest.mark.parametrize("name", ["churn_most_finished_short_ascii", "churn_init_failed_most_finished_unicode128",
+                                  "churn_burst_ascii128"])
+def test_c2_boundary_probes_observe_expected_states(name):
+    c = _default_churn() if name == "churn_most_finished_short_ascii" else \
+        gate.run_churn_fixture(name, limit=128, **SMALL_CHURN)
+    expected = {"probe_close_before": "live", "probe_close_at": "tombstoned",
+                "probe_expire_before": "live", "probe_expire_at": "tombstoned",
+                "probe_prune_before": "tombstoned", "probe_prune_at": "expired_or_untracked"}
+    for before, at in PROBE_PAIRS:
+        b, a = _by_kind(c, before), _by_kind(c, at)
+        assert b and len(b) == len(a), (name, before)
+        for cp in b + a:
+            for s in cp["identity_samples"]:
+                assert s["observed"] == s["expected"], (cp["kind"], s)
+                if cp["kind"] in expected:
+                    assert s["expected"] == expected[cp["kind"]]
+    cats = {s["category"] for cp in _by_kind(c, "probe_prune_at") for s in cp["identity_samples"]}
+    assert {"finished", "linked", "unbound"} <= cats
+    if "init_failed" in name:
+        assert "init_failed" in cats
+        tail = _by_kind(c, "tail_after")[0]
+        assert tail["diagnostic_counters"]["init_failed"] > 0
+    if "burst" in name:
+        assert {"burst_finished", "burst_probe"} <= cats
+
+
+def test_c2_evidence_gaps_detect_missing_data():
+    c = _default_churn()
+    assert gate.churn_evidence_gaps(c) == [] and c["evidence_gaps"] == []
+    no_epoch = copy.deepcopy(c)
+    del next(cp for cp in no_epoch["checkpoints"] if cp["kind"] == "hour")["epoch_sources"]
+    assert gate.churn_evidence_gaps(no_epoch)
+    no_prune_probe = copy.deepcopy(c)
+    no_prune_probe["checkpoints"] = [cp for cp in c["checkpoints"] if cp["kind"] != "probe_prune_at"]
+    assert gate.churn_evidence_gaps(no_prune_probe)
+    no_diag = copy.deepcopy(c)
+    del next(cp for cp in no_diag["checkpoints"] if cp["kind"] == "day")["diagnostic_counters"]["init_failed"]
+    assert gate.churn_evidence_gaps(no_diag)
+
+
+def test_c2_evidence_gaps_make_fixture_unverified(monkeypatch):
+    monkeypatch.setattr(gate, "churn_evidence_gaps", lambda *a, **k: ["epoch_sources missing at hour 3"])
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    assert c["status"] == "UNVERIFIED" and "epoch_sources missing at hour 3" in (c["reason"] or "")
+
+
+def test_c2_broken_epoch_equation_fails(monkeypatch):
+    original = lg.RoundLedger.epoch_cohort_totals
+
+    def broken(self, **kw):
+        out = original(self, **kw)
+        if out.get("sources"):
+            out["sources"][0]["live_invocations"] += 1                       # 완전 관측의 등식 위반
+        return out
+    monkeypatch.setattr(lg.RoundLedger, "epoch_cohort_totals", broken)
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, **SMALL_CHURN)
+    assert c["status"] == "FAIL"
+
+
+def test_c2_probes_keep_replay_consistent():
+    c = _default_churn()
+    rp = c["highwater_checks"]["replay"]
+    assert rp["mismatch"] is None and rp["stop_reason"] == "last_selected"
+    assert _by_kind(c, "probe_prune_at")                                     # 탐침이 있는 상태에서 재실행이 일치
+
+
+
+def test_result_keys_are_not_hidden_from_iteration():
+    # 반복으로 보이는 키와 JSON 에 실리는 키가 같아야 한다(dict 하위 클래스로 키를 숨기는 우회 금지).
+    c = _default_churn()
+    assert type(c) is dict and set(c) == set(json.loads(json.dumps(c)))
+    for cp in c["checkpoints"]:
+        assert type(cp) is dict and set(cp) == set(json.loads(json.dumps(cp))), cp["kind"]
+
+
+# --- 배터리 생존 보강(G33~G36·G39): 각 검사만 건드리는 입력 --------------------------------------------
+def test_c2_gaps_detect_single_missing_prune_category():
+    c = copy.deepcopy(_default_churn())
+    relabeled = 0
+    for cp in _by_kind(c, "probe_prune_at"):
+        for sample in cp["identity_samples"]:
+            if sample["category"] == "linked":
+                sample["category"] = "finished"                               # 표본은 남기고 범주만 빠진다
+                relabeled += 1
+    assert relabeled > 0 and all(cp["identity_samples"] for cp in _by_kind(c, "probe_prune_at"))
+    assert any("prune categories" in g for g in gate.churn_evidence_gaps(c))
+
+
+def test_c2_gaps_detect_empty_probe_samples():
+    c = copy.deepcopy(_default_churn())
+    _by_kind(c, "probe_close_before")[0]["identity_samples"] = []
+    assert any("identity_samples missing" in g for g in gate.churn_evidence_gaps(c))
+
+
+def test_c2_violations_detect_epoch_total_with_consistent_rows():
+    c = copy.deepcopy(_default_churn())
+    cp = next(cp for cp in _by_kind(c, "hour") if len(cp["epoch_sources"]) > 1 and
+              cp["epoch_sources"][0]["registered_invocations"] > 0)
+    cp["epoch_sources"] = cp["epoch_sources"][1:]                           # 남은 행은 각자 등식을 지킨다
+    assert gate._churn_evidence_violations([cp])
+
+
+def test_c2_violations_detect_identity_mismatch():
+    c = copy.deepcopy(_default_churn())
+    cp = _by_kind(c, "probe_prune_at")[0]
+    cp["identity_samples"][0]["observed"] = "live"
+    assert gate._churn_evidence_violations([cp])
+
+
+def test_c2_violations_detect_old_cohort_not_rejected():
+    c = copy.deepcopy(_default_churn())
+    cp = next(cp for cp in c["checkpoints"] if cp.get("old_cohort_probe"))  # 비공허: 오래된 cohort 탐침이 있다
+    assert cp["old_cohort_probe"]["classification"] == "cohort_expired"
+    cp["old_cohort_probe"]["classification"] = "snapshot"
+    assert gate._churn_evidence_violations([cp])
+
+
+# --- C′2 커밋 검토 REVISE 반영(Codex): W 경계 기대값·source별 대조·탐침별 범주 완전성 -----------------------
+PROBE_CATEGORIES = {"close": {"finished"}, "expire": {"linked", "unbound"}, "prune": {"finished", "linked", "unbound"},
+                    "recent": {"finished"}}
+
+
+def _required_categories(name, kind):
+    need = set(PROBE_CATEGORIES[kind])
+    if "init_failed" in name and kind in ("expire", "prune"):
+        need.add("init_failed")
+    if "burst" in name:
+        need |= {"close": {"burst_finished"}, "expire": {"burst_probe"},
+                 "prune": {"burst_finished", "burst_probe"}, "recent": set()}[kind]
+    return need
+
+
+@pytest.mark.parametrize("name", ["churn_most_finished_short_ascii", "churn_init_failed_most_finished_unicode128",
+                                  "churn_burst_ascii128"])
+def test_c2_every_probe_kind_has_required_categories(name):
+    c = _default_churn() if name == "churn_most_finished_short_ascii" else \
+        gate.run_churn_fixture(name, limit=128, **SMALL_CHURN)
+    for kind in PROBE_CATEGORIES:
+        for side in ("before", "at"):
+            cats = {s["category"] for cp in _by_kind(c, f"probe_{kind}_{side}") for s in cp["identity_samples"]}
+            assert _required_categories(name, kind) <= cats, (name, kind, side, cats)
+
+
+def test_c2_gaps_detect_missing_burst_close_samples():
+    c = gate.run_churn_fixture("churn_burst_ascii128", limit=128, **SMALL_CHURN)
+    assert gate.churn_evidence_gaps(c) == []
+    for cp in c["checkpoints"]:
+        if cp["kind"] in ("probe_close_before", "probe_close_at"):
+            cp["identity_samples"] = [s for s in cp["identity_samples"] if s["category"] != "burst_finished"]
+    c["checkpoints"] = [cp for cp in c["checkpoints"]
+                        if not (cp["kind"].startswith("probe_close") and not cp["identity_samples"])]
+    assert any(cp["kind"] == "probe_close_at" for cp in c["checkpoints"])      # 비공허: finished close 는 남는다
+    assert gate.churn_evidence_gaps(c)
+
+
+def test_c2_recent_window_probe_distinguishes_boundary():
+    c = _default_churn()
+    before, at = _by_kind(c, "probe_recent_before"), _by_kind(c, "probe_recent_at")
+    assert before and len(before) == len(at)
+    for b, a in zip(before, at):
+        assert "recent_rows" in b and "recent_rows" in a
+        sb = {s["id"]: s for s in b["identity_samples"]}
+        for s in a["identity_samples"]:
+            for side in (sb[s["id"]], s):
+                assert side["observed_in_recent"] == side["expected_in_recent"]
+            assert sb[s["id"]]["expected_in_recent"] != s["expected_in_recent"]   # 경계 전후 기대가 다르다
+
+
+def test_c2_source_counts_match_epoch_rows_per_source():
+    c = _default_churn()
+    for cp in c["checkpoints"]:
+        if "epoch_sources" in cp:
+            for row in cp["epoch_sources"]:
+                assert row["registered_invocations"] == cp["source_counts"].get(row["source"], {}).get("registered", 0)
+    cp = copy.deepcopy(next(cp for cp in _by_kind(c, "hour")
+                            if sum(1 for v in cp["source_counts"].values() if v["registered"]) >= 2))
+    srcs = [s for s, v in cp["source_counts"].items() if v["registered"]]
+    a, b = srcs[0], srcs[1]
+    if cp["source_counts"][a]["registered"] == cp["source_counts"][b]["registered"]:
+        cp["source_counts"][a]["registered"] += 1
+        cp["source_counts"][b]["registered"] -= 1
+    else:
+        cp["source_counts"][a]["registered"], cp["source_counts"][b]["registered"] = \
+            cp["source_counts"][b]["registered"], cp["source_counts"][a]["registered"]
+    assert gate._churn_evidence_violations([cp])                             # 합계는 같고 source 별만 어긋남
+
+
+def test_c2_violations_detect_recent_window_mismatch():
+    c = copy.deepcopy(_default_churn())
+    cp = next(cp for cp in _by_kind(c, "probe_recent_before") + _by_kind(c, "probe_recent_at")
+              if cp["identity_samples"][0]["expected_in_recent"])                # 비공허: 포함이 기대되는 쪽
+    assert not gate._churn_evidence_violations([cp])
+    sample = cp["identity_samples"][0]
+    sample["observed_recent_marker_count"] = 0
+    sample["observed_in_recent"] = False
+    assert gate._churn_evidence_violations([cp])
