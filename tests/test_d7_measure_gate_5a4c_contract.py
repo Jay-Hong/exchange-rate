@@ -1411,6 +1411,109 @@ def test_x2_b_b20_independent_fault_scenarios_pass():
     assert gate.evaluate_row("B20", report, attachments={})["status"] == "PASS"
 
 
+@pytest.mark.parametrize("clock", ("at", "mono"))
+def test_gap_b14_checkpoint_last_receipt_matches_last_trace_event(clock):
+    report = _project_b_row("B14", _default_churn())
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "PASS"
+    checkpoint = report["churn_fixtures"][0]["checkpoints"][0]
+    checkpoint["last_received_" + clock] -= 1
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "FAIL"
+
+
+def test_gap_b14_missing_receipt_event_is_unverified():
+    report = _project_b_row("B14", _default_churn())
+    del report["churn_fixtures"][0]["checkpoints"][0]["receipt_event"]
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "UNVERIFIED"
+
+
+@pytest.mark.parametrize("field, donor, recipient", (("connection_counts", "started", "unbound"),
+                                                  ("lifecycle_counts", "finalized", "awaiting_report")))
+def test_gap_b17_epoch_distribution_matches_trace(field, donor, recipient):
+    report = _project_b_row("B17", _default_churn())
+    assert gate.evaluate_row("B17", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    projection = next(p for cp in fixture["checkpoints"]
+                      for p in cp.get("passive_epoch_projection", [])
+                      if p[field][donor])
+    public = next(cp for cp in fixture["checkpoints"]
+                  if cp["checkpoint_id"] == projection["public_checkpoint_id"])
+    entry = next(e for e in public["epoch_sources"] if e["source"] == projection["source"])
+    for counts in (projection[field], entry[field]):
+        counts[donor] -= 1
+        counts[recipient] += 1
+    assert gate.evaluate_row("B17", report, attachments={})["status"] == "FAIL"
+
+
+def test_gap_b17_missing_epoch_bucket_is_unverified():
+    report = _project_b_row("B17", _default_churn())
+    projection = next(p for cp in report["churn_fixtures"][0]["checkpoints"]
+                      for p in cp.get("passive_epoch_projection", []))
+    del projection["lifecycle_counts"]["contract_mixed"]
+    assert gate.evaluate_row("B17", report, attachments={})["status"] == "UNVERIFIED"
+
+
+@pytest.mark.parametrize("change", ("extra", "omitted"))
+def test_gap_b20_affected_sources_match_fault_trace(change):
+    scenarios = gate.run_churn_fault_scenarios()
+    report = {"mode": "predicate_unit", "scenarios": scenarios,
+              "test_scale": {"fault_kinds": [s["fault_evidence"]["fault_kind"] for s in scenarios]}}
+    assert gate.evaluate_row("B20", report, attachments={})["status"] == "PASS"
+    kind = "merge_failure" if change == "extra" else "clock_step"
+    evidence = next(s["fault_evidence"] for s in scenarios if s["fault_evidence"]["fault_kind"] == kind)
+    if change == "extra":
+        evidence["affected_sources"].append("unobserved")
+    else:
+        removed = evidence["affected_sources"].pop()
+        evidence["observed_coverage"]["uncertain_sources"].remove(removed)
+    assert gate.evaluate_row("B20", report, attachments={})["status"] == "FAIL"
+
+
+def test_gap_b20_missing_fault_trace_source_is_unverified():
+    scenarios = gate.run_churn_fault_scenarios()
+    report = {"mode": "predicate_unit", "scenarios": scenarios,
+              "test_scale": {"fault_kinds": [s["fault_evidence"]["fault_kind"] for s in scenarios]}}
+    del scenarios[0]["fault_evidence"]["fault_trace"][0]["source"]
+    assert gate.evaluate_row("B20", report, attachments={})["status"] == "UNVERIFIED"
+
+
+@pytest.fixture(scope="module")
+def _gap_b22_small_report():
+    report = gate.run_gate(limit=128, samples=1, warmup=0,
+                           churn_names=["churn_most_finished_short_ascii"],
+                           progress=io.StringIO(), **SMALL_CHURN)
+    proof = report["capacity_proof"]
+    assert proof["status"] == "PASS" and proof["checkpoints"]
+    dict_steps, set_steps = gate._runtime_budget_steps(128)
+    steps = {"at_count": 128, "list_header_bytes": sys.getsizeof([]),
+             "list_slot_bytes": sys.getsizeof([None]) - sys.getsizeof([]),
+             "block_width": 257, "detail_cap": 128,
+             "dict_steps": dict_steps, "set_steps": set_steps}
+    steps["computed_q_at_limit"] = gate._actual_budget_q(128, steps)
+    proof["budget_q_size_steps"] = steps
+    proof["Q_cap_bytes"] = steps["computed_q_at_limit"] + 512 * 128 + 1536 * 12
+    proof["F4_ownership"] = {"total_bytes": 18_874_368,
+                             "items": [{"path": "fixed", "bytes": 18_874_368, "owner": "F_4"}]}
+    report["mode"] = "predicate_unit"
+    report["test_scale"] = {"max_records": 128, "job_key_limit": 12}
+    assert gate.evaluate_row("B22", report, attachments={})["status"] == "PASS"
+    return report
+
+
+@pytest.mark.parametrize("summary", ("H_res", "Q_obs_bytes"))
+def test_gap_b22_capacity_summary_matches_observation_maximum(_gap_b22_small_report, summary):
+    report = copy.deepcopy(_gap_b22_small_report)
+    proof = report["capacity_proof"]
+    assert proof[summary] > 0
+    proof[summary] -= 1
+    assert gate.evaluate_row("B22", report, attachments={})["status"] == "FAIL"
+
+
+def test_gap_b22_missing_capacity_observation_is_unverified(_gap_b22_small_report):
+    report = copy.deepcopy(_gap_b22_small_report)
+    del report["capacity_proof"]["checkpoints"][0]["Q_4_bytes"]
+    assert gate.evaluate_row("B22", report, attachments={})["status"] == "UNVERIFIED"
+
+
 def test_x2_b_b18_does_not_claim_complete_counters_without_transition_trace():
     report = _project_b_row("B18", _default_churn())
     del report["churn_fixtures"][0]["max_resident_observed"]
@@ -1438,7 +1541,7 @@ def test_full_shape_churn_keeps_detailed_evidence_in_attachments(_stream_churn):
     assert "tomb_due_ledger_ref" in fixture and "recent_input_ledger_ref" in fixture
     assert all("seq_evidence_ref" in cp and "retained_seqs" not in cp
                for cp in fixture["checkpoints"])
-    for row in ("B10", "B12", "B15", "B18", "B19", "B21"):
+    for row in ("B10", "B12", "B14", "B15", "B17", "B18", "B19", "B21"):
         report = _project_b_row(row, fixture)
         report["scenarios"] = fixture["transition_measurements"]
         if row == "B10":

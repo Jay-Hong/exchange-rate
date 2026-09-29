@@ -19,7 +19,7 @@ import hashlib
 import heapq
 import importlib
 import io
-from itertools import islice
+from itertools import chain, islice
 import json
 import os
 import platform
@@ -258,6 +258,12 @@ class _ChurnLedger(RoundLedger):
     """Observe actual retire/prune transitions without adding state to the measured graph."""
 
     callbacks = weakref.WeakKeyDictionary()
+
+    def _advance_and_close(self, wall, mono):
+        result = super()._advance_and_close(wall, mono)
+        # Keep the received API input independently of health's last-received summary.
+        self._gate_last_receipt = (wall, mono)
+        return result
 
     def _retire(self, rec, wall, mono, *, expired=False):
         identity, seq, source = rec.invocation_id, rec.seq, rec.source
@@ -2723,12 +2729,16 @@ def _churn_checkpoint(ledger, kind, minute_index, received_at, scheduled, auxili
                               "registered": sources.get(source, 0),
                               "rejected": source_attempts.get(source, 0) - sources.get(source, 0)}
                      for source in REGISTRY}
+    receipt_at, receipt_mono = ((getattr(ledger, "_gate_last_receipt", (None, None)))
+                                if readonly else (received_at, received_at))
     return {"kind": kind, "minute_index": minute_index, "received_at": received_at,
             "received_mono": received_at, "scheduled_registered": scheduled,
             "auxiliary_registered": auxiliary, "N_total": h["N_total"],
             "N_live": h["N_live"], "N_tomb": h["N_tomb"], "N_res": h["N_res"],
             "retained_details": h["retained_details"], "budget": budget,
             "last_received_at": h["last_received_at"], "last_received_mono": h["last_received_mono"],
+            "receipt_event": {"action": "checkpoint_receipt",
+                              "received_at": receipt_at, "received_mono": receipt_mono},
             "cumulative_end": cumulative_end, "cursor_after_seq": 0,
             "close_through": cumulative_end,
             "cursor_next_seq": cursor_next_seq,
@@ -3062,6 +3072,9 @@ def run_churn_fault_scenarios():
         fault_trace = [{"action": "fault", "classification": first, "source": SOURCE,
                         "watermark_after": after}]
         if kind == "clock_step":
+            fault_trace.extend({"action": "fault", "classification": first,
+                                "source": source, "watermark_after": after}
+                               for source in affected[1:])
             for micros in (4_000_000, 11_000_000):
                 ledger.aggregation_snapshot(as_of=T + micros, as_of_mono=T + micros + 2)
             retry_at = T + 11_000_001
@@ -5355,7 +5368,7 @@ def _b02_cycle_calls(fixture, registers, count, gate_shape):
     return registers[:-1]
 
 
-def _events_at(trace, cp):
+def _events_at(trace, cp, *, include_receipt=False):
     """The sole checkpoint event cut: event_order, with both clocks checked separately."""
     cache = _finalize_cache.get()
     indexes = cache.setdefault("b_event_indexes", {}) if cache is not None else {}
@@ -5401,7 +5414,71 @@ def _events_at(trace, cp):
         _assert(wall_max[end - 1] <= _integer(_need(cp, "received_at")) and
                 mono_max[end - 1] <= _integer(_need(cp, "received_mono")),
                 "future API event entered checkpoint state")
-    return islice(trace, end)
+    selected = islice(trace, end)
+    if include_receipt:
+        receipt = _need(cp, "receipt_event")
+        _eq(_need(receipt, "action"), "checkpoint_receipt")
+        wall = _integer(_need(receipt, "received_at"))
+        mono = _integer(_need(receipt, "received_mono"))
+        if end:
+            _assert(wall_max[end - 1] <= wall and mono_max[end - 1] <= mono,
+                    "checkpoint receipt precedes a selected API event")
+        _assert(wall <= _integer(_need(cp, "received_at")) and
+                mono <= _integer(_need(cp, "received_mono")),
+                "checkpoint receipt entered from the future")
+        return chain(selected, (receipt,))
+    return selected
+
+
+def _epoch_trace_distribution(trace, cp):
+    """Rebuild epoch connection/lifecycle buckets at one public event cut."""
+    records = {}
+    for event in _events_at(trace, cp):
+        action = _need(event, "action")
+        if action == "register" and _need(event, "classification") == "registered":
+            identity = _need(event, "id")
+            _assert(identity not in records, "epoch registration ID reused")
+            _eq(_need(event, "connection"), "unbound")
+            _eq(_need(event, "lifecycle"), "awaiting_report")
+            records[identity] = {"source": _need(event, "source"),
+                                 "received_mono": _integer(_need(event, "received_mono")),
+                                 "connection": "unbound", "lifecycle": None,
+                                 "linked": False, "frozen": False}
+        elif action in ("link_round", "init_failed", "finish", "tomb"):
+            identity = _need(event, "id")
+            rec = records.get(identity)
+            if rec is None:
+                raise _EvidenceMissing("epoch transition registration absent")
+            _eq(_need(event, "source"), rec["source"])
+            classification = _need(event, "classification")
+            if action == "link_round" and classification == "linked":
+                rec["connection"] = "started"
+                rec["linked"] = True
+            elif action == "init_failed" and classification == "report_init_failed":
+                rec["connection"] = "init_failed"
+                rec["lifecycle"] = "report_unavailable"
+            elif action == "finish" and classification in ("finalized", "conflicting", "contract_mixed"):
+                rec["lifecycle"] = classification
+            elif action == "tomb":
+                _eq(classification, "tombstoned")
+                rec["frozen"] = True
+                if rec["lifecycle"] is None:
+                    rec["lifecycle"] = "report_unavailable"
+    result = {}
+    mono = _integer(_need(cp, "received_mono"))
+    for rec in records.values():
+        source = rec["source"]
+        counts = result.setdefault(source, {"registered": 0, "frozen": 0, "live": 0,
+                                            "connection": Counter(), "lifecycle": Counter()})
+        counts["registered"] += 1
+        counts["frozen" if rec["frozen"] else "live"] += 1
+        counts["connection"][rec["connection"]] += 1
+        state = rec["lifecycle"]
+        if state is None:
+            state = ("overdue" if mono - rec["received_mono"] >= 15 * MINUTE else
+                     "in_flight" if rec["linked"] else "awaiting_report")
+        counts["lifecycle"][state] += 1
+    return result
 
 
 def _b_checkpoint_receipt_order(row, report):
@@ -6358,7 +6435,12 @@ def _evaluate_b_rest(row, report):
                     _eq(_need(cp, "cumulative_end"), _need(cp, "close_through"))
                     received_at = _integer(_need(cp, "received_at"))
                     received_mono = _integer(_need(cp, "received_mono"))
-                    selected = list(_events_at(trace, cp))
+                    selected = list(_events_at(trace, cp, include_receipt=True))
+                    last_event = selected[-1] if selected else None
+                    _eq((_need(cp, "last_received_at"), _need(cp, "last_received_mono")),
+                        ((_integer(_need(last_event, "received_at")),
+                          _integer(_need(last_event, "received_mono"))) if last_event else
+                         (None, None)), "checkpoint last receipt differs from trace")
                     active_tombs = {}
                     for event in selected:
                         if event.get("action") == "tomb":
@@ -6654,6 +6736,8 @@ def _evaluate_b_rest(row, report):
                 raise _EvidenceMissing("passive epoch projection missing")
             public = {c.get("checkpoint_id"): c for c in cps}
             sources = set(_need(f, "source_registered"))
+            gate_shape = _gate_shape(f, unit)
+            distributions = {}
             _eq(sources, {_need(t, "source") for t in trace if t.get("action") == "register"},
                 "source input coverage incomplete")
             for cp in cps:
@@ -6670,6 +6754,15 @@ def _evaluate_b_rest(row, report):
                         "public epoch omitted a source")
                     _eq(len(entries), len(sources), "public epoch duplicated a source")
                     entry = _items([e for e in entries if e.get("source") == source])[0]
+                    if gate_shape:
+                        for field, keys in (("connection_counts", ("started", "init_failed", "unbound")),
+                                            ("lifecycle_counts", ("awaiting_report", "in_flight", "overdue",
+                                                                  "report_unavailable", "finalized", "conflicting",
+                                                                  "contract_mixed"))):
+                            for item in (projection, entry):
+                                counts = _need(item, field)
+                                for key in keys:
+                                    _integer(_need(counts, key))
                     for key in ("registered_invocations", "frozen_invocations", "live_invocations",
                                 "connection_counts", "lifecycle_counts"):
                         _eq(_need(projection, key), _need(entry, key))
@@ -6678,9 +6771,25 @@ def _evaluate_b_rest(row, report):
                     _eq(registered, sum(_need(entry, "connection_counts").values()))
                     _eq(registered, sum(_need(entry, "lifecycle_counts").values()))
                     _eq(registered, _need(f, "source_registered", source))
-                    selected = _events_at(trace, pub) if _gate_shape(f, unit) else trace
+                    selected = _events_at(trace, pub) if gate_shape else trace
                     _eq(registered, sum(t.get("action") == "register" and t.get("source") == source
                                         for t in selected))
+                    if gate_shape:
+                        pub_id = _need(pub, "checkpoint_id")
+                        if pub_id not in distributions:
+                            distributions[pub_id] = _epoch_trace_distribution(trace, pub)
+                        actual = distributions[pub_id].get(source, {
+                            "registered": 0, "frozen": 0, "live": 0,
+                            "connection": Counter(), "lifecycle": Counter()})
+                        _eq(_integer(_need(entry, "frozen_invocations")), actual["frozen"])
+                        _eq(_integer(_need(entry, "live_invocations")), actual["live"])
+                        _eq(_need(entry, "connection_counts"), {key: actual["connection"][key]
+                            for key in ("started", "init_failed", "unbound")},
+                            "epoch connection distribution differs from trace")
+                        _eq(_need(entry, "lifecycle_counts"), {key: actual["lifecycle"][key]
+                            for key in ("awaiting_report", "in_flight", "overdue",
+                                        "report_unavailable", "finalized", "conflicting", "contract_mixed")},
+                            "epoch lifecycle distribution differs from trace")
                     _assert(all(_need(entry, "equations_hold", key) is True for key in ("connection", "lifecycle")))
                     _eq(_need(pub, "N_total"), sum(e["registered_invocations"] for e in pub["epoch_sources"]))
                     _eq(_need(pub, "N_live"), sum(e["live_invocations"] for e in pub["epoch_sources"]))
@@ -6785,6 +6894,10 @@ def _evaluate_b_rest(row, report):
                 _need(evidence, "normal_schedule_after"),
                 "fault entered the normal schedule")
             fault_trace = _items(_need(evidence, "fault_trace"))
+            trace_sources = {_need(t, "source") for t in fault_trace}
+            if not all(isinstance(source, str) and source for source in trace_sources):
+                raise _EvidenceMissing("fault trace source missing or malformed")
+            _eq(set(affected), trace_sources, "affected sources differ from fault trace")
             _eq(_need(fault_trace[0], "classification"), expected_classes[kind])
             _eq(_need(fault_trace[0], "source"), affected[0])
             _eq(_need(fault_trace[0], "watermark_after"), _need(evidence, "watermark_before"),
@@ -6885,6 +6998,13 @@ def _evaluate_b_rest(row, report):
         _eq(_need(proof, "job_key_limit"), j)
         _eq(_need(proof, "Q_cap_bytes"), _actual_budget_q(m, steps) + 512 * m + 1536 * j)
         _assert(_need(proof, "Q_obs_bytes") <= _need(proof, "Q_cap_bytes"))
+        points = _items(_need(proof, "checkpoints"))
+        _eq(_integer(_need(proof, "H_res")),
+            max(_integer(_need(point, "N_res")) for point in points),
+            "capacity H_res differs from observation maximum")
+        _eq(_integer(_need(proof, "Q_obs_bytes")),
+            max(_integer(_need(point, "Q_4_bytes")) for point in points),
+            "capacity Q_obs_bytes differs from observation maximum")
         ownership = _need(proof, "F4_ownership")
         _eq(_need(ownership, "total_bytes"), 18_874_368)
         _eq(sum(_need(i, "bytes") for i in _items(_need(ownership, "items"))), 18_874_368)

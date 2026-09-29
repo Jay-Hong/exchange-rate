@@ -2270,6 +2270,12 @@
       "H_res": 1,
       "Q_cap_bytes": 5704,
       "Q_obs_bytes": 5000,
+      "checkpoints": [
+        {
+          "N_res": 1,
+          "Q_4_bytes": 5000
+        }
+      ],
       "budget_q_size_steps": {
         "at_count": 1,
         "block_width": 257,
