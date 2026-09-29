@@ -77,7 +77,7 @@ CHURN_KEYS = {"name", "status", "id_kind", "state_track", "job_key_counts", "id_
               "requested_detail_target", "effective_detail_target", "max_retained_details_observed",
               "tail_classification", "checkpoints", "classification_counts", "first_failure", "reason",
               "highwater_checks", "evidence_gaps", "state_cycle", "fixture_provenance",
-              "max_resident_observed", "tomb_due_ledger", "recent_input_ledger"}
+              "max_resident_observed", "tomb_due_ledger", "recent_input_ledger", "attachment_root"}
 CHURN_CP_KEYS = {"kind", "minute_index", "received_at", "received_mono", "scheduled_registered", "auxiliary_registered",
                  "N_total", "N_live", "N_tomb", "N_res", "retained_details", "budget", "last_received_at",
                  "last_received_mono", "cumulative_end", "cursor_after_seq", "cursor_next_seq", "cohort_exact_from",
@@ -534,9 +534,10 @@ def test_churn_status_requires_complete_checkpoints(monkeypatch):
 
 # --- highwater 선택 보존 (addendum slice5a4c_addendum_highwater.md, C′2 교체) ---------------------------
 HW_KEYS = {"events", "resident_events", "job_events", "both_events", "backing_changes", "preserved_pairs",
-           "violations", "first_violation", "unverified_events", "first_unverified", "checks", "replay"}
+           "violations", "first_violation", "unverified_events", "first_unverified", "checks", "replay",
+           "backing_checks", "register_attempts_ref", "first_pass_complete"}
 REPLAY_KEYS = {"performed", "stopped_after_seq", "compared_steps", "mismatch", "pass1_seconds", "pass2_seconds",
-               "stop_reason"}
+               "stop_reason", "comparison_digest_by_seq"}
 HW_SIDE_KEYS = {"H_res", "H_job", "Q_4", "E", "B", "Q_actual"}
 
 
@@ -663,7 +664,8 @@ def test_replay_stops_after_last_selected_event_and_matches():
     assert set(rp) == REPLAY_KEYS
     seqs = [ch["register_seq"] for ch in hw["checks"]]
     assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs) and min(seqs) >= 0
-    selected = [ch["register_seq"] for ch in hw["checks"] if ch["preserved"]]
+    selected = ([ch["register_seq"] for ch in hw["checks"] if ch["preserved"]] +
+                [ch["register_seq"] for ch in hw["backing_checks"]])
     assert selected and rp["performed"] is True and rp["mismatch"] is None
     assert rp["stopped_after_seq"] == max(selected)
     assert rp["stop_reason"] == "last_selected"
@@ -1214,6 +1216,177 @@ def test_x2_b_b02_tail_missing_trace_cannot_match_adjusted_count():
     trace.remove(tail)
     fixture["classification_counts"]["registered"] -= 1
     assert gate.evaluate_row("B02", report, attachments={})["status"] != "PASS"
+
+
+@pytest.fixture(scope="module")
+def x2_c_small_raw(tmp_path_factory):
+    root = tmp_path_factory.mktemp("x2-c-attempts")
+    points = []
+    baseline = {name: sys.getsizeof(obj) for name, obj in
+                gate._capacity_containers(gate.new_ledger(128))}
+
+    def observe(ledger, name, kind, minute_index, *, budget=None):
+        if kind.endswith("_before") and hasattr(ledger, "_gate_capacity_pre_point"):
+            point = dict(ledger._gate_capacity_pre_point)
+        else:
+            point = gate._capacity_point(ledger, baseline, name, kind, minute_index,
+                                         budget=budget or gate._budget_checkpoint(ledger))
+        point["checkpoint_id"] = f"observed:{len(points)}"
+        points.append(point)
+        return point["checkpoint_id"]
+
+    fixture = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128,
+                                     churn_minutes=25, churn_stride_minutes=60,
+                                     fixture_detail_divisor=256, attachment_dir=root,
+                                     _capacity_observer=observe)
+    ref = fixture["highwater_checks"]["register_attempts_ref"]
+    blob = (root / ref["path"]).read_bytes()
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture],
+              "capacity_proof": {"checkpoints": points}}
+    return report, {ref["path"]: blob}
+
+
+def test_x2_c_real_small_attempts_and_replay_pass(x2_c_small_raw):
+    report, attachments = x2_c_small_raw
+    fixture = report["churn_fixtures"][0]
+    highwater = fixture["highwater_checks"]
+    assert highwater["register_attempts_ref"]["rows"] == 201
+    assert highwater["backing_checks"]
+    assert all("normalized_layout_ref" in check for check in
+               highwater["checks"] + highwater["backing_checks"])
+    assert {row: gate.evaluate_row(row, report, attachments=attachments)["status"]
+            for row in ("C01", "C02", "C03", "C04", "C05", "C06")} == dict.fromkeys(
+                ("C01", "C02", "C03", "C04", "C05", "C06"), "PASS")
+
+
+def test_x2_c_attempts_keep_exact_g_at_selected_capacity_points(x2_c_small_raw):
+    report, attachments = x2_c_small_raw
+    fixture = report["churn_fixtures"][0]
+    ref = fixture["highwater_checks"]["register_attempts_ref"]["path"]
+    attempts = [json.loads(line) for line in gzip.decompress(attachments[ref]).splitlines()]
+    assert all("G" not in attempt[side] for attempt in attempts for side in ("before", "after"))
+    assert all("G" in check[side] for check in fixture["highwater_checks"]["checks"]
+               if check["preserved"] for side in ("before", "after"))
+    assert gate.evaluate_row("C04", report, attachments=attachments)["status"] == "PASS"
+
+
+def test_x2_c_missing_selected_before_q_is_unverified(x2_c_small_raw):
+    original, attachments = x2_c_small_raw
+    report = copy.deepcopy(original)
+    cp = next(cp for cp in report["churn_fixtures"][0]["checkpoints"]
+              if cp["kind"] == "highwater_before")
+    cp["capacity_ref"] = None
+    assert gate.evaluate_row("C02", report, attachments=attachments)["status"] == "UNVERIFIED"
+    assert gate.evaluate_row("C06", report, attachments=attachments)["status"] == "UNVERIFIED"
+
+
+def test_x2_c_measured_q_over_limit_is_fail(x2_c_small_raw):
+    original, attachments = x2_c_small_raw
+    report = copy.deepcopy(original)
+    point = next(point for point in report["capacity_proof"]["checkpoints"]
+                 if 1 < point["Q_actual_bytes"] < point["Q_4_bytes"])
+    point["Q_4_bytes"] = point["Q_actual_bytes"] - 1
+    for backing in point["container_backings"]:
+        backing["charged_limit_bytes"] = point["Q_4_bytes"]
+    assert gate.evaluate_row("C06", report, attachments=attachments)["status"] == "FAIL"
+
+
+def test_x2_c_no_rebuild_is_evidenced_and_missing_rebuild_witness_is_unverified(x2_c_small_raw):
+    original, attachments = x2_c_small_raw
+    report = copy.deepcopy(original)
+    report["rebuild_events"] = []
+    report["scenarios"] = [{"name": "rebuild_double_backing", "status": "N/A",
+                            "reason": "N/A (no rebuild in this implementation)"}]
+    assert gate.evaluate_row("C07", report, attachments=attachments)["status"] == "PASS"
+    assert gate.evaluate_row("C08", report, attachments=attachments)["status"] == "N/A"
+    report["churn_fixtures"][0]["checkpoints"][0]["rebuild_count"] = 1
+    assert gate.evaluate_row("C08", report, attachments=attachments)["status"] == "UNVERIFIED"
+
+
+def test_x2_c_gate_capacity_kinds_and_no_rebuild_projection():
+    report = gate.run_gate(limit=128, samples=3, warmup=1,
+                           churn_names=["churn_most_unfinished_short_ascii"],
+                           **SMALL_CHURN, progress=io.StringIO())
+    assert report["capacity_proof"]["status"] == "PASS"
+    assert all(point["Q_actual_bytes"] <= point["Q_4_bytes"]
+               for point in report["capacity_proof"]["checkpoints"])
+    report["mode"] = "predicate_unit"
+    assert {row: gate.evaluate_row(row, report, attachments={})["status"]
+            for row in ("C06", "C07", "C08", "C09", "C10")} == {
+                "C06": "PASS", "C07": "PASS", "C08": "N/A", "C09": "PASS",
+                "C10": "UNVERIFIED"}
+
+
+@pytest.mark.parametrize("mutation", ("missing", "corrupt", "source", "layout_ref", "inline_only"))
+def test_x2_c_attempt_source_or_attachment_damage_cannot_pass(x2_c_small_raw, mutation):
+    original, original_attachments = x2_c_small_raw
+    report = copy.deepcopy(original)
+    attachments = dict(original_attachments)
+    highwater = report["churn_fixtures"][0]["highwater_checks"]
+    ref = highwater["register_attempts_ref"]
+    if mutation == "missing":
+        attachments.clear()
+    elif mutation == "corrupt":
+        attachments[ref["path"]] = b"corrupt"
+    elif mutation == "source":
+        rows = [json.loads(line) for line in gzip.decompress(attachments[ref["path"]]).splitlines()]
+        selected = next(row for row in rows if row["selected"])
+        selected["after"]["H_res"] += 1
+        blob = gzip.compress("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows).encode(),
+                             mtime=0)
+        attachments[ref["path"]] = blob
+        ref["sha256"] = hashlib.sha256(blob).hexdigest()
+    elif mutation == "layout_ref":
+        highwater["checks"][0]["normalized_layout_ref"]["layout_sha256"] = "0" * 64
+    else:
+        highwater["register_attempts"] = [json.loads(line) for line in
+                                          gzip.decompress(attachments[ref["path"]]).splitlines()]
+        del highwater["register_attempts_ref"]
+        attachments.clear()
+    result = gate.evaluate_row("C04", report, attachments=attachments)
+    assert result["status"] != "PASS", (mutation, result)
+    if mutation in ("missing", "corrupt", "layout_ref", "inline_only"):
+        assert result["status"] == "UNVERIFIED", (mutation, result)
+
+
+def test_x2_c_replay_digest_damage_is_unverified(x2_c_small_raw):
+    original, attachments = x2_c_small_raw
+    report = copy.deepcopy(original)
+    report["churn_fixtures"][0]["highwater_checks"]["replay"]["comparison_digest_by_seq"][0][
+        "pass2_sha256"] = "0" * 64
+    assert gate.evaluate_row("C05", report, attachments=attachments)["status"] == "UNVERIFIED"
+
+
+def test_x2_c_capacity_refs_exist_only_for_observed_points(x2_c_small_raw):
+    report, _ = x2_c_small_raw
+    fixture = report["churn_fixtures"][0]
+    points = {p["checkpoint_id"]: p for p in report["capacity_proof"]["checkpoints"]}
+    assert points and all(ref in points for cp in fixture["checkpoints"]
+                          if (ref := cp["capacity_ref"]) is not None)
+    assert any(cp["capacity_ref"] is None for cp in fixture["checkpoints"])
+    assert any(cp["kind"] == "probe_prune_at" and cp["capacity_ref"] in points
+               for cp in fixture["checkpoints"])
+
+
+def test_x2_c_calibration_and_locked_input_shape(tmp_path):
+    observations = [{"class_name": name, "completed_units": 1,
+                     "projected_full_seconds": 2, "prepare_seconds": 0,
+                     "clone_seconds": 0, "call_seconds": 1,
+                     "pass1_seconds": 1, "pass2_seconds": 0,
+                     "selected_pairs": 0, "error_seconds": 0}
+                    for name in ("legacy_repeat", "pressure", "churn_normal",
+                                 "churn_burst", "capacity", "resident", "adapter")]
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps({"status": "complete", "run_id": "cal-1",
+                                "observations": observations}), encoding="utf-8")
+    loaded = gate._read_evidence_input(path, "calibration")
+    assert gate._calibration_eta(loaded["observations"], 14400)["seconds"] == 14
+    assert gate._calibration_eta([], 14400)["decision"] == "unknown"
+    locked = {name: {"passed": 1, "failed": 0, "commit_sha": "head",
+                     "result_ref": f"locked/{name}.json", "result_sha256": "0" * 64}
+              for name in ("d7", "index", "slice5a3", "slice5a4a", "slice5a4b")}
+    path.write_text(json.dumps(locked), encoding="utf-8")
+    assert gate._read_evidence_input(path, "locked tests") == locked
 
 
 @pytest.mark.parametrize("future_axis", ("both", "received_mono"))

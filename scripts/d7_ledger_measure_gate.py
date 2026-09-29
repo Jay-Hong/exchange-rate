@@ -102,7 +102,8 @@ class _JsonlSpool:
         self.path = Path(root) / relative
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.relative = relative
-        self.compressed = gzip.GzipFile(filename=str(self.path), mode="wb", mtime=0)
+        self.compressed = gzip.GzipFile(filename=str(self.path), mode="wb", mtime=0,
+                                        compresslevel=9)
         self.plain = tempfile.NamedTemporaryFile(mode="w+b", prefix="d7-evidence-", delete=False)
         self.offsets = []
         self.rows = 0
@@ -3129,17 +3130,21 @@ def _highwater_measure(ledger, baseline_sizes, fixed):
         size = sys.getsizeof(obj)
         marker = id(obj)
         owner = seen.get(marker)
+        attributed = 0
         if owner is None:
             seen[marker] = name
-            actual += max(0, size - baseline_sizes.get(name, 0))
+            attributed = max(0, size - baseline_sizes.get(name, 0))
+            actual += attributed
             owner = name
-        # The owner path represents sharing; an identity replacement by itself
-        # does not constitute a backing change.
-        layout.append((name, size, owner))
+        # The first path owns shared storage. Identity replacement alone does
+        # not change this normalized layout.
+        layout.append({"path": name, "size_bytes": size, "share_group": owner,
+                       "q_attributed_bytes": attributed,
+                       "includes_deleted_dummy": isinstance(obj, dict)})
     return ({"H_res": ledger._q_highwater, "H_job": ledger._job_highwater,
              "Q_4": ledger._q_charge(), "E": _fixture_budget_e(ledger, fixed),
              "B": ledger._limits["max_resident_bytes"], "Q_actual": actual},
-            tuple(layout))
+            layout)
 
 
 def _replay_step_digest(step):
@@ -3223,7 +3228,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                       attachment_dir=None,
                       _capacity_observer=None,
                       _stop_requested=None, _progress=None, _replay_hook=None,
-                      _replay_expected=None, _replay_stop=None, _replay_selected=None):
+                      _replay_expected=None, _replay_expected_digests=None,
+                      _replay_stop=None, _replay_selected=None):
     if name not in CHURN_NAMES or not 1 <= limit <= CAP:
         raise ValueError("unknown churn fixture or invalid limit")
     if min(churn_minutes, churn_stride_minutes, fixture_detail_divisor) < 1:
@@ -3238,7 +3244,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                  DETAIL_CAP, limit - 1) if burst else 0
     detailed_trace = True
     stream_evidence = churn_minutes > 40 and _replay_expected is None
-    if stream_evidence and attachment_dir is None:
+    stream_attempts = _replay_expected is None
+    if (stream_evidence or stream_attempts) and attachment_dir is None:
         attachment_dir = tempfile.mkdtemp(prefix="d7-churn-")
     ledger = new_ledger(limit, max_resident_bytes,
                         ledger_type=_ChurnLedger if detailed_trace else RoundLedger)
@@ -3254,20 +3261,24 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     api_trace = (_JsonlSpool(attachment_dir, name, "api_trace")
                  if stream_evidence else [])
     pruned_total = 0
+    order_serial = 0
     def record(action, invocation_id, source, wall, classification, **extra):
-        nonlocal pruned_total
+        nonlocal pruned_total, order_serial
         if not trace_enabled:
             return
         if action == "prune":
             pruned_total += 1
         rec = ledger._records.get(invocation_id)
-        api_trace.append({"call_index": len(api_trace), "event_order": len(api_trace) * 2 + 1,
+        event_order = order_serial * 4 + 2
+        order_serial += 1
+        api_trace.append({"call_index": len(api_trace), "event_order": event_order,
                           "action": action, "id": invocation_id, "source": source,
                           "received_at": wall, "received_mono": wall,
                           **({"N_res": ledger._health["N_res"]} if detailed_trace else {}),
                           "classification": classification,
                           "registered_seq": rec["seq"] if rec is not None else None,
                           **extra})
+        return event_order
     def finish_fields(rec, charge):
         fields = {"detail_charge_bytes": charge}
         if detailed_trace:
@@ -3297,13 +3308,18 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     previous_hour = None
     previous_pruned_total = 0
     steps = []
+    pre_orders = []
+    pass1_digests = []
+    comparison_digests = []
+    register_attempts = (_JsonlSpool(attachment_dir, name, "register_attempts")
+                         if stream_attempts else None)
     compared_steps = 0
     replay_mismatch = None
     pending = None
     highwater = {"events": 0, "resident_events": 0, "job_events": 0,
                  "both_events": 0, "backing_changes": 0, "preserved_pairs": 0,
                  "violations": 0, "first_violation": None, "unverified_events": 0,
-                 "first_unverified": None, "checks": []}
+                 "first_unverified": None, "checks": [], "backing_checks": []}
     def identity_audit(invocation_id, source, seq):
         paths = _pressure_index_point(ledger, invocation_id, source, None, seq)["paths"]
         return {"id": invocation_id, "checkpoint_id": None,
@@ -3313,7 +3329,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 "other_indexes_absent": {key: not paths[key] for key in
                                          _INDEX_PATHS - {"seq", "tomb", "owner"}}}
     def add_checkpoint(kind, minute_index, received_at, *, probe_sample=None):
-        nonlocal previous_hour, previous_pruned_total
+        nonlocal previous_hour, previous_pruned_total, order_serial
         before_diag = {key: ledger._health[key] for key in
                        ("expired_start", "expired_finish", "expired_wrapper",
                         "expired_identity_unverified")}
@@ -3328,7 +3344,9 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 if ledger._health[cause] > before:
                     record("expire", invocation_id, witness_sources[category], received_at, cause)
         if trace_enabled:
-            cp["event_order"] = len(api_trace) * 2
+            cp["event_order"] = (order_serial * 4 - 1 if kind in ("tail_after", "tail_80641")
+                                 else order_serial * 4 + 2)
+            order_serial += 1
             cp["source_registered"] = {source: sources.get(source, 0) for source in REGISTRY}
         if probe_sample is not None:
             invocation_id, category, expected = probe_sample
@@ -3387,8 +3405,10 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             previous_hour = cp
         if not replaying:
             checkpoints.append(cp)
-        if not replaying and _capacity_observer is not None and probe_sample is None:
-            _capacity_observer(ledger, name, kind, minute_index, budget=cp["budget"])
+        if (not replaying and _capacity_observer is not None and
+                (probe_sample is None or kind == "probe_prune_at")):
+            cp["capacity_ref"] = _capacity_observer(ledger, name, kind, minute_index,
+                                                    budget=cp["budget"])
         return cp
 
     def schedule_witness(category, invocation_id, wall):
@@ -3433,34 +3453,40 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         seq = compared_steps if replaying else len(steps)
         if replaying and _replay_hook is not None:
             _replay_hook(seq, ledger, wall)
+        pre_event_order = order_serial * 4 + 1 if not replaying else None
         before, before_layout = _highwater_measure(ledger, baseline_sizes, fixed)
         before_counts = tuple(ledger._health[key] for key in ("N_total", "N_live", "N_tomb", "N_res"))
-        selected_kind = _replay_selected.get(seq) if replaying else None
+        selected = _replay_selected.get(seq) if replaying else None
         pre_cp = pre_point = None
-        if selected_kind:
+        if selected:
+            selected_kind, selected_pre_order = selected
             before_kind = f"{selected_kind}_before"
             pre_cp = _churn_checkpoint(ledger, before_kind, minute_index, wall,
                                        scheduled, auxiliary, readonly=True,
+                                       graph=True,
                                        seq_evidence=True,
                                        sources=sources, attempts=attempts,
                                        source_attempts=source_attempts,
                                        init_failed=init_failed_count)
             pre_point = _capacity_point(ledger, baseline_sizes, name,
                                         before_kind, minute_index, budget=pre_cp["budget"])
+            pre_cp["register_seq"] = seq
+            pre_cp["event_order"] = selected_pre_order
             if (before, before_layout) != _highwater_measure(ledger, baseline_sizes, fixed):
                 replay_mismatch = replay_mismatch or f"replay seq {seq}: pre-capture changed trajectory"
         attempts += 1
         source_attempts[source] += 1
         result = _register_fixture(ledger, invocation_id, source, wall, job_id)
         classes[result["classification"]] += 1
-        record("register", invocation_id, source, wall, result["classification"],
+        event_order = record("register", invocation_id, source, wall, result["classification"],
                job_id=job_id, auxiliary=auxiliary_call,
                cycle_position=None if auxiliary_call else scheduled % 20,
                connection="unbound", lifecycle="awaiting_report")
         pending = {"seq": seq, "input": (invocation_id, source, wall, minute_index, job_id,
                                            auxiliary_call), "classification": result["classification"],
                    "before": before, "before_layout": before_layout,
-                   "before_counts": before_counts, "pre_cp": pre_cp, "pre_point": pre_point}
+                   "before_counts": before_counts, "pre_cp": pre_cp, "pre_point": pre_point,
+                   "event_order": event_order, "pre_event_order": pre_event_order}
         return result
 
     def finish_step():
@@ -3477,39 +3503,78 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         bad = any(side["Q_actual"] > side["Q_4"] or side["E"] > side["B"]
                   for side in (before, after))
         event = p["classification"] == "registered" and (res_up or job_up)
-        preserved = event and (backing_changed or job_up or bad)
+        selected = (backing_changed or job_up or
+                    (bad and highwater["first_violation"] is None))
+        preserved = event and selected
         step = {"input": p["input"], "classification": p["classification"],
                 "before_counts": p["before_counts"], "after_counts": after_counts,
                 "before": before, "after": after, "before_layout": before_layout,
                 "after_layout": after_layout, "event": event, "preserved": preserved}
+        invocation_id, source, wall, minute_index, job_id, auxiliary_call = p["input"]
+        phase = ("probe" if auxiliary_call and burst and seq == target else
+                 "burst" if auxiliary_call else
+                 "tail" if minute_index == churn_minutes else "schedule")
+        source_row = {"input": {"invocation_id": invocation_id, "source": source,
+                                 "job_id": job_id, "received_at": wall,
+                                 "received_mono": wall, "started_at": wall,
+                                 "started_mono": wall, "minute_index": minute_index,
+                                 "auxiliary": auxiliary_call, "phase": phase},
+                      "classification": p["classification"],
+                      "before": dict(before, N_total=p["before_counts"][0],
+                                     N_res=p["before_counts"][3]),
+                      "after": dict(after, N_total=after_counts[0], N_res=after_counts[3]),
+                      "normalized_layout": {"before": before_layout, "after": after_layout},
+                      "selected": selected}
+        source_bytes = json.dumps(source_row, ensure_ascii=False, sort_keys=True,
+                                  separators=(",", ":")).encode()
+        source_digest = hashlib.sha256(source_bytes).hexdigest()
         if replaying:
             if seq >= len(_replay_expected) or _replay_step_digest(step) != _replay_expected[seq]:
                 replay_mismatch = replay_mismatch or f"replay seq {seq}: input or state differs"
+            comparison_digests.append({"register_seq": seq,
+                                       "pass1_sha256": _replay_expected_digests[seq],
+                                       "pass2_sha256": source_digest,
+                                       "selected": selected})
             compared_steps += 1
             if p["pre_cp"] is not None:
                 before_kind = p["pre_cp"]["kind"]
                 after_kind = before_kind.removesuffix("_before") + "_after"
                 post_cp = _churn_checkpoint(ledger, after_kind, p["input"][3],
                                             p["input"][2], scheduled, auxiliary, readonly=True,
+                                            graph=True,
                                             seq_evidence=True,
                                             sources=sources, attempts=attempts,
                                             source_attempts=source_attempts,
                                             init_failed=init_failed_count)
+                post_cp["register_seq"] = seq
                 if (after, after_layout) != _highwater_measure(ledger, baseline_sizes, fixed):
                     replay_mismatch = replay_mismatch or f"replay seq {seq}: post-capture changed trajectory"
                 checkpoints.extend((p["pre_cp"], post_cp))
                 if _capacity_observer is not None:
                     ledger._gate_capacity_pre_point = p["pre_point"]
                     try:
-                        _capacity_observer(ledger, name, before_kind, p["input"][3],
-                                           budget=p["pre_cp"]["budget"])
+                        p["pre_cp"]["capacity_ref"] = _capacity_observer(
+                            ledger, name, before_kind, p["input"][3],
+                            budget=p["pre_cp"]["budget"])
                     finally:
                         del ledger._gate_capacity_pre_point
-                    _capacity_observer(ledger, name, after_kind, p["input"][3],
-                                       budget=post_cp["budget"])
+                    post_cp["capacity_ref"] = _capacity_observer(
+                        ledger, name, after_kind, p["input"][3], budget=post_cp["budget"])
             return replay_mismatch is not None or seq == _replay_stop
         steps.append(_replay_step_digest(step))
+        pre_orders.append(p["pre_event_order"])
+        pass1_digests.append(source_digest)
+        attempt_row = dict(source_row, register_seq=seq, event_order=p["event_order"])
+        register_attempts.append(attempt_row)
         if not event:
+            if selected:
+                highwater["backing_checks"].append({
+                    "register_seq": seq, "minute_index": minute_index,
+                    "received_at": wall, "received_mono": wall,
+                    "N_total_before": p["before_counts"][0],
+                    "N_total_after": after_counts[0],
+                    "before": source_row["before"], "after": source_row["after"],
+                    "backing_changed": backing_changed, "preserved": True})
             if bad:
                 highwater["violations"] += 1
                 if highwater["first_violation"] is None:
@@ -3553,11 +3618,13 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         return {"compared_steps": compared_steps, "mismatch": mismatch,
                 "stop_reason": stop_reason,
                 "stopped_after_seq": compared_steps - 1,
-                "seconds": time.perf_counter() - pass_start, "checkpoints": checkpoints}
+                "seconds": time.perf_counter() - pass_start, "checkpoints": checkpoints,
+                "comparison_digest_by_seq": comparison_digests}
 
     def publish_replay_pairs(replayed):
         pairs = iter(replayed["checkpoints"])
-        checks_by_seq = {ch["register_seq"]: ch for ch in highwater["checks"]}
+        checks_by_seq = {ch["register_seq"]: ch for ch in
+                         highwater["checks"] + highwater["backing_checks"]}
         for seq in selected_seqs:
             pre_cp, post_cp = next(pairs, None), next(pairs, None)
             if pre_cp is None or post_cp is None:
@@ -3568,7 +3635,11 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 continue
             checkpoints.extend((pre_cp, post_cp))
             if seq in checks_by_seq:
-                highwater["preserved_pairs"] += 1
+                check = checks_by_seq[seq]
+                check["before"]["G"] = pre_cp["budget"]["G"]
+                check["after"]["G"] = post_cp["budget"]["G"]
+                if check in highwater["checks"]:
+                    highwater["preserved_pairs"] += 1
 
     failure = None
     schedule_start = T
@@ -3750,6 +3821,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         passive = dict(tail_cp)
         passive["kind"] = "passive_projection"
         passive["observation"] = "passive"
+        passive["capacity_ref"] = None
         passive.pop("identity_index_audit", None)
         passive["passive_cohort_projection"] = []
         passive["passive_epoch_projection"] = []
@@ -3782,11 +3854,15 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                                      for key in lifecycle_keys}})
         checkpoints.append(passive)
     pass1_seconds = time.perf_counter() - pass_start
-    selected_kinds = {ch["register_seq"]: "highwater" for ch in highwater["checks"]
+    selected_kinds = {ch["register_seq"]: ("highwater", pre_orders[ch["register_seq"]]) for ch in highwater["checks"]
                       if ch["preserved"]}
+    selected_kinds.update({ch["register_seq"]: ("backing", pre_orders[ch["register_seq"]])
+                           for ch in highwater["backing_checks"]})
     violation = highwater["first_violation"]
-    if violation is not None and violation["register_seq"] not in selected_kinds:
-        selected_kinds[violation["register_seq"]] = "violation"
+    if violation is not None and violation["register_seq"] not in {
+            check["register_seq"] for check in highwater["checks"]}:
+        selected_kinds[violation["register_seq"]] = (
+            "violation", pre_orders[violation["register_seq"]])
     selected_seqs = sorted(selected_kinds)
     replay = {"performed": False, "stopped_after_seq": None, "compared_steps": 0,
               "mismatch": None, "stop_reason": None,
@@ -3797,19 +3873,33 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             churn_minutes=churn_minutes, churn_stride_minutes=churn_stride_minutes,
             fixture_detail_divisor=fixture_detail_divisor, _capacity_observer=_capacity_observer,
             _stop_requested=_stop_requested, _progress=_progress, _replay_hook=_replay_hook,
-            _replay_expected=steps, _replay_stop=selected_seqs[-1],
+            _replay_expected=steps, _replay_expected_digests=pass1_digests,
+            _replay_stop=selected_seqs[-1],
             _replay_selected=selected_kinds)
         publish_replay_pairs(replayed)
         replay.update(performed=True, stopped_after_seq=replayed["stopped_after_seq"],
                       compared_steps=replayed["compared_steps"], mismatch=replayed["mismatch"],
                       stop_reason=replayed["stop_reason"],
-                      pass2_seconds=replayed["seconds"])
+                      pass2_seconds=replayed["seconds"],
+                      comparison_digest_by_seq=replayed["comparison_digest_by_seq"])
         if replayed["stop_reason"] == "budget":
             failure = {"phase": "budget", "pass": 2}
+    replay.setdefault("comparison_digest_by_seq", [])
     highwater["replay"] = replay
+    if not replaying:
+        highwater["first_pass_complete"] = failure is None
+        if stream_attempts:
+            highwater["register_attempts_ref"] = register_attempts.finish()
+            for check in highwater["checks"] + highwater["backing_checks"]:
+                seq = check["register_seq"]
+                layout = register_attempts[seq]["normalized_layout"]
+                raw = json.dumps(layout, ensure_ascii=False, sort_keys=True,
+                                 separators=(",", ":")).encode()
+                check["normalized_layout_ref"] = {
+                    "register_seq": seq, "layout_sha256": hashlib.sha256(raw).hexdigest()}
     for index, cp in enumerate(checkpoints):
         cp["checkpoint_id"] = f"{name}:{index}"
-        cp["capacity_ref"] = cp["checkpoint_id"]
+        cp.setdefault("capacity_ref", None)
         for audit in cp.get("identity_index_audit", {}).get("samples", []):
             audit["checkpoint_id"] = cp["checkpoint_id"]
     if failure is None and tail_cp.get("old_cohort_probe") is not None:
@@ -3820,7 +3910,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         for cp in checkpoints:
             cp["source_registered"] = {source: cp["source_counts"][source]["registered"]
                                        for source in REGISTRY}
-            if cp["kind"] in ("highwater_before", "highwater_after",
+            if "event_order" not in cp and cp["kind"] in ("highwater_before", "highwater_after",
+                              "backing_before", "backing_after",
                               "violation_before", "violation_after"):
                 selected_seq = cp["N_total"] + int(cp["kind"].endswith("_before"))
                 selected = next((t for t in api_trace if t["action"] == "register" and
@@ -3971,8 +4062,10 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             cp["seq_evidence_ref"] = seq_evidence_ref
         for spool in (api_trace, tomb_due_ledger, recent_input_ledger, seq_evidence):
             spool.discard_read_copy()
+    if stream_attempts:
+        register_attempts.discard_read_copy()
     return {"name": name, "status": status, "id_kind": kind,
-            **({"attachment_root": str(attachment_dir)} if stream_evidence else {}),
+            **({"attachment_root": str(attachment_dir)} if stream_evidence or stream_attempts else {}),
             "state_track": track + ("_init_failed" if init_variant else ""),
             "job_key_counts": _job_counts(jobs), "id_utf8_bytes": len(_fixture_id(0, kind, "c").encode()),
             "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, "c")),
@@ -4135,12 +4228,26 @@ def _calibration_eta(observations, budget_seconds):
     return result
 
 
+def _read_evidence_input(path, label):
+    if path is None:
+        return None
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"invalid {label} input file") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid {label} input object")
+    return value
+
+
 def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
              budget_seconds=14400, clock=time.perf_counter_ns, wall=time.monotonic,
              progress=sys.stderr, rows=None, max_resident_bytes=None,
              pressure_names=None, churn_names=None, churn_minutes=10_080,
              churn_stride_minutes=1, fixture_detail_divisor=1, calibration=False,
-             budget_agreement_ref=None, attachment_dir=None):
+             budget_agreement_ref=None, attachment_dir=None,
+             calibration_evidence_path=None, budget_agreement_path=None,
+             locked_tests_path=None):
     """Measure the plan; selected scenario rows form a small, non-accepting run."""
     if not 1 <= limit <= CAP or samples < 1 or warmup < 0 or budget_seconds < 0:
         raise ValueError("invalid gate parameter")
@@ -4177,6 +4284,11 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             not isinstance(budget_agreement_ref, str) or not budget_agreement_ref.strip()):
         raise ValueError("extended full budget requires agreement reference")
     budget_token = _gate_resident_budget.set(resident_b)
+    run_id = os.urandom(16).hex()
+    run_started_at = time.time()
+    prior_calibration = _read_evidence_input(calibration_evidence_path, "calibration")
+    budget_agreement = _read_evidence_input(budget_agreement_path, "budget agreement")
+    locked_tests = _read_evidence_input(locked_tests_path, "locked tests")
     started = wall()
     deadline = started + budget_seconds
     calibration_observations = []
@@ -4190,18 +4302,28 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         projected_full_units = max(completed_units, projected_full_units)
         projected = (projected_override if projected_override is not None else
                      elapsed_seconds * projected_full_units / completed_units)
+        pass1 = replay_projection["pass1_seconds"] if replay_projection else 0.0
+        pass2 = replay_projection["pass2_seconds"] if replay_projection else 0.0
+        calls = max(0.0, elapsed_seconds - prepare_seconds - clone_seconds - pass1 - pass2)
         calibration_observations.append({"class_name": class_name, "fixture_name": fixture_name,
                                          "completed_units": completed_units,
                                          "elapsed_seconds": elapsed_seconds,
                                          "prepare_seconds": prepare_seconds,
                                          "clone_seconds": clone_seconds,
-                                         "call_seconds": call_seconds,
+                                         "call_seconds": calls if call_seconds == 0 else call_seconds,
+                                         "pass1_seconds": pass1, "pass2_seconds": pass2,
+                                         "selected_pairs": (replay_projection["selected_pairs"]
+                                                            if replay_projection else 0),
+                                         "error_seconds": max(0.0, elapsed_seconds -
+                                                              prepare_seconds - clone_seconds -
+                                                              calls - pass1 - pass2),
                                          "gc_seconds": gc_seconds,
                                          "owned_graph_seconds": owned_graph_seconds,
                                          "replay_projection": replay_projection,
                                          "projected_full_units": projected_full_units,
                                          "projected_full_seconds": projected})
     env = environment()
+    env["run_id"] = run_id
     env["load_before"] = _load_average()
     audit = audit_record_access()
     prereq = {"python_3_13": sys.version_info[:2] == (3, 13),
@@ -4356,15 +4478,24 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                                    "new_bytes": b["capacity"]["rebuild_new_bytes"],
                                    "budget": b, "temporary_peak_minus_current_before_bytes": None,
                                    "status": "UNVERIFIED", "reason": "during-backings witness missing"})
-        if kind in ("highwater_before", "violation_before") and hasattr(ledger, "_gate_capacity_pre_point"):
-            capacity_points.append(ledger._gate_capacity_pre_point)
+        point_id = f"{fixture_name}:capacity:{len(capacity_points)}"
+        if kind in ("highwater_before", "backing_before", "violation_before") and hasattr(ledger, "_gate_capacity_pre_point"):
+            point = dict(ledger._gate_capacity_pre_point)
         else:
-            capacity_points.append(_capacity_point(ledger, baseline_sizes, fixture_name,
-                                                   kind if kind in ("hour", "day", "prune", "highwater",
-                                                                    "highwater_after", "violation_after") else "tail",
-                                                   minute_index, budget=budget))
+            point = _capacity_point(ledger, baseline_sizes, fixture_name,
+                                    kind, minute_index, budget=budget)
+        point["checkpoint_id"] = point_id
+        capacity_points.append(point)
+        if kind == "probe_prune_at" and not any(p["kind"] == "prune" for p in capacity_points):
+            prune_point = dict(point, kind="prune",
+                               checkpoint_id=f"{fixture_name}:capacity:{len(capacity_points)}",
+                               deleted_dummy_object_ids=[b["object_id"] for b in
+                                   point["container_backings"] if b["includes_deleted_dummy"]],
+                               temporary_ref="prune_capacity_temporary")
+            capacity_points.append(prune_point)
         if calibration:
             capacity_seconds += wall() - observed_at
+        return point_id
 
     def summary_row(name, kind, status, reason):
         return {"name": name, "kind": kind, "status": status, "reason": reason,
@@ -4434,6 +4565,10 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             aborted = "budget"
     if churn_fixtures and aborted is None:
         independent_rows = run_churn_fault_scenarios()
+        if any(p["kind"] == "prune" for p in capacity_points):
+            prune_sample = _churn_transition_measurement("pruned")
+            prune_sample["name"] = "prune_capacity_temporary"
+            independent_rows.append(prune_sample)
         independent = {row["measured_transition"]: row for fixture in churn_fixtures
                        for row in fixture.get("transition_measurements", [])}
         if mode == "full":
@@ -4536,9 +4671,13 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
     calibration_result = {"status": "not_run", "observations": [], "reason": None}
     if calibration:
         calibration_result = {"status": "complete" if aborted is None else "incomplete",
-                              "observations": calibration_observations, "reason": aborted}
-    eta = (_calibration_eta(calibration_observations, budget_seconds)
-           if calibration and aborted is None else
+                              "observations": calibration_observations, "reason": aborted,
+                              "run_id": run_id}
+    elif mode == "full" and prior_calibration is not None:
+        calibration_result = prior_calibration
+    eta_observations = calibration_result.get("observations", [])
+    eta = (_calibration_eta(eta_observations, budget_seconds)
+           if calibration_result.get("status") == "complete" else
            {"seconds": None, "uncertainty_seconds": None, "basis": "none",
             "budget_seconds": budget_seconds, "decision": "unknown", "assumptions": []})
     _gate_resident_budget.reset(budget_token)
@@ -4560,6 +4699,10 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
             "131072_slots": {"by_fixture": slot_rows}, "unreachable_rows": unreachable,
             "verdicts": verdicts, "verdict_reasons": reasons,
             "calibration": calibration_result, "eta": eta,
+            "run_started_at": run_started_at,
+            "budget_agreement_ref": budget_agreement_ref,
+            **({"budget_agreement": budget_agreement} if budget_agreement is not None else {}),
+            **({"locked_tests": locked_tests} if locked_tests is not None else {}),
             "environment": env, "prerequisites": prereq,
             "record_access_audit_findings": audit,
             "total_elapsed_seconds": round(elapsed, 6),
@@ -7114,16 +7257,25 @@ def _runtime_budget_steps(count):
 
 def _attempts(fixture, attachments, unit):
     h = _need(fixture, "highwater_checks")
-    if unit and "register_attempts" in h:
+    if unit and not _gate_shape(fixture, unit) and "register_attempts" in h:
         return _items(h["register_attempts"])
     cache = _finalize_cache.get()
     key = id(fixture)
     if cache is not None and key in cache["attempts"]:
-        return cache["attempts"][key]
+        rows = cache["attempts"][key]
+        if isinstance(rows, _JsonlView):
+            _attachment_view(_need(h, "register_attempts_ref"))
+        return rows
     ref = _need(h, "register_attempts_ref")
+    if not unit or _gate_shape(fixture, unit):
+        rows = _attachment_view(ref)
+        if cache is not None: cache["attempts"][key] = rows
+        return rows
     path = _need(ref, "path")
     if not _safe_ref(path): raise _EvidenceMissing("unsafe attachment path")
     blob = _need(attachments, path)
+    if isinstance(blob, Path):
+        blob = blob.read_bytes()
     if not isinstance(blob, bytes): raise _EvidenceMissing("attachment bytes missing")
     if hashlib.sha256(blob).hexdigest() != _need(ref, "sha256"):
         raise _EvidenceMissing("attachment hash mismatch")
@@ -7147,10 +7299,11 @@ def _safe_ref(path):
             all(part not in ("..", "") for part in Path(path).parts))
 
 
-def _validate_attempts(rows, *, require_budget=False, require_complete=True):
-    if [r.get("register_seq") for r in rows] != list(range(len(rows))):
-        raise _EvidenceMissing("register sequence gap")
-    for r in rows:
+def _validate_attempts(rows, *, require_budget=False, require_complete=True,
+                       gate_shape=False):
+    for seq, r in enumerate(rows):
+        if r.get("register_seq") != seq:
+            raise _EvidenceMissing("register sequence gap")
         _need(r, "input")
         _need(r, "classification")
         _need(r, "before")
@@ -7161,11 +7314,32 @@ def _validate_attempts(rows, *, require_budget=False, require_complete=True):
             _need(layout, "before")
             _need(layout, "after")
         if require_budget:
-            _budget_order(r["before"])
-            _budget_order(r["after"])
+            for side in (r["before"], r["after"]):
+                if gate_shape:
+                    _assert(_need(side, "Q_actual") <= _need(side, "Q_4") and
+                            _need(side, "E") <= _need(side, "B"))
+                else:
+                    _budget_order(side)
 
 
-def _validate_attempt_stream(rows, *, unit, highwater):
+def _attempt_layout(check, attempt, *, gate_shape):
+    layout = _need(attempt, "normalized_layout")
+    if "normalized_layout_ref" in check:
+        ref = _need(check, "normalized_layout_ref")
+        if _need(ref, "register_seq") != _need(attempt, "register_seq"):
+            raise _EvidenceMissing("layout register sequence mismatch")
+        raw = json.dumps(layout, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode()
+        if hashlib.sha256(raw).hexdigest() != _need(ref, "layout_sha256"):
+            raise _EvidenceMissing("layout attachment binding mismatch")
+    elif gate_shape:
+        raise _EvidenceMissing("gate highwater layout reference missing")
+    if "normalized_layout" in check and check["normalized_layout"] != layout:
+        raise _EvidenceMissing("inline highwater layout differs from attempt")
+    return layout
+
+
+def _validate_attempt_stream(rows, *, unit, highwater, gate_shape=False):
     """Check the register ledger against its own input and adjacent registrations."""
     previous = None
     phases = Counter()
@@ -7178,7 +7352,11 @@ def _validate_attempt_stream(rows, *, unit, highwater):
         for side in (before, after):
             for key in ("N_total", "N_res", "H_res", "H_job"):
                 _integer(_need(side, key))
-            _budget_order(side)
+            if gate_shape:
+                _assert(_need(side, "Q_actual") <= _need(side, "Q_4") and
+                        _need(side, "E") <= _need(side, "B"))
+            else:
+                _budget_order(side)
         classification = _need(row, "classification")
         if classification == "registered":
             _eq(after["N_total"], before["N_total"] + 1)
@@ -7266,6 +7444,7 @@ def _evaluate_c(row, report, attachments):
             h = _need(f, "highwater_checks")
             attempts = _attempts(f, attachments, unit)
             checks = _items(_need(h, "checks"))
+            backing_checks = h.get("backing_checks", [])
             point_rows = _items(_need(report, "capacity_proof", "checkpoints"), 2)
             points = {_need(p, "checkpoint_id"): p for p in point_rows}
             _eq(len(points), len(point_rows), "capacity checkpoint ID reused")
@@ -7273,6 +7452,10 @@ def _evaluate_c(row, report, attachments):
             check_seqs = [_integer(_need(check, "register_seq")) for check in checks]
             _eq(len(set(check_seqs)), len(check_seqs), "highwater sequence reused")
             check_by_seq = dict(zip(check_seqs, checks))
+            for check in backing_checks:
+                seq = _integer(_need(check, "register_seq"))
+                _assert(seq not in check_by_seq, "backing/highwater sequence reused")
+                check_by_seq[seq] = check
             first_violation = h.get("first_violation")
             if isinstance(first_violation, dict):
                 violation_seq = _integer(_need(first_violation, "register_seq"))
@@ -7281,24 +7464,25 @@ def _evaluate_c(row, report, attachments):
             paired_refs = set()
             paired_cps = defaultdict(list)
             for cp in cps:
-                if cp.get("kind") in ("highwater_before", "highwater_after"):
+                if cp.get("kind") in ("highwater_before", "highwater_after",
+                                      "backing_before", "backing_after",
+                                      "violation_before", "violation_after"):
                     paired_cps[(cp.get("register_seq"), cp["kind"])].append(cp)
             for seq, attempt in enumerate(attempts):
                 _eq(_need(attempt, "register_seq"), seq)
                 check = check_by_seq.get(seq)
                 layout = _need(attempt, "normalized_layout")
-                if check is not None and "normalized_layout" in check:
-                    _eq(_need(check, "normalized_layout"), layout)
+                if check is not None:
+                    _attempt_layout(check, attempt, gate_shape=_gate_shape(f, unit))
                 backing = _layout_changed(layout)
                 if seq in check_seqs: _eq(_need(check, "backing_changed"), backing)
                 before = attempt.get("before") if "before" in attempt else _need(check, "before")
                 after = attempt.get("after") if "after" in attempt else _need(check, "after")
                 if check is not None and "before" in attempt and "after" in attempt:
                     for side, measured in (("before", before), ("after", after)):
-                        for key in ("H_job", "Q_actual", "Q_4", "G", "E", "B"):
+                        for key in ("H_job", "Q_actual", "Q_4", "E", "B"):
                             _eq(_need(check, side, key), _need(measured, key))
                 violation = any(
-                    _need(point, "G") > _need(point, "E") or
                     _need(point, "E") > _need(point, "B") or
                     _need(point, "Q_actual") > _need(point, "Q_4")
                     for point in (before, after)
@@ -7320,8 +7504,11 @@ def _evaluate_c(row, report, attachments):
                             raise _EvidenceMissing(f"{kind} pair for register_seq {seq} missing")
                         _eq(len(matching), 1, f"{kind} pair for register_seq {seq} duplicated")
                         return matching[0]
-                    before_cp = paired("highwater_before")
-                    after_cp = paired("highwater_after")
+                    kind = ("highwater" if seq in check_seqs else
+                            "violation" if isinstance(first_violation, dict) and
+                            first_violation.get("register_seq") == seq else "backing")
+                    before_cp = paired(kind + "_before")
+                    after_cp = paired(kind + "_after")
                     for side, cp in (("before", before_cp), ("after", after_cp)):
                         measured = _need(check, side)
                         _budget_order(measured)
@@ -7341,7 +7528,9 @@ def _evaluate_c(row, report, attachments):
             cps = _items(_need(f, "checkpoints"), 2)
             paired_cps = defaultdict(list)
             for cp in cps:
-                if cp.get("kind") in ("highwater_before", "highwater_after"):
+                if cp.get("kind") in ("highwater_before", "highwater_after",
+                                      "backing_before", "backing_after",
+                                      "violation_before", "violation_after"):
                     paired_cps[(cp.get("register_seq"), cp["kind"])].append(cp)
             point_rows = _items(_need(report, "capacity_proof", "checkpoints"), 2)
             points = {p.get("checkpoint_id") for p in point_rows}
@@ -7361,8 +7550,13 @@ def _evaluate_c(row, report, attachments):
             for attempt in attempts:
                 if not _need(attempt, "selected"): continue
                 seq = _need(attempt, "register_seq")
-                before_rows = paired_cps[(seq, "highwater_before")]
-                after_rows = paired_cps[(seq, "highwater_after")]
+                first_bad = _need(f, "highwater_checks").get("first_violation") or {}
+                kind = ("highwater" if any(c.get("register_seq") == seq for c in
+                                         _need(f, "highwater_checks").get("checks", [])) or
+                        not _gate_shape(f, unit) else
+                        "violation" if first_bad.get("register_seq") == seq else "backing")
+                before_rows = paired_cps[(seq, kind + "_before")]
+                after_rows = paired_cps[(seq, kind + "_after")]
                 before = _items(before_rows)[0]
                 after = _items(after_rows)[0]
                 _eq(len(before_rows), 1)
@@ -7388,8 +7582,13 @@ def _evaluate_c(row, report, attachments):
         for f in fixtures:
             h = _need(f, "highwater_checks")
             attempts = _attempts(f, attachments, unit)
-            _validate_attempts(attempts, require_budget=True)
-            _validate_attempt_stream(attempts, unit=unit, highwater=h)
+            _validate_attempts(attempts, require_budget=True,
+                               gate_shape=_gate_shape(f, unit))
+            _validate_attempt_stream(attempts, unit=unit, highwater=h,
+                                     gate_shape=_gate_shape(f, unit))
+            for check in (h["checks"] if _gate_shape(f, unit) else h.get("checks", [])) + h.get("backing_checks", []):
+                _attempt_layout(check, attempts[_integer(_need(check, "register_seq"))],
+                                gate_shape=_gate_shape(f, unit))
             replay = _need(h, "replay")
             selected = [r["register_seq"] for r in attempts if r["selected"]]
             if selected:
@@ -7429,11 +7628,14 @@ def _evaluate_c(row, report, attachments):
                 if not unit:
                     _assert(_need(h, "first_pass_complete") is True,
                             "first pass did not finish independently of replay")
-                checks = {_need(c, "register_seq"): c for c in _items(_need(h, "checks"))}
+                checks = {_need(c, "register_seq"): c for c in
+                          _items(_need(h, "checks")) + h.get("backing_checks", [])}
                 cps = _items(_need(f, "checkpoints"), 2)
                 paired_cps = defaultdict(list)
                 for cp in cps:
-                    if cp.get("kind") in ("highwater_before", "highwater_after"):
+                    if cp.get("kind") in ("highwater_before", "highwater_after",
+                                          "backing_before", "backing_after",
+                                          "violation_before", "violation_after"):
                         paired_cps[(cp.get("register_seq"), cp["kind"])].append(cp)
                 point_rows = _items(_need(report, "capacity_proof", "checkpoints"), 2)
                 point_ids = {_need(p, "checkpoint_id") for p in point_rows}
@@ -7442,9 +7644,18 @@ def _evaluate_c(row, report, attachments):
                     check = _need(checks, seq)
                     _assert(_need(check, "preserved") is True,
                             "selected before/after pair not preserved")
-                    for side, kind in (("before", "highwater_before"), ("after", "highwater_after")):
-                        _eq(_need(check, side), _need(attempts[seq], side))
-                        matched = paired_cps[(seq, kind)]
+                    _attempt_layout(check, attempts[seq], gate_shape=_gate_shape(f, unit))
+                    base_kind = ("highwater" if seq in {
+                        c["register_seq"] for c in h["checks"]} else
+                        "violation" if isinstance(h.get("first_violation"), dict) and
+                        h["first_violation"].get("register_seq") == seq else "backing")
+                    for side in ("before", "after"):
+                        if _gate_shape(f, unit):
+                            for key in ("H_res", "H_job", "Q_actual", "Q_4", "E", "B"):
+                                _eq(_need(check, side, key), _need(attempts[seq], side, key))
+                        else:
+                            _eq(_need(check, side), _need(attempts[seq], side))
+                        matched = paired_cps[(seq, base_kind + "_" + side)]
                         if not matched: raise _EvidenceMissing("selected replay capacity pair absent")
                         _eq(len(matched), 1)
                         _assert(_need(matched[0], "capacity_ref") in point_ids)
@@ -7715,7 +7926,7 @@ _BOOLEAN_EVIDENCE_KEYS = frozenset({
     "active", "admission_stopped", "all_rejected", "atomic", "auxiliary",
     "backing_changed", "capacity_covered", "checked", "classification_ok",
     "complete", "connection", "conservative_shared_strings", "coverage_complete",
-    "eligible", "equal", "first_stop_time_unchanged", "fresh_starts",
+    "eligible", "equal", "first_pass_complete", "first_stop_time_unchanged", "fresh_starts",
     "gc_enabled", "has_more", "hash_seed_zero", "includes_deleted_dummy",
     "lifecycle", "live", "measured", "min_4_cores", "min_8gib_ram",
     "no_bytecode", "no_insertion", "no_retirement", "normal_schedule_counted",
@@ -8032,7 +8243,9 @@ def _finalize_cli(argv):
         streamed = set()
         for fixture in report.get("churn_fixtures", []):
             ref = fixture.get("highwater_checks", {}).get("register_attempts_ref", {})
-            if isinstance(ref, dict) and "path" in ref: references.append(ref["path"])
+            if isinstance(ref, dict) and "path" in ref:
+                references.append(ref["path"])
+                streamed.add(ref["path"])
             for entry in (fixture.get("fixture_provenance", {}).get("api_trace_ref"),
                           fixture.get("tomb_due_ledger_ref"),
                           fixture.get("recent_input_ledger_ref")):
@@ -8076,6 +8289,12 @@ def main():
     parser.add_argument("--fixture-detail-divisor", type=int, default=1)
     parser.add_argument("--calibration", action="store_true")
     parser.add_argument("--budget-agreement-ref")
+    parser.add_argument("--calibration-evidence-path",
+                        help="JSON object with status=complete, run_id, observations")
+    parser.add_argument("--budget-agreement-path",
+                        help="JSON object with ref, approved_budget_seconds, signature, signed_at")
+    parser.add_argument("--locked-tests-path",
+                        help="JSON mapping d7/index/slice5a3/slice5a4a/slice5a4b to result refs")
     parser.add_argument("--attachments-dir")
     args = parser.parse_args()
     report = run_gate(limit=args.limit, samples=args.samples, warmup=args.warmup,
@@ -8088,6 +8307,9 @@ def main():
                       fixture_detail_divisor=args.fixture_detail_divisor,
                       calibration=args.calibration,
                       budget_agreement_ref=args.budget_agreement_ref,
+                      calibration_evidence_path=args.calibration_evidence_path,
+                      budget_agreement_path=args.budget_agreement_path,
+                      locked_tests_path=args.locked_tests_path,
                       attachment_dir=args.attachments_dir)
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
 
