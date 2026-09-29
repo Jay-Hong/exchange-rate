@@ -937,6 +937,7 @@
             "budget": {
               "D": 0
             },
+            "event_order": 8,
             "kind": "detail_released",
             "received_at": 2,
             "received_mono": 2,
@@ -965,6 +966,7 @@
               "action": "register",
               "call_index": 0,
               "classification": "registered",
+              "event_order": 1,
               "received_at": 0,
               "received_mono": 0,
               "registered_seq": 1
@@ -974,35 +976,31 @@
               "call_index": 1,
               "classification": "finalized",
               "detail_charge_bytes": 4096,
+              "event_order": 3,
               "registered_seq": 1
             },
             {
               "action": "register",
               "call_index": 2,
               "classification": "registered",
+              "event_order": 5,
               "id": "probe",
               "received_at": 1,
               "received_mono": 1,
               "registered_seq": 2
             },
             {
-              "action": "close",
+              "action": "register",
               "call_index": 3,
-              "classification": "closed",
-              "received_at": 2,
-              "received_mono": 2,
-              "registered_seq": 1
+              "classification": "registered",
+              "event_order": 9,
+              "registered_seq": 3
             },
             {
               "action": "register",
               "call_index": 4,
               "classification": "registered",
-              "registered_seq": 3
-            },
-            {
-              "action": "register",
-              "call_index": 5,
-              "classification": "registered",
+              "event_order": 11,
               "registered_seq": 4
             }
           ]
@@ -2121,6 +2119,10 @@
             ]
           },
           "fault_kind": "merge_failure",
+          "observed_coverage": {
+            "complete": true,
+            "uncertain_sources": []
+          },
           "fault_trace": [
             {
               "action": "aggregation_snapshot",

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import copy
 import gc
+import gzip
+import hashlib
 import importlib.util
 import io
 import json
@@ -74,7 +76,8 @@ CHURN_KEYS = {"name", "status", "id_kind", "state_track", "job_key_counts", "id_
               "scheduled_registered", "auxiliary_registered", "N_total_at_tail", "source_registered",
               "requested_detail_target", "effective_detail_target", "max_retained_details_observed",
               "tail_classification", "checkpoints", "classification_counts", "first_failure", "reason",
-              "highwater_checks", "evidence_gaps"}
+              "highwater_checks", "evidence_gaps", "state_cycle", "fixture_provenance",
+              "max_resident_observed", "tomb_due_ledger", "recent_input_ledger"}
 CHURN_CP_KEYS = {"kind", "minute_index", "received_at", "received_mono", "scheduled_registered", "auxiliary_registered",
                  "N_total", "N_live", "N_tomb", "N_res", "retained_details", "budget", "last_received_at",
                  "last_received_mono", "cumulative_end", "cursor_after_seq", "cursor_next_seq", "cohort_exact_from",
@@ -488,11 +491,13 @@ def test_churn_boundaries_are_exact_from_schedule_start(name):
     cps = c["checkpoints"]
     tail = next(cp for cp in cps if cp["kind"] == "tail_before")["received_at"]
     span = 25 * 60 * MIN
-    start = tail - span
+    start = tail - (24 * 60 * MIN + 52_500_000)
     hours = sorted(cp["received_at"] for cp in cps if cp["kind"] == "hour")
     days = sorted(cp["received_at"] for cp in cps if cp["kind"] == "day")
     assert hours == [start + k * 60 * MIN for k in range(1, 26)]                             # 시작 기준, tail 과 같은 경계 포함
     assert days == [start + 24 * 60 * MIN]
+    after = next(cp for cp in cps if cp["kind"] == "tail_after")
+    assert after["received_at"] == start + span
     assert gate.churn_checkpoint_gaps(cps, minute_batches=25, stride_minutes=60) == []
     assert c["status"] == "PASS"
 
@@ -1124,3 +1129,366 @@ def test_c2_violations_detect_recent_window_mismatch():
     sample["observed_recent_marker_count"] = 0
     sample["observed_in_recent"] = False
     assert gate._churn_evidence_violations([cp])
+
+
+# X2 B second pass: exercise the rows against the gate's own small raw fixture.
+def _project_b_row(row, fixture):
+    projected = copy.deepcopy(fixture)
+    if row == "B21":
+        names = {"tail_before": "tail_80640", "tail_after": "tail_80641"}
+        for cp in projected["checkpoints"]:
+            cp["kind"] = names.get(cp["kind"], cp["kind"])
+    scale = ({"cycle_length": 20, "finished": 16, "unbound": 2,
+              "cycles": 10, "churn_names": [projected["name"]]} if row == "B02" else
+             {"hours": 25, "pre_prune_hours": 3} if row == "B10" else {})
+    return {"mode": "predicate_unit", "churn_fixtures": [projected], "test_scale": scale}
+
+
+@pytest.mark.parametrize("row", ("B08", "B09", "B10", "B12", "B14", "B15",
+                                     "B16", "B17", "B18", "B21"))
+def test_x2_b_remaining_rows_pass_on_small_raw_fixture(row):
+    report = _project_b_row(row, _default_churn())
+    assert gate.evaluate_row(row, report, attachments={})["status"] == "PASS"
+
+
+@pytest.mark.parametrize("row", ("B02", "B07", "B08", "B09", "B10", "B12",
+                                 "B14", "B15", "B16", "B18", "B21"))
+def test_x2_b_gate_shaped_rows_require_minute_batches(row):
+    report = _project_b_row(row, _default_churn())
+    assert gate.evaluate_row(row, report, attachments={})["status"] == "PASS", row
+    del report["churn_fixtures"][0]["minute_batches"]
+    result = gate.evaluate_row(row, report, attachments={})
+    assert result["status"] == "UNVERIFIED" and "minute_batches" in result["reason"], (row, result)
+
+
+def test_x2_b_b14_close_input_mono_deadline_must_have_passed():
+    report = _project_b_row("B14", _default_churn())
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    first_finish = next(t for t in fixture["fixture_provenance"]["api_trace"]
+                        if t["action"] == "finish")
+    first_finish["close_mono"] = fixture["checkpoints"][-1]["received_mono"] + 1
+    assert gate.evaluate_row("B14", report, attachments={})["status"] != "PASS"
+
+
+def test_x2_b_b14_prune_watermark_uses_all_active_tombs():
+    report = _project_b_row("B14", _default_churn())
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    checkpoint = next(cp for cp in fixture["checkpoints"] if cp["kind"] == "probe_prune_at")
+    active = {}
+    for event in fixture["fixture_provenance"]["api_trace"]:
+        if event["event_order"] > checkpoint["event_order"]:
+            break
+        if event["action"] == "tomb":
+            active[event["id"]] = event
+        elif event["action"] == "prune":
+            active.pop(event["id"], None)
+    future = next(tomb for tomb in active.values()
+                  if tomb["prune_due_at"] > checkpoint["received_at"])
+    future["prune_due_at"] = checkpoint["received_at"]
+    assert gate.evaluate_row("B14", report, attachments={})["status"] != "PASS"
+
+
+def test_x2_b_b02_requires_stride_on_gate_shaped_fixture():
+    report = _project_b_row("B02", _default_churn())
+    del report["churn_fixtures"][0]["stride_minutes"]
+    assert gate.evaluate_row("B02", report, attachments={})["status"] == "UNVERIFIED"
+
+
+def test_x2_b_b02_tail_must_be_observed_as_non_auxiliary():
+    report = _project_b_row("B02", _default_churn())
+    registers = [t for t in report["churn_fixtures"][0]["fixture_provenance"]["api_trace"]
+                 if t["action"] == "register"]
+    registers[-1]["auxiliary"] = True
+    assert gate.evaluate_row("B02", report, attachments={})["status"] == "FAIL"
+
+
+def test_x2_b_b02_tail_missing_trace_cannot_match_adjusted_count():
+    report = _project_b_row("B02", _default_churn())
+    assert gate.evaluate_row("B02", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    trace = fixture["fixture_provenance"]["api_trace"]
+    tail = next(t for t in reversed(trace) if t["action"] == "register")
+    assert tail["registered_seq"] == fixture["N_total_at_tail"]
+    trace.remove(tail)
+    fixture["classification_counts"]["registered"] -= 1
+    assert gate.evaluate_row("B02", report, attachments={})["status"] != "PASS"
+
+
+@pytest.mark.parametrize("future_axis", ("both", "received_mono"))
+def test_x2_b_b16_future_link_cannot_change_published_lifecycle(future_axis):
+    report = _project_b_row("B16", _default_churn())
+    assert gate.evaluate_row("B16", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    trace = fixture["fixture_provenance"]["api_trace"]
+    pub = next(cp for cp in fixture["checkpoints"] if cp["kind"] == "tail_after")
+    projections = next(cp["passive_cohort_projection"] for cp in fixture["checkpoints"]
+                       if "passive_cohort_projection" in cp)
+    registration = next(t for t in trace if t["action"] == "register" and
+                        t["source"] == "investing" and t["cycle_position"] == 17 and
+                        pub["recent_cohorts"]["investing"]["range"][0] <= t["received_at"] < pub["received_at"])
+    link = next(t for t in trace if t["action"] == "link_round" and t["id"] == registration["id"])
+    assert not any(t["action"] == "finish" and t["id"] == registration["id"] for t in trace)
+    assert pub["received_mono"] - registration["received_mono"] >= 15 * MIN
+    registration["received_at"] = pub["received_at"] - MIN
+    registration["received_mono"] = pub["received_mono"] - MIN
+    if future_axis == "both":
+        link["received_at"] = pub["received_at"] + MIN
+    link["received_mono"] = pub["received_mono"] + MIN
+    counts = pub["recent_cohorts"][registration["source"]]["counts"]
+    if future_axis == "both":
+        counts["connection"]["started"] -= 1
+        counts["connection"]["unbound"] += 1
+    counts["lifecycle"]["overdue"] -= 1
+    counts["lifecycle"]["in_flight"] += 1
+    next(p for p in projections if p["source"] == registration["source"])["counts"] = copy.deepcopy(counts)
+    assert gate.evaluate_row("B16", report, attachments={})["status"] != "PASS"
+
+
+def test_x2_b_b09_future_expiry_cannot_change_prior_coverage():
+    report = _project_b_row("B09", _default_churn())
+    assert gate.evaluate_row("B09", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    before = next(cp for cp in fixture["checkpoints"] if cp["kind"] == "probe_expire_before")
+    future = next(t for t in fixture["fixture_provenance"]["api_trace"]
+                  if t["classification"] == "retention_expired" and
+                  t["id"] != before["identity_samples"][0]["id"])
+    assert future["received_mono"] > before["received_mono"]
+    future["received_at"] = before["received_at"]
+    before["coverage_complete"] = False
+    assert gate.evaluate_row("B09", report, attachments={})["status"] != "PASS"
+
+
+def test_x2_b08_future_finish_backdated_cannot_inflate_frozen_count():
+    report = _project_b_row("B08", _default_churn())
+    assert gate.evaluate_row("B08", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    before, at = (next(cp for cp in fixture["checkpoints"] if cp["kind"] == kind)
+                  for kind in ("probe_close_before", "probe_close_at"))
+    item = at["frozen_totals_before_after"][0]
+    future = next(t for t in fixture["fixture_provenance"]["api_trace"]
+                  if t["action"] == "finish" and t["source"] == item["source"]
+                  and t["event_order"] > at["event_order"])
+    future["received_at"] = before["received_at"]
+    future["received_mono"] = before["received_mono"]
+    future["close_at"] = at["received_at"]
+    future["close_mono"] = at["received_mono"]
+    item["at"]["finished"] += 1
+    item["requery"]["finished"] += 1
+    assert gate.evaluate_row("B08", report, attachments={})["status"] != "PASS"
+
+
+def test_x2_b09_future_expiry_backdated_cannot_change_prior_coverage():
+    report = _project_b_row("B09", _default_churn())
+    assert gate.evaluate_row("B09", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    before = next(cp for cp in fixture["checkpoints"] if cp["kind"] == "probe_expire_before")
+    future = next(t for t in fixture["fixture_provenance"]["api_trace"]
+                  if t["classification"] == "retention_expired" and
+                  t["event_order"] > before["event_order"] and
+                  t["id"] != before["identity_samples"][0]["id"])
+    future["received_at"] = before["received_at"]
+    future["received_mono"] = before["received_mono"]
+    before["coverage_complete"] = False
+    assert gate.evaluate_row("B09", report, attachments={})["status"] != "PASS"
+
+
+def test_x2_b12_future_register_backdated_cannot_enter_recent_window():
+    report = _project_b_row("B12", _default_churn())
+    assert gate.evaluate_row("B12", report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    before, at = (next(cp for cp in fixture["checkpoints"] if cp["kind"] == kind)
+                  for kind in ("probe_recent_before", "probe_recent_at"))
+    trace = fixture["fixture_provenance"]["api_trace"]
+    entry = next(e for e in fixture["recent_input_ledger"]
+                 if next(t for t in trace if t["action"] == "register" and t["id"] == e["id"])["event_order"]
+                 > at["event_order"])
+    entry["bucket_start"] = before["received_at"] // MIN * MIN - MIN
+    for cp, part in ((before, "before"), (at, "at")):
+        for key in (cp["recent_expected_counts"][entry["source"]][part],
+                    cp["recent_cohort_counts"][entry["source"]]):
+            key["registered"] += 1
+            key["connection"][entry["connection"]] = key["connection"].get(entry["connection"], 0) + 1
+            key["lifecycle"][entry["lifecycle"]] = key["lifecycle"].get(entry["lifecycle"], 0) + 1
+    assert gate.evaluate_row("B12", report, attachments={})["status"] != "PASS"
+
+
+@pytest.mark.parametrize("row", ("B03", "B08", "B10", "B12", "B15", "B19", "B21"))
+def test_x2_b_checkpoint_future_event_cannot_enter_published_state(row):
+    if row == "B03":
+        fixture = gate.run_churn_fixture("churn_burst_ascii128", limit=128, **SMALL_CHURN)
+    elif row == "B19":
+        fixture = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128,
+                                        measure_transitions=True, **SMALL_CHURN)
+    else:
+        fixture = _default_churn()
+    report = _project_b_row(row, fixture)
+    fixture = report["churn_fixtures"][0]
+    if row == "B03":
+        for cp in fixture["checkpoints"]:
+            cp["kind"] = {"tail_before": "tail_80640", "tail_after": "tail_80641"}.get(cp["kind"], cp["kind"])
+        report["test_scale"] = {"burst_details": 8, "normal_calls": 201}
+    elif row == "B10":
+        report["test_scale"] = {"hours": 25, "pre_prune_hours": 3}
+    elif row == "B19":
+        report["scenarios"] = fixture["transition_measurements"]
+    assert gate.evaluate_row(row, report, attachments={})["status"] == "PASS"
+    trace = fixture["fixture_provenance"]["api_trace"]
+    if row in ("B08", "B12"):
+        kind = "probe_close_at" if row == "B08" else "probe_recent_before"
+        cp = next(cp for cp in fixture["checkpoints"] if cp["kind"] == kind)
+        identity = cp["identity_samples"][0]["id"]
+        event = next(t for t in trace if t["action"] == "finish" and t["id"] == identity)
+    else:
+        event = next(t for t in trace if t["action"] == ("tomb" if row == "B10" else "register"))
+        cp = next(cp for cp in fixture["checkpoints"] if cp["event_order"] >= event["event_order"])
+    event["received_at"] = cp["received_at"] + 1
+    event["received_mono"] = cp["received_mono"] + 1
+    assert gate.evaluate_row(row, report, attachments={})["status"] != "PASS"
+
+
+@pytest.mark.parametrize("auxiliary", (None, 0, "false"))
+def test_x2_b_b02_gate_register_requires_boolean_auxiliary(auxiliary):
+    report = _project_b_row("B02", _default_churn())
+    registers = [t for t in report["churn_fixtures"][0]["fixture_provenance"]["api_trace"]
+                 if t["action"] == "register"]
+    if auxiliary is None:
+        del registers[len(registers) // 2]["auxiliary"]
+    else:
+        registers[len(registers) // 2]["auxiliary"] = auxiliary
+    assert gate.evaluate_row("B02", report, attachments={})["status"] == "UNVERIFIED"
+
+
+def test_x2_b_b02_gate_requires_integer_auxiliary_count():
+    report = _project_b_row("B02", _default_churn())
+    report["churn_fixtures"][0]["auxiliary_registered"] = False
+    assert gate.evaluate_row("B02", report, attachments={})["status"] == "UNVERIFIED"
+
+
+def test_x2_b_b03_missing_actual_charge_is_unverified():
+    fixture = gate.run_churn_fixture("churn_burst_ascii128", limit=128, **SMALL_CHURN)
+    for cp in fixture["checkpoints"]:
+        cp["kind"] = {"tail_before": "tail_80640", "tail_after": "tail_80641"}.get(cp["kind"], cp["kind"])
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture],
+              "test_scale": {"burst_details": 8, "normal_calls": 201}}
+    assert gate.evaluate_row("B03", report, attachments={})["status"] == "PASS"
+    first_finish = next(t for t in fixture["fixture_provenance"]["api_trace"] if t["action"] == "finish")
+    del first_finish["detail_charge_bytes"]
+    assert gate.evaluate_row("B03", report, attachments={})["status"] == "UNVERIFIED"
+
+
+def test_x2_b_b03_rejects_swapped_auxiliary_positions_with_same_count():
+    fixture = gate.run_churn_fixture("churn_burst_ascii128", limit=128, **SMALL_CHURN)
+    for cp in fixture["checkpoints"]:
+        cp["kind"] = {"tail_before": "tail_80640", "tail_after": "tail_80641"}.get(cp["kind"], cp["kind"])
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture],
+              "test_scale": {"burst_details": 8, "normal_calls": 201}}
+    assert gate.evaluate_row("B03", report, attachments={})["status"] == "PASS"
+    registers = [t for t in fixture["fixture_provenance"]["api_trace"]
+                 if t["action"] == "register"]
+    registers[0]["auxiliary"] = False
+    registers[9]["auxiliary"] = True
+    assert sum(t["auxiliary"] for t in registers) == fixture["auxiliary_registered"]
+    assert gate.evaluate_row("B03", report, attachments={})["status"] == "FAIL"
+
+
+def test_x2_b_b19_independent_transition_measurements_pass():
+    fixture = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128,
+                                    measure_transitions=True, **SMALL_CHURN)
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture],
+              "scenarios": fixture["transition_measurements"]}
+    assert gate.evaluate_row("B19", report, attachments={})["status"] == "PASS"
+    del report["churn_fixtures"][0]["minute_batches"]
+    result = gate.evaluate_row("B19", report, attachments={})
+    assert result["status"] == "UNVERIFIED" and "minute_batches" in result["reason"]
+
+
+def test_x2_b_b20_independent_fault_scenarios_pass():
+    scenarios = gate.run_churn_fault_scenarios()
+    report = {"mode": "predicate_unit", "scenarios": scenarios,
+              "test_scale": {"fault_kinds": [s["fault_evidence"]["fault_kind"] for s in scenarios]}}
+    assert gate.evaluate_row("B20", report, attachments={})["status"] == "PASS"
+
+
+def test_x2_b_b18_does_not_claim_complete_counters_without_transition_trace():
+    report = _project_b_row("B18", _default_churn())
+    del report["churn_fixtures"][0]["max_resident_observed"]
+    assert gate.evaluate_row("B18", report, attachments={})["status"] == "UNVERIFIED"
+
+
+@pytest.fixture(scope="module")
+def _stream_churn(tmp_path_factory):
+    root = tmp_path_factory.mktemp("d7_churn_attachments")
+    fixture = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128,
+                                    churn_minutes=41, churn_stride_minutes=60,
+                                    fixture_detail_divisor=256, measure_transitions=True,
+                                    attachment_dir=root)
+    refs = [fixture["fixture_provenance"]["api_trace_ref"],
+            fixture["tomb_due_ledger_ref"], fixture["recent_input_ledger_ref"],
+            fixture["checkpoints"][0]["seq_evidence_ref"]]
+    return fixture, {ref["path"]: root / ref["path"] for ref in refs}
+
+
+def test_full_shape_churn_keeps_detailed_evidence_in_attachments(_stream_churn):
+    fixture, attachments = _stream_churn
+    assert fixture["status"] == "PASS"
+    assert fixture["max_resident_observed"] > 0
+    assert "api_trace_ref" in fixture["fixture_provenance"]
+    assert "tomb_due_ledger_ref" in fixture and "recent_input_ledger_ref" in fixture
+    assert all("seq_evidence_ref" in cp and "retained_seqs" not in cp
+               for cp in fixture["checkpoints"])
+    for row in ("B10", "B12", "B15", "B18", "B19", "B21"):
+        report = _project_b_row(row, fixture)
+        report["scenarios"] = fixture["transition_measurements"]
+        if row == "B10":
+            report["test_scale"] = {"hours": 41, "pre_prune_hours": 3}
+        assert gate.evaluate_row(row, report, attachments=attachments)["status"] == "PASS", row
+
+
+@pytest.mark.parametrize("damage", ("missing", "hash", "rows", "sequence"))
+def test_streamed_churn_trace_fails_closed(_stream_churn, damage):
+    fixture, attachments = _stream_churn
+    report = _project_b_row("B18", fixture)
+    attachments = dict(attachments)
+    ref = report["churn_fixtures"][0]["fixture_provenance"]["api_trace_ref"]
+    path = ref["path"]
+    if damage == "missing":
+        attachments.pop(path)
+    elif damage == "hash":
+        ref["sha256"] = "0" * 64
+    elif damage == "rows":
+        ref["rows"] += 1
+    else:
+        rows = [json.loads(line) for line in gzip.decompress(attachments[path].read_bytes()).splitlines()]
+        rows[0]["attachment_seq"] = 1
+        blob = gzip.compress(("\n".join(json.dumps(row) for row in rows) + "\n").encode(), mtime=0)
+        ref["sha256"] = hashlib.sha256(blob).hexdigest()
+        attachments[path] = blob
+    assert gate.evaluate_row("B18", report, attachments=attachments)["status"] == "UNVERIFIED"
+
+
+def test_gate_records_independent_b19_b20_scenarios(tmp_path):
+    report = gate.run_gate(limit=128, samples=1, warmup=0,
+                           churn_names=["churn_most_finished_short_ascii"],
+                           churn_minutes=41, churn_stride_minutes=60,
+                           fixture_detail_divisor=256, attachment_dir=tmp_path,
+                           progress=io.StringIO())
+    names = {row["name"] for row in report["scenarios"]}
+    assert {"churn_fault_clock_step", "churn_fault_merge_failure",
+            "churn_fault_late_after_expiry", "churn_fault_id_collision",
+            "churn_fault_uuid_uniqueness"} <= names
+    assert "churn_registered_independent" in names
+    assert any(cp["measurement_refs"] for cp in report["churn_fixtures"][0]["checkpoints"])
+
+
+def test_independent_transition_full_sample_count():
+    measured = gate._churn_transition_measurement("registered", samples=1000)
+    assert measured["timing"]["gc_disabled"]["n"] == 1000
+    gate._observed_timing(measured)
+    gate._measured_time_gate(measured, required_n=1000)
+
+
+def test_independent_faults_are_present_in_full_branch():
+    report = {"mode": "full", "scenarios": gate.run_churn_fault_scenarios()}
+    assert gate.evaluate_row("B20", report, attachments={})["status"] == "PASS"

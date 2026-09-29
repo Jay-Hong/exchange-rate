@@ -1124,3 +1124,271 @@ def test_real_pressure_fixture_projects_to_pass(name, rows):
     for row in rows:
         result = gate.evaluate_row(row, _project_pressure(row, pressure), attachments={})
         assert result["status"] == "PASS", (name, row, result)
+
+
+# ───────── 16. X2 B단위: 실제 churn 원본 → 행별 투영 → 판정 ─────────
+# 소형 run_churn_fixture 결과를 predicate_unit 으로 옮겨 B 행이 PASS 인지 본다. 관측값은 바꾸지 않는다.
+# 투영이 하는 일은 둘뿐이다: (1) 소형 tail 표기 tail_before/tail_after → full 표기 tail_80640/tail_80641
+# (full 에선 게이트가 직접 full 표기를 낸다), (2) test_scale 규모 표시. 출처: codex_x2_b_report.md(8b592fcc).
+# B11 은 unit 모드가 경계쌍 1개를 요구하므로 범주마다 따로 투영해 세 범주(finished·linked·unbound) 모두 본다
+# — full(36쌍)에선 판정기가 전 범주를 한 번에 다뤄야 하므로, 한 범주만 보면 결함을 가린다.
+
+_B_Q = ("churn_most_finished_short_ascii", dict(limit=4096, churn_minutes=25, churn_stride_minutes=1,
+                                                 fixture_detail_divisor=256))
+_B_D = ("churn_burst_ascii128", dict(limit=128, churn_minutes=25, churn_stride_minutes=60,
+                                      fixture_detail_divisor=256))
+_B_S = ("churn_most_finished_short_ascii", dict(limit=128, churn_minutes=25, churn_stride_minutes=60,
+                                                 fixture_detail_divisor=256))
+_B_SCALE = {
+    "B01": {"normal_calls": 201, "minutes": 25, "sources": ["investing", "bs", "citi"]},
+    "B02": {"cycle_length": 20, "finished": 16, "unbound": 2, "cycles": 10},
+    "B03": {"burst_details": 8, "normal_calls": 201},
+    "B04": {"normal_calls": 201, "hours": 25, "days": 1},
+    "B13": {"required_budget_points": ["hour", "day", "tail_before", "tail_after"]},
+}
+_B_TAIL_NAMES = {"tail_before": "tail_80640", "tail_after": "tail_80641"}
+_B_CACHE: dict = {}
+
+
+def _b_fixture(spec):
+    name, kwargs = spec
+    key = (name, tuple(sorted(kwargs.items())))
+    if key not in _B_CACHE:
+        _B_CACHE[key] = gate.run_churn_fixture(name, **kwargs)
+    return copy.deepcopy(_B_CACHE[key])
+
+
+def _project_churn(row, fixture, *, b11_category=None):
+    f = copy.deepcopy(fixture)
+    scale = copy.deepcopy(_B_SCALE.get(row, {}))
+    if row == "B02":
+        scale["churn_names"] = [f["name"]]
+    if row in ("B01", "B03", "B04"):
+        for cp in f["checkpoints"]:
+            cp["kind"] = _B_TAIL_NAMES.get(cp["kind"], cp["kind"])
+    if row == "B11":
+        f["checkpoints"] = [cp for cp in f["checkpoints"]
+                            if cp["kind"] in ("probe_prune_before", "probe_prune_at")
+                            and cp["identity_samples"][0]["category"] == b11_category]
+    return {"mode": "predicate_unit", "churn_fixtures": [f], "test_scale": scale}
+
+
+_B_CASES = [(_B_Q, ("B01",)), (_B_D, ("B03",)), (_B_S, ("B02", "B04", "B05", "B06", "B07", "B13"))]
+
+
+@pytest.mark.parametrize("spec,rows", _B_CASES, ids=[f"{c[0][0]}-{'-'.join(c[1])}" for c in _B_CASES])
+def test_real_churn_fixture_projects_to_pass(spec, rows):
+    fixture = _b_fixture(spec)
+    for row in rows:
+        result = gate.evaluate_row(row, _project_churn(row, fixture), attachments={})
+        assert result["status"] == "PASS", (spec[0], row, result)
+
+
+@pytest.mark.parametrize("category", ["finished", "linked", "unbound"])
+def test_real_churn_b11_every_category_passes(category):
+    fixture = _b_fixture(_B_S)
+    projected = _project_churn("B11", fixture, b11_category=category)
+    assert len(projected["churn_fixtures"][0]["checkpoints"]) == 2, category
+    result = gate.evaluate_row("B11", projected, attachments={})
+    assert result["status"] == "PASS", (category, result)
+
+
+def test_real_churn_raw_bool_fields_do_not_block_rows():
+    # 게이트의 진짜 bool 필드(insufficient_evidence·expected_in_recent·observed_in_recent)가
+    # 정수 증거 거부 검사에 걸려 전 행을 UNVERIFIED 로 만들지 않는다.
+    fixture = _b_fixture(_B_S)
+    result = gate.evaluate_row("B05", _project_churn("B05", fixture), attachments={})
+    assert "JSON bool cannot stand" not in (result["reason"] or ""), result
+
+
+def _b_attachments(root):
+    out = {}
+    for path in sorted(Path(root).rglob("*")):
+        if path.is_file():
+            out[str(path.relative_to(root))] = path.read_bytes()
+    return out
+
+
+@pytest.mark.parametrize("row", ["B12", "B15"])
+def test_real_churn_streamed_evidence_passes_and_fails_closed(row, tmp_path):
+    # 40분 초과 원본은 상세 증거를 gzip JSONL 부속으로 흘려 쓴다(full 과 같은 경로). 부속이 온전하면 PASS,
+    # 없거나 한 바이트라도 바뀌면 UNVERIFIED 여야 한다 — 부속 경로가 판정을 조용히 약화하지 않는다.
+    fixture = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, churn_minutes=41,
+                                     churn_stride_minutes=60, fixture_detail_divisor=256,
+                                     attachment_dir=str(tmp_path))
+    attachments = _b_attachments(tmp_path)
+    assert attachments, "streamed evidence produced no attachment"
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture],
+              "test_scale": {"hours": 41, "pre_prune_hours": 3}}
+    assert gate.evaluate_row(row, report, attachments=attachments)["status"] == "PASS"
+    assert gate.evaluate_row(row, report, attachments={})["status"] == "UNVERIFIED"
+    tampered = {k: v[:-1] + bytes([v[-1] ^ 1]) for k, v in attachments.items()}
+    assert gate.evaluate_row(row, report, attachments=tampered)["status"] == "UNVERIFIED"
+
+
+@pytest.mark.parametrize("index", range(5))
+def test_real_fault_scenario_without_observed_coverage_is_unverified(index):
+    # Codex 커밋 검토 REJECT(codex_x2b_commit_verdict1.md): B20 이 observed_coverage 가 있을 때만 실제
+    # coverage 를 봐서, 필드를 지워도 PASS 했다. 실제 fault 원본 다섯 개 각각에서 필드를 지우면 UNVERIFIED.
+    scenarios = gate.run_churn_fault_scenarios()
+    assert len(scenarios) == 5
+    doc = copy.deepcopy(_ex("B20"))
+    doc["scenarios"] = copy.deepcopy(scenarios)
+    doc["test_scale"] = {"fault_kinds": [s["fault_evidence"]["fault_kind"] for s in scenarios]}
+    assert gate.evaluate_row("B20", doc, attachments={})["status"] == "PASS"
+    del doc["scenarios"][index]["fault_evidence"]["observed_coverage"]
+    result = gate.evaluate_row("B20", doc, attachments={})
+    assert result["status"] == "UNVERIFIED", (index, result)
+
+
+@pytest.mark.parametrize("which", ["first_hour_after_close", "last"])
+def test_real_churn_b14_close_through_cannot_vanish_after_close(which):
+    # Codex 커밋 재검토 REJECT(codex_x2b_commit_verdict2.md): B14 가 이전·현재 모두 close_through 가 있을
+    # 때만 단조성을 봐서, 닫힌 뒤 체크포인트의 close_through·cumulative_end 를 None 으로 바꿔도 PASS 했다.
+    # None 은 첫 닫힘 전에만 정상이다.
+    fixture = _b_fixture(_B_S)
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture], "test_scale": {}}
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "PASS"
+    cps = report["churn_fixtures"][0]["checkpoints"]
+    first = next(i for i, cp in enumerate(cps) if cp.get("close_through") is not None)
+    assert first + 1 < len(cps)
+    # probe_close_at 은 다른 검사(close_through >= bucket_end)가 이미 잡으므로 hour 체크포인트를 고른다.
+    hour = next(i for i in range(first + 1, len(cps)) if cps[i]["kind"] == "hour")
+    target = cps[hour] if which == "first_hour_after_close" else cps[-1]
+    assert target["kind"] != "probe_close_at", which
+    target["close_through"] = None
+    target["cumulative_end"] = None
+    assert gate.evaluate_row("B14", report, attachments={})["status"] != "PASS"
+
+
+@pytest.mark.parametrize("kind,pick", [("probe_prune_at", 0), ("probe_prune_at", -1), ("tail_after", 0)])
+def test_real_churn_b15_identity_index_audit_cannot_vanish(kind, pick):
+    # Codex 커밋 재검토 REJECT(codex_x2b_commit_verdict3.md): 게이트 원본에서 체크포인트별 색인 감사가 없으면
+    # 빈 목록으로 처리해, prune 체크포인트 하나의 감사를 지워도 B15 가 PASS 했다. 게이트는 probe_prune_at 과
+    # 두 번째 tail 에 감사를 늘 붙이므로 그 자리의 소실은 UNVERIFIED.
+    fixture = _b_fixture(_B_S)
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture], "test_scale": {}}
+    assert gate.evaluate_row("B15", report, attachments={})["status"] == "PASS"
+    cps = report["churn_fixtures"][0]["checkpoints"]
+    index = [i for i, cp in enumerate(cps) if cp["kind"] == kind][pick]
+    del cps[index]["identity_index_audit"]
+    assert gate.evaluate_row("B15", report, attachments={})["status"] == "UNVERIFIED"
+
+
+# Codex 커밋 재검토 REJECT(codex_x2b_commit_verdict4.md): 보조 호출 증거(register 의 auxiliary,
+# 원본의 auxiliary_registered)가 없으면 기본값 False·0 으로 처리해 B01·B02·B04·B10·B21 이 PASS 했다.
+# 게이트는 두 필드를 늘 낸다 — 게이트 원본에서의 누락·불일치는 PASS 불가.
+
+def _b_row_report(row, spec):
+    report = _project_churn(row, _b_fixture(spec))
+    if row == "B10":
+        report["test_scale"] = {"hours": 25, "pre_prune_hours": 3}
+    if row == "B21":
+        for cp in report["churn_fixtures"][0]["checkpoints"]:
+            cp["kind"] = _B_TAIL_NAMES.get(cp["kind"], cp["kind"])
+    return report
+
+
+def _b_normal_registers(report):
+    trace = report["churn_fixtures"][0]["fixture_provenance"]["api_trace"]
+    return [t for t in trace if t.get("action") == "register" and t.get("auxiliary") is False]
+
+
+_B_AUX_CASES = [
+    ("B01", _B_Q, "drop_fixture_count"), ("B01", _B_Q, "drop_first_normal"),
+    ("B02", _B_S, "drop_first_normal"), ("B02", _B_S, "flip_middle_normal"),
+    ("B04", _B_S, "drop_first_normal"), ("B10", _B_S, "drop_first_normal"),
+    ("B21", _B_S, "drop_fixture_count"), ("B21", _B_D, "drop_fixture_count"),
+]
+
+
+@pytest.mark.parametrize("row,spec,mutation", _B_AUX_CASES,
+                         ids=[f"{r}-{s[0]}-{m}" for r, s, m in _B_AUX_CASES])
+def test_real_churn_auxiliary_evidence_cannot_default(row, spec, mutation):
+    report = _b_row_report(row, spec)
+    assert gate.evaluate_row(row, report, attachments={})["status"] == "PASS"
+    fixture = report["churn_fixtures"][0]
+    normal = _b_normal_registers(report)
+    assert len(normal) > 2
+    if mutation == "drop_fixture_count":
+        del fixture["auxiliary_registered"]
+    elif mutation == "drop_first_normal":
+        del normal[0]["auxiliary"]
+    elif mutation == "flip_middle_normal":
+        normal[len(normal) // 2]["auxiliary"] = True
+    assert gate.evaluate_row(row, report, attachments={})["status"] != "PASS", (row, mutation)
+
+
+# Codex 커밋 재검토 REJECT(codex_x2b_commit_verdict5.md) 1·2번: 보조 호출 증거의 **값**이 trace 와 어긋나도 PASS.
+# (3번 — predicate_unit 에서 name 을 지워 축약 예시로 오인시키는 우회 — 는 최종 수락이 full 만이라 범위 밖으로
+#  Codex 와 합의 대상. 여기서는 잠그지 않는다.)
+
+@pytest.mark.parametrize("row", ["B02", "B04", "B10", "B21"])
+def test_real_churn_auxiliary_registered_must_match_trace(row):
+    report = _b_row_report(row, _B_S)
+    fixture = report["churn_fixtures"][0]
+    assert fixture["auxiliary_registered"] == 0
+    assert gate.evaluate_row(row, report, attachments={})["status"] == "PASS"
+    fixture["auxiliary_registered"] = 1
+    assert gate.evaluate_row(row, report, attachments={})["status"] != "PASS", row
+
+
+@pytest.mark.parametrize("flip", ["burst_to_normal", "normal_to_burst"])
+def test_real_churn_b03_auxiliary_flip_is_not_pass(flip):
+    report = _project_churn("B03", _b_fixture(_B_D))
+    assert gate.evaluate_row("B03", report, attachments={})["status"] == "PASS"
+    trace = report["churn_fixtures"][0]["fixture_provenance"]["api_trace"]
+    registers = [t for t in trace if t.get("action") == "register"]
+    burst = [t for t in registers if t["auxiliary"] is True]
+    normal = [t for t in registers if t["auxiliary"] is False]
+    assert burst and normal
+    if flip == "burst_to_normal":
+        burst[len(burst) // 2]["auxiliary"] = False
+    else:
+        normal[len(normal) // 2]["auxiliary"] = True
+    assert gate.evaluate_row("B03", report, attachments={})["status"] != "PASS", flip
+
+
+@pytest.mark.parametrize("field", ["rows", "last_seq", "first_seq"])
+def test_real_churn_streamed_ref_metadata_rechecked_per_reference(field, tmp_path):
+    # Codex 커밋 재검토 REJECT(codex_x2b_commit_verdict6.md): 부속 뷰를 (path, sha256) 으로만 캐시해,
+    # 첫 체크포인트가 정상 참조를 읽은 뒤 두 번째 체크포인트의 같은 부속 참조 메타데이터를 바꿔도 통과했다.
+    fixture = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128, churn_minutes=41,
+                                     churn_stride_minutes=60, fixture_detail_divisor=256,
+                                     attachment_dir=str(tmp_path))
+    attachments = _b_attachments(tmp_path)
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture],
+              "test_scale": {"hours": 41, "pre_prune_hours": 3}}
+    assert gate.evaluate_row("B15", report, attachments=attachments)["status"] == "PASS"
+    refs = [cp["seq_evidence_ref"] for cp in fixture["checkpoints"] if "seq_evidence_ref" in cp]
+    assert len(refs) >= 2 and refs[0]["path"] == refs[1]["path"]
+    second = [cp for cp in fixture["checkpoints"] if "seq_evidence_ref" in cp][1]
+    second["seq_evidence_ref"] = dict(second["seq_evidence_ref"])
+    second["seq_evidence_ref"][field] = second["seq_evidence_ref"][field] + 1
+    assert gate.evaluate_row("B15", report, attachments=attachments)["status"] == "UNVERIFIED", field
+
+
+# Codex 커밋 재검토 REJECT(codex_x2b_commit_verdict7.md): B14 게이트 원본 분기가 기존 대조(단조성·닫힘 입력·watermark)를
+# 건너뛰어, 아래 세 변조가 모두 PASS 했다. 게이트 원본 분기에서도 같은 의미의 대조가 있어야 한다.
+
+@pytest.mark.parametrize("mutation", ["last_received_regress", "close_through_future", "prune_watermark_zero"])
+def test_real_churn_b14_gate_branch_keeps_old_contracts(mutation):
+    fixture = _b_fixture(_B_S)
+    report = {"mode": "predicate_unit", "churn_fixtures": [fixture], "test_scale": {}}
+    assert gate.evaluate_row("B14", report, attachments={})["status"] == "PASS"
+    cps = report["churn_fixtures"][0]["checkpoints"]
+    if mutation == "last_received_regress":
+        target = cps[len(cps) // 2]
+        target["last_received_at"] = 0
+        target["last_received_mono"] = 0
+    elif mutation == "close_through_future":
+        last = cps[-1]
+        assert last["close_through"] is not None
+        future = max(last["received_at"], last["received_mono"]) + 10 ** 9
+        last["close_through"] = future
+        last["cumulative_end"] = future
+    else:
+        prune_at = [cp for cp in cps if cp["kind"] == "probe_prune_at"]
+        assert prune_at and prune_at[-1]["prune_observed_through"] not in (None, 0)
+        prune_at[-1]["prune_observed_through"] = 0
+    assert gate.evaluate_row("B14", report, attachments={})["status"] != "PASS", mutation
