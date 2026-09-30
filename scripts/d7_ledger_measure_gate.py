@@ -13,6 +13,7 @@ import base64
 import binascii
 from bisect import bisect_right
 import copy
+import functools
 import gc
 import gzip
 import hashlib
@@ -88,6 +89,7 @@ SUMMARY = {
 RECENT_WITNESS_SUMMARY = copy.deepcopy(SUMMARY)
 RECENT_WITNESS_SUMMARY["collection"][PAIRS[0]] = {"status": "valid", "reason": "validated"}
 _gate_resident_budget = ContextVar("d7_gate_resident_budget", default=62_914_560)
+_churn_perf = ContextVar("d7_churn_perf", default=None)
 
 
 class HeadroomUnverified(RuntimeError):
@@ -2093,9 +2095,18 @@ def _init_failed_fixture(ledger, invocation_id, wall):
 
 
 def _budget_checkpoint(ledger):
+    perf = _churn_perf.get()
+    started = time.perf_counter() if perf is not None else None
     gc.collect()
+    if perf is not None:
+        perf["gc_calls"] += 1
+        perf["gc_seconds"] += time.perf_counter() - started
     budget = ledger.budget_state()
+    started = time.perf_counter() if perf is not None else None
     graph = owned_graph(ledger)
+    if perf is not None:
+        perf["g_walks"] += 1
+        perf["g_seconds"] += time.perf_counter() - started
     health = ledger._health
     return {"F_4": budget["F_4"], "Q_4": budget["Q_4"], "D": budget["D"],
             "A": budget["A"], "R": budget["R"], "T": budget["T"], "R_T": budget["R_T"],
@@ -3222,6 +3233,33 @@ def highwater_pair_gaps(highwater_checks, checkpoints) -> list[str]:
     return gaps
 
 
+def _profile_churn_fixture(run):
+    @functools.wraps(run)
+    def wrapped(*args, **kwargs):
+        # A previous fixture is irrelevant to this ledger's exact owned graph,
+        # but gc.collect() would otherwise visit that entire preceding heap.
+        # Isolate only when nothing is frozen yet: gc.unfreeze() is not selective,
+        # so freezing on top of a caller's frozen heap could not be undone here.
+        isolate = (kwargs.get("_replay_expected") is None and
+                   kwargs.get("churn_minutes", 10_080) > 40 and gc.get_freeze_count() == 0)
+        perf = {"gc_calls": 0, "gc_seconds": 0.0, "g_walks": 0, "g_seconds": 0.0,
+                "setup_gc_seconds": 0.0, "heap_isolated": int(isolate)}
+        if isolate:
+            started_gc = time.perf_counter()
+            gc.collect()
+            perf["setup_gc_seconds"] = time.perf_counter() - started_gc
+            gc.freeze()
+        token = _churn_perf.set(perf)
+        try:
+            return run(*args, **kwargs)
+        finally:
+            _churn_perf.reset(token)
+            if isolate:
+                gc.unfreeze()
+    return wrapped
+
+
+@_profile_churn_fixture
 def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                       churn_minutes=10_080, churn_stride_minutes=1,
                       fixture_detail_divisor=1, measure_transitions=False,
@@ -3619,7 +3657,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 "stop_reason": stop_reason,
                 "stopped_after_seq": compared_steps - 1,
                 "seconds": time.perf_counter() - pass_start, "checkpoints": checkpoints,
-                "comparison_digest_by_seq": comparison_digests}
+                "comparison_digest_by_seq": comparison_digests,
+                "perf_diagnostics": dict(_churn_perf.get())}
 
     def publish_replay_pairs(replayed):
         pairs = iter(replayed["checkpoints"])
@@ -3867,6 +3906,39 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     replay = {"performed": False, "stopped_after_seq": None, "compared_steps": 0,
               "mismatch": None, "stop_reason": None,
               "pass1_seconds": pass1_seconds, "pass2_seconds": 0.0}
+    pass1_perf = dict(_churn_perf.get())
+    pass2_perf = {"gc_calls": 0, "gc_seconds": 0.0, "g_walks": 0, "g_seconds": 0.0,
+                  "setup_gc_seconds": 0.0}
+    # Finalize the first-pass evidence while its ledger is still available.
+    # The replay needs only digests, selected sequence numbers and public rows.
+    highwater["first_pass_complete"] = failure is None
+    highwater["register_attempts_ref"] = register_attempts.finish()
+    for check in highwater["checks"] + highwater["backing_checks"]:
+        seq = check["register_seq"]
+        layout = register_attempts[seq]["normalized_layout"]
+        raw = json.dumps(layout, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode()
+        check["normalized_layout_ref"] = {
+            "register_seq": seq, "layout_sha256": hashlib.sha256(raw).hexdigest()}
+    register_attempts.discard_read_copy()
+    register_attempts = None
+    if stream_evidence:
+        api_trace.finish()
+    ledger_total_at_tail = ledger._health["N_total"] if tail else None
+    ledger_counts_consistent = (ledger._health["registered_records"] ==
+                                ledger._health["N_total"] == ledger._seq.total)
+    _ChurnLedger.callbacks.pop(ledger, None)
+    ledger = None
+    baseline = None
+    pending = None
+    if selected_seqs and failure is None and churn_minutes > 40 and pass1_perf.get("heap_isolated") == 1:
+        # One collection reclaims the first ledger; freezing the remaining
+        # first-pass evidence excludes it from replay's repeated GC scans.
+        started_gc = time.perf_counter()
+        gc.collect()
+        pass1_perf["gc_calls"] += 1
+        pass1_perf["gc_seconds"] += time.perf_counter() - started_gc
+        gc.freeze()
     if selected_seqs and failure is None:
         replayed = run_churn_fixture(
             name, limit=limit, max_resident_bytes=max_resident_bytes,
@@ -3882,21 +3954,16 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                       stop_reason=replayed["stop_reason"],
                       pass2_seconds=replayed["seconds"],
                       comparison_digest_by_seq=replayed["comparison_digest_by_seq"])
+        pass2_perf = replayed["perf_diagnostics"]
         if replayed["stop_reason"] == "budget":
             failure = {"phase": "budget", "pass": 2}
+        del replayed
+    steps = pass1_digests = pre_orders = selected_kinds = None
     replay.setdefault("comparison_digest_by_seq", [])
     highwater["replay"] = replay
-    if not replaying:
-        highwater["first_pass_complete"] = failure is None
-        if stream_attempts:
-            highwater["register_attempts_ref"] = register_attempts.finish()
-            for check in highwater["checks"] + highwater["backing_checks"]:
-                seq = check["register_seq"]
-                layout = register_attempts[seq]["normalized_layout"]
-                raw = json.dumps(layout, ensure_ascii=False, sort_keys=True,
-                                 separators=(",", ":")).encode()
-                check["normalized_layout_ref"] = {
-                    "register_seq": seq, "layout_sha256": hashlib.sha256(raw).hexdigest()}
+    highwater["perf_diagnostics"] = {"pass1": pass1_perf, "pass2": pass2_perf,
+                                     "rss_peak_bytes": rss_bytes(),
+                                     "rss_current_bytes": current_rss_bytes()}
     for index, cp in enumerate(checkpoints):
         cp["checkpoint_id"] = f"{name}:{index}"
         cp.setdefault("capacity_ref", None)
@@ -3907,6 +3974,12 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             for projection in passive[key]:
                 projection["public_checkpoint_id"] = tail_cp["checkpoint_id"]
     if trace_enabled:
+        needed_orders = {cp["N_total"] + int(cp["kind"].endswith("_before"))
+                         for cp in checkpoints if "event_order" not in cp and cp["kind"] in
+                         ("highwater_before", "highwater_after", "backing_before", "backing_after",
+                          "violation_before", "violation_after")}
+        register_orders = {t["registered_seq"]: t["event_order"] for t in api_trace
+                           if t["action"] == "register" and t["registered_seq"] in needed_orders}
         for cp in checkpoints:
             cp["source_registered"] = {source: cp["source_counts"][source]["registered"]
                                        for source in REGISTRY}
@@ -3914,10 +3987,9 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                               "backing_before", "backing_after",
                               "violation_before", "violation_after"):
                 selected_seq = cp["N_total"] + int(cp["kind"].endswith("_before"))
-                selected = next((t for t in api_trace if t["action"] == "register" and
-                                 t["registered_seq"] == selected_seq), None)
-                if selected is not None:
-                    cp["event_order"] = selected["event_order"] + (-1 if cp["kind"].endswith("_before") else 1)
+                if selected_seq in register_orders:
+                    cp["event_order"] = register_orders[selected_seq] + (
+                        -1 if cp["kind"].endswith("_before") else 1)
         checkpoints.sort(key=lambda cp: (cp.get("event_order", 0),
                                          0 if cp["kind"].endswith("_after") else 1))
     transition_measurements = []
@@ -3952,7 +4024,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
              not highwater["violations"] and not highwater["unverified_events"] and
              scheduled == 8 * churn_minutes + 1 and
              (not burst or max_details >= target) and
-             ledger._health["registered_records"] == ledger._health["N_total"] == ledger._seq.total and
+             ledger_counts_consistent and
              all(cp["N_res"] == cp["N_live"] + cp["N_tomb"] <= limit and
                  cp["N_total"] == cp["scheduled_registered"] + cp["auxiliary_registered"] and
                  (churn_stride_minutes != 1 or cp["N_res"] <= 2880 + auxiliary) and
@@ -4062,8 +4134,9 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             cp["seq_evidence_ref"] = seq_evidence_ref
         for spool in (api_trace, tomb_due_ledger, recent_input_ledger, seq_evidence):
             spool.discard_read_copy()
-    if stream_attempts:
+    if register_attempts is not None:
         register_attempts.discard_read_copy()
+    highwater["perf_diagnostics"]["fixture_seconds"] = time.perf_counter() - pass_start
     return {"name": name, "status": status, "id_kind": kind,
             **({"attachment_root": str(attachment_dir)} if stream_evidence or stream_attempts else {}),
             "state_track": track + ("_init_failed" if init_variant else ""),
@@ -4071,7 +4144,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, "c")),
             "minute_batches": churn_minutes, "stride_minutes": churn_stride_minutes,
             "scheduled_target": 8 * churn_minutes + 1, "scheduled_registered": scheduled,
-            "auxiliary_registered": auxiliary, "N_total_at_tail": ledger._health["N_total"] if tail else None,
+            "auxiliary_registered": auxiliary, "N_total_at_tail": ledger_total_at_tail,
             "max_resident_observed": max_resident_observed,
             "source_registered": dict(sources), "requested_detail_target": 2048 if burst else 0,
             "effective_detail_target": target, "max_retained_details_observed": max_details,

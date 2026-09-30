@@ -18,6 +18,7 @@ import io
 import json
 import math
 import sys
+import weakref
 from pathlib import Path
 
 import pytest
@@ -535,7 +536,7 @@ def test_churn_status_requires_complete_checkpoints(monkeypatch):
 # --- highwater 선택 보존 (addendum slice5a4c_addendum_highwater.md, C′2 교체) ---------------------------
 HW_KEYS = {"events", "resident_events", "job_events", "both_events", "backing_changes", "preserved_pairs",
            "violations", "first_violation", "unverified_events", "first_unverified", "checks", "replay",
-           "backing_checks", "register_attempts_ref", "first_pass_complete"}
+           "backing_checks", "register_attempts_ref", "first_pass_complete", "perf_diagnostics"}
 REPLAY_KEYS = {"performed", "stopped_after_seq", "compared_steps", "mismatch", "pass1_seconds", "pass2_seconds",
                "stop_reason", "comparison_digest_by_seq"}
 HW_SIDE_KEYS = {"H_res", "H_job", "Q_4", "E", "B", "Q_actual"}
@@ -551,7 +552,7 @@ def _run_with_register_spy(monkeypatch, name, **kw):
         out = original(self, **kwargs)
         after = (self._q_highwater, self._job_highwater)
         if out.get("classification") == "registered" and after != before:
-            seen.append((id(self), kwargs["received_at"], after[0] > before[0], after[1] > before[1]))
+            seen.append((self, kwargs["received_at"], after[0] > before[0], after[1] > before[1]))
         return out
 
     monkeypatch.setattr(lg.RoundLedger, "register", spy)
@@ -559,7 +560,7 @@ def _run_with_register_spy(monkeypatch, name, **kw):
     c = gate.run_churn_fixture(name, limit=128, _capacity_observer=lambda led, fx, kind, m, *, budget=None:
                                points.append((kind, m)), **SMALL_CHURN, **kw)
     first = seen[0][0] if seen else None                              # 1차 원장만 센다(2차 재실행은 제외)
-    return c, [row[1:] for row in seen if row[0] == first], points
+    return c, [row[1:] for row in seen if row[0] is first], points
 
 
 @pytest.mark.parametrize("name", ["churn_most_finished_short_ascii", "churn_burst_ascii128"])
@@ -673,6 +674,44 @@ def test_replay_stops_after_last_selected_event_and_matches():
     assert calls == list(range(rp["stopped_after_seq"] + 1))        # 2차는 마지막 선택 순번에서 멈춘다
     assert rp["pass1_seconds"] >= 0 and rp["pass2_seconds"] >= 0
     assert c["status"] == "PASS"
+
+
+def test_pass1_evidence_and_digest_unchanged_after_ledger_release(monkeypatch, tmp_path):
+    first_ledger = []
+    original = gate.new_ledger
+
+    def capture_ledger(*args, **kwargs):
+        ledger = original(*args, **kwargs)
+        if isinstance(ledger, gate._ChurnLedger) and not first_ledger:
+            first_ledger.append(weakref.ref(ledger))
+        return ledger
+
+    monkeypatch.setattr(gate, "new_ledger", capture_ledger)
+    observed_released = []
+
+    def replay_hook(seq, ledger, wall):
+        if seq == 0:
+            observed_released.append(first_ledger[0]() is None)
+
+    c = gate.run_churn_fixture("churn_most_finished_short_ascii", limit=128,
+                               attachment_dir=tmp_path, _replay_hook=replay_hook,
+                               **SMALL_CHURN)
+    hw = c["highwater_checks"]
+    ref = hw["register_attempts_ref"]
+    blob = (tmp_path / ref["path"]).read_bytes()
+    assert observed_released == [True]
+    assert hashlib.sha256(blob).hexdigest() == ref["sha256"]
+    # Recorded with the unmodified first pass at HEAD 0f9ccdd.
+    assert ref["sha256"] == "db6d3394d678ac5ca792c967cc9ea281e3a0b66633892bee1133ee19188135b5"
+    comparisons = hw["replay"]["comparison_digest_by_seq"]
+    assert comparisons[0]["pass1_sha256"] == "d6a5479544f939ffc2fa43d75742dc328f1b17dceeac6a9370ec347aefb7520a"
+    assert comparisons[-1]["pass1_sha256"] == "805336b1a73dab67db9d59f07ed137b011545d05af157b3937e405858fc53cac"
+    assert all(row["pass1_sha256"] == row["pass2_sha256"] for row in comparisons)
+    assert c["status"] == "PASS"
+    for pass_name in ("pass1", "pass2"):
+        perf = hw["perf_diagnostics"][pass_name]
+        assert perf["gc_calls"] == perf["g_walks"] > 0
+        assert perf["gc_seconds"] >= 0 and perf["g_seconds"] >= 0
 
 
 def test_replay_hook_is_pass2_only(monkeypatch):
@@ -1768,3 +1807,25 @@ def test_independent_transition_full_sample_count():
 def test_independent_faults_are_present_in_full_branch():
     report = {"mode": "full", "scenarios": gate.run_churn_fault_scenarios()}
     assert gate.evaluate_row("B20", report, attachments={})["status"] == "PASS"
+
+
+def test_x2_perf_churn_heap_isolation_restores_freeze_state(tmp_path):
+    # Codex 커밋 검토 REJECT(codex_x2perf_commit_verdict1.md): 이미 얼린 힙이 있을 때 원본이 추가로 freeze 하고
+    # 복원하지 않으면 후속 원본·독립 측정의 GC 조건이 바뀐다. 두 경우 모두 호출 전후 freeze 수가 같아야 한다.
+    kwargs = dict(limit=128, churn_minutes=41, churn_stride_minutes=60, fixture_detail_divisor=256)
+    before = gc.get_freeze_count()
+    assert before > 0  # 모듈 fixture 가 선행 힙을 얼려 둠 → '이미 얼린' 경로
+    fixture = gate.run_churn_fixture("churn_most_finished_short_ascii",
+                                     attachment_dir=str(tmp_path / "frozen"), **kwargs)
+    # 이미 얼린 객체는 참조가 끊기면 해제돼 수가 줄 수 있다 — 결함은 추가 freeze 로 '늘어나는' 것.
+    assert gc.get_freeze_count() <= before
+    assert fixture["highwater_checks"]["perf_diagnostics"]["pass1"]["heap_isolated"] == 0
+    gc.unfreeze()  # '아무것도 안 얼린' 경로
+    try:
+        fixture = gate.run_churn_fixture("churn_most_finished_short_ascii",
+                                         attachment_dir=str(tmp_path / "clean"), **kwargs)
+        assert gc.get_freeze_count() == 0
+        assert fixture["highwater_checks"]["perf_diagnostics"]["pass1"]["heap_isolated"] == 1
+    finally:
+        gc.collect()
+        gc.freeze()  # 모듈 fixture 상태 복원
