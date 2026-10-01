@@ -5635,14 +5635,19 @@ def _event_cut(trace, cp, *, include_receipt=False):
     if include_receipt:
         receipt = _need(cp, "receipt_event")
         _eq(_need(receipt, "action"), "checkpoint_receipt")
-        wall = _integer(_need(receipt, "received_at"))
-        mono = _integer(_need(receipt, "received_mono"))
-        if end:
-            _assert(wall_max[end - 1] <= wall and mono_max[end - 1] <= mono,
-                    "checkpoint receipt precedes a selected API event")
-        _assert(wall <= _integer(_need(cp, "received_at")) and
-                mono <= _integer(_need(cp, "received_mono")),
-                "checkpoint receipt entered from the future")
+        wall, mono = _need(receipt, "received_at"), _need(receipt, "received_mono")
+        if wall is None or mono is None:
+            _eq((wall, mono), (None, None), "partial checkpoint receipt")
+            _eq(end, 0, "missing receipt after API event")
+            receipt = None
+        else:
+            wall, mono = _integer(wall), _integer(mono)
+            if end:
+                _assert(wall_max[end - 1] <= wall and mono_max[end - 1] <= mono,
+                        "checkpoint receipt precedes a selected API event")
+            _assert(wall <= _integer(_need(cp, "received_at")) and
+                    mono <= _integer(_need(cp, "received_mono")),
+                    "checkpoint receipt entered from the future")
     return end, receipt
 
 
@@ -5835,7 +5840,8 @@ def _cohort_prefix_facts(trace, pubs, sources):
                 completion = state.get("completion")
                 classification = _need(completion, "classification") if completion is not None else None
                 if classification is None:
-                    classification = ("overdue" if mono - _integer(_need(registration, "received_mono"))
+                    classification = ("report_unavailable" if state.get("init_failed") else
+                                      "overdue" if mono - _integer(_need(registration, "received_mono"))
                                       >= 15 * MINUTE else "in_flight" if state.get("linked_ever")
                                       else "awaiting_report")
                 lifecycle[classification] += 1
@@ -5919,7 +5925,8 @@ def _b_followup(row, report, fixtures, unit):
                     _eq(failures_by_seq[seq],
                         int(_need(reg, "cycle_position") == first_unbound))
     elif row == "B03":
-        for f in fixtures:
+        applicable = _items([f for f in fixtures if f.get("name") in CHURN_NAMES[-2:]])
+        for f in applicable:
             trace = _items(_need(f, "fixture_provenance", "api_trace"))
             d = _integer(_need(report, "test_scale", "burst_details")) if unit else 2048
             n = _integer(_need(report, "test_scale", "normal_calls")) if unit else 80641
@@ -6041,9 +6048,14 @@ def _b_followup(row, report, fixtures, unit):
                  "B09": ("probe_expire_before", "probe_expire_at", 24),
                  "B11": ("probe_prune_before", "probe_prune_at", 36)}
         before_kind, after_kind, full_count = kinds[row]
+        if not unit:
+            for kind in (before_kind, after_kind):
+                _eq(sum(cp.get("kind") == kind for f in fixtures
+                        for cp in _need(f, "checkpoints")), full_count,
+                    "boundary observation count changed")
         for f in fixtures:
-            expected_pairs = (sum(cp.get("kind") == before_kind for cp in _need(f, "checkpoints"))
-                              if unit else full_count)
+            expected_pairs = sum(cp.get("kind") == before_kind
+                                 for cp in _need(f, "checkpoints"))
             pairs = _boundary_pairs(f, before_kind, after_kind, expected_pairs)
             trace = _items(_need(f, "fixture_provenance", "api_trace")) if row != "B11" or not unit else []
             gate_shape = _gate_shape(f, unit)
@@ -6061,10 +6073,11 @@ def _b_followup(row, report, fixtures, unit):
                     completed_by_source = Counter()
                     last_wall = last_mono = None
                 else:
-                    expiry_seen = False
+                    uncertain_sources = set()
                     causes_by_id = defaultdict(Counter)
                     causes = ("retention_expired", "expired_start", "expired_finish",
-                              "expired_wrapper", "expired_identity_unverified")
+                              "expired_wrapper", "expired_identity_unverified",
+                              "report_init_failed")
                 event_index = 0
                 for cp, new_events, _ in _checkpoint_deltas(trace, cuts):
                     wall = _integer(_need(cp, "received_at"))
@@ -6080,7 +6093,8 @@ def _b_followup(row, report, fixtures, unit):
                                                           _integer(_need(event, "close_mono")), event.get("source")))
                         elif row == "B09":
                             classification = event.get("classification")
-                            expiry_seen |= classification == "retention_expired"
+                            if classification in causes:
+                                uncertain_sources.add(_need(event, "source"))
                             if identity in target_ids and classification in causes:
                                 causes_by_id[identity][classification] += 1
                     if row == "B08":
@@ -6102,7 +6116,7 @@ def _b_followup(row, report, fixtures, unit):
                             snapshots[id(cp)] = completed_by_source.copy()
                             last_wall, last_mono = wall, mono
                     else:
-                        snapshots[id(cp)] = (expiry_seen,
+                        snapshots[id(cp)] = (uncertain_sources.copy(),
                                              {identity: causes_by_id[identity].copy() for identity in target_ids})
                 if target_ids - first_target.keys():
                     # HEAD finds targets in the full trace, including after the
@@ -6169,8 +6183,10 @@ def _b_followup(row, report, fixtures, unit):
                         _eq(_need(at, axis), _integer(_need(reg, axis)) + 14_400_000_000)
                     _eq(_need(before, "identity_samples", 0, "observed"), "live")
                     _eq(_need(at, "identity_samples", 0, "observed"), "tombstoned")
-                    prior_expiry = snapshots[id(before)][0] if gate_shape else False
-                    _assert(_need(before, "coverage_complete") is (not prior_expiry) and
+                    prior_uncertain = snapshots[id(before)][0] if gate_shape else set()
+                    if gate_shape:
+                        _eq(set(_need(before, "uncertain_sources")), prior_uncertain)
+                    _assert(_need(before, "coverage_complete") is (not prior_uncertain) and
                             _need(at, "coverage_complete") is False)
                     _eq(_need(at, "diagnostic_counters", "retention_expired") -
                         _need(before, "diagnostic_counters", "retention_expired"), 1)
@@ -6195,7 +6211,10 @@ def _b_followup(row, report, fixtures, unit):
                                 _need(before, "diagnostic_counters", cause), observed_causes[cause])
                         elif observed_causes[cause]:
                             raise _EvidenceMissing("expiry cause counter absent")
-                    _eq(_need(at, "uncertain_sources"), [_need(reg, "source")])
+                    observed_sources = _need(at, "uncertain_sources")
+                    _eq(len(observed_sources), len(set(observed_sources)))
+                    _eq(set(observed_sources),
+                        snapshots[id(at)][0] if gate_shape else {_need(reg, "source")})
                 else:
                     for axis in ("received_at", "received_mono"):
                         _eq(_need(before, axis), _integer(_need(at, axis)) - 1)
@@ -6247,8 +6266,15 @@ def _b_followup(row, report, fixtures, unit):
                           (_integer(_need(tomb, "prune_due_mono")) - _integer(_need(start, "received_mono")) + hour_us - 1) // hour_us)
                 _eq(_need(entry, "due_hour"), due)
     elif row == "B12":
+        if not unit:
+            for kind in ("probe_recent_before", "probe_recent_at"):
+                _eq(sum(cp.get("kind") == kind for f in fixtures
+                        for cp in _need(f, "checkpoints")), 10,
+                    "boundary observation count changed")
         for f in fixtures:
-            pairs = _boundary_pairs(f, "probe_recent_before", "probe_recent_at", 1 if unit else 10)
+            pairs = _boundary_pairs(f, "probe_recent_before", "probe_recent_at",
+                                    1 if unit else sum(cp.get("kind") == "probe_recent_before"
+                                                       for cp in _need(f, "checkpoints")))
             trace = _items(_need(f, "fixture_provenance", "api_trace"))
             ledger = _items(_need(f, "recent_input_ledger"))
             identities = {e.get("id") for e in ledger}
@@ -6502,7 +6528,7 @@ def _evaluate_b(row, report):
     elif row == "B03":
         d = _need(report, "test_scale", "burst_details") if unit else 2048
         n = _need(report, "test_scale", "normal_calls") if unit else 80641
-        applicable = fixtures if unit else [f for f in fixtures if f.get("name") in CHURN_NAMES[-2:]]
+        applicable = _items([f for f in fixtures if f.get("name") in CHURN_NAMES[-2:]])
         if not unit:
             _eq(len(applicable), 2)
             _eq({f.get("name") for f in applicable}, set(CHURN_NAMES[-2:]))
@@ -6709,16 +6735,20 @@ def _evaluate_b(row, report):
             reg = _items([t for t in trace if t.get("action") == "register" and
                           t.get("id") == identity])[0]
             if gate_shape:
-                expiry_seen = False
+                uncertain_sources = set()
                 cause_seen = False
                 for cp, new_events, _ in _checkpoint_deltas(trace, (b, a)):
                     for event in new_events:
-                        expiry_seen |= event.get("classification") == "retention_expired"
+                        if event.get("classification") in (
+                                "retention_expired", "expired_start", "expired_finish",
+                                "expired_wrapper", "expired_identity_unverified",
+                                "report_init_failed"):
+                            uncertain_sources.add(_need(event, "source"))
                         if cp is a and event.get("id") == identity and \
                                 event.get("classification") == "retention_expired":
                             cause_seen = True
                     if cp is b:
-                        prior_expiry = expiry_seen
+                        prior_uncertain = uncertain_sources.copy()
             else:
                 before_events = at_events = trace
             for axis in ("received_at", "received_mono"):
@@ -6745,10 +6775,15 @@ def _evaluate_b(row, report):
             _eq(_need(a, "diagnostic_counters", cause) -
                 _need(b, "diagnostic_counters", cause), 1)
             if not gate_shape:
-                prior_expiry = False
-            _assert(_need(b, "coverage_complete") is (not prior_expiry) and
+                prior_uncertain = set()
+                uncertain_sources = {_need(reg, "source")}
+            else:
+                _eq(set(_need(b, "uncertain_sources")), prior_uncertain)
+            _assert(_need(b, "coverage_complete") is (not prior_uncertain) and
                     _need(a, "coverage_complete") is False)
-            _eq(_need(a, "uncertain_sources"), [_need(reg, "source")])
+            observed_sources = _need(a, "uncertain_sources")
+            _eq(len(observed_sources), len(set(observed_sources)))
+            _eq(set(observed_sources), uncertain_sources)
     elif row == "B10":
         hours = _need(report, "test_scale", "hours") if unit else 168
         pre = _need(report, "test_scale", "pre_prune_hours") if unit else 3
@@ -6758,16 +6793,30 @@ def _evaluate_b(row, report):
             gate_shape = _gate_shape(f, unit)
             if gate_shape:
                 _churn_auxiliary_registered(f, gate_shape)
-            due = Counter(_need(e, "due_hour") for e in ledger)
             identities = set()
+            auxiliary_ids = set()
             first = None
             for event in trace:
                 identities.add((event.get("id"), event.get("registered_seq"), event.get("source")))
                 if event.get("action") == "register":
-                    if gate_shape:
-                        _churn_auxiliary(event, gate_shape)
-                    if first is None:
+                    auxiliary = _churn_auxiliary(event, gate_shape)
+                    if auxiliary:
+                        auxiliary_ids.add(_need(event, "id"))
+                    if first is None and not auxiliary:
                         first = event
+            due = Counter()
+            auxiliary_due = Counter()
+            early_auxiliary = 0
+            for entry in ledger:
+                due_hour = _integer(_need(entry, "due_hour"))
+                auxiliary = _need(entry, "id") in auxiliary_ids
+                if due_hour <= 0:
+                    _assert(auxiliary, "normal tomb due before first hour")
+                    early_auxiliary += 1
+                else:
+                    due[due_hour] += 1
+                    if auxiliary:
+                        auxiliary_due[due_hour] += 1
             for entry in ledger:
                 _assert((entry.get("id"), entry.get("registered_seq"),
                          entry.get("source")) in identities)
@@ -6785,7 +6834,7 @@ def _evaluate_b(row, report):
                 for axis in ("received_at", "received_mono"):
                     _eq(_need(cp, axis), _integer(_need(first, axis)) + hour * 60 * MINUTE)
                 pruned = _integer(_need(cp, "pruned_since_previous_hour"))
-                _eq(pruned, due[hour])
+                _eq(pruned, due[hour] + (early_auxiliary if hour == 1 else 0))
                 if gate_shape:
                     for event in new_events:
                         pruned_total += event.get("action") == "prune"
@@ -6796,7 +6845,8 @@ def _evaluate_b(row, report):
                     _eq(_need(cp, "N_total"), accepted_total)
                     _eq(_need(cp, "N_res"), accepted_total - pruned_total)
                     previous_pruned = pruned_total
-                _assert(pruned == 0 if hour <= pre else pruned > 0)
+                normal_pruned = pruned - auxiliary_due[hour] - (early_auxiliary if hour == 1 else 0)
+                _assert(normal_pruned == 0 if hour <= pre else normal_pruned > 0)
                 accepted = _integer(_need(cp, "N_total")) - previous_total
                 other = _integer(_need(cp, "other_recorded_resident_removals"))
                 _assert(other >= 0)
@@ -6839,17 +6889,19 @@ def _evaluate_b(row, report):
             b, a = _checkpoint_pair(f, "probe_recent_before", "probe_recent_at")
             trace = _items(_need(f, "fixture_provenance", "api_trace"))
             finish = reg = None
-            first_registers = {}
+            registers = {}
             for event in trace:
                 if event.get("action") == "register":
-                    first_registers.setdefault(event.get("id"), event)
-                if finish is None and event.get("action") == "finish":
-                    finish = event
-                if finish is not None and finish.get("id") in first_registers:
-                    reg = first_registers[finish.get("id")]
-                    break
+                    registers[_need(event, "id")] = event
+                elif event.get("action") == "finish" and _need(event, "classification") == "finalized":
+                    candidate = _need(registers, _need(event, "id"))
+                    if not _churn_auxiliary(candidate, _gate_shape(f, unit)):
+                        reg, finish = candidate, event
+                        break
             finish = _items([finish] if finish is not None else [])[0]
             reg = _items([reg] if reg is not None else [])[0]
+            _eq(_need(b, "identity_samples", 0, "id"), _need(finish, "id"),
+                "recent target is not first normal completion")
             exit_key = "recent_exit_at" if _gate_shape(f, unit) else "bucket_end"
             _eq(_need(b, "received_at"), _need(finish, exit_key) - 1)
             _eq(_need(a, "received_at"), _need(finish, exit_key))
@@ -6924,17 +6976,23 @@ def _evaluate_b_rest(row, report):
     if row not in ("B20", "B22", "B23"):
         fixtures = _items(_need(report, "churn_fixtures"))
     if row == "B13":
+        full_boundary = {"probe_close_before": 12, "probe_close_at": 12,
+                         "probe_expire_before": 24, "probe_expire_at": 24,
+                         "probe_prune_before": 36, "probe_prune_at": 36,
+                         "probe_recent_before": 10, "probe_recent_at": 10}
+        if not unit:
+            totals = Counter(_need(cp, "kind") for f in fixtures
+                             for cp in _need(f, "checkpoints"))
+            for kind, minimum in full_boundary.items():
+                if totals[kind] < minimum:
+                    raise _EvidenceMissing(f"required budget checkpoint absent: {kind}")
         for f in fixtures:
             checkpoints = _items(_need(f, "checkpoints"))
             kinds = Counter(_need(cp, "kind") for cp in checkpoints)
             required = (Counter(_names(_need(report, "test_scale", "required_budget_points"),
                                        "required_budget_points")) if unit else
                         Counter({"hour": 168, "day": 7, "tail_80640": 1, "tail_80641": 1,
-                                 "highwater_before": 1, "highwater_after": 1,
-                                 "probe_close_before": 12, "probe_close_at": 12,
-                                 "probe_expire_before": 24, "probe_expire_at": 24,
-                                 "probe_prune_before": 36, "probe_prune_at": 36,
-                                 "probe_recent_before": 10, "probe_recent_at": 10}))
+                                 "highwater_before": 1, "highwater_after": 1}))
             for kind, minimum in required.items():
                 if kinds[kind] < minimum:
                     raise _EvidenceMissing(f"required budget checkpoint absent: {kind}")
@@ -6965,11 +7023,17 @@ def _evaluate_b_rest(row, report):
                 for cp in cps:
                     for received, last_received in (("received_at", "last_received_at"),
                                                     ("received_mono", "last_received_mono")):
-                        _assert(_need(cp, last_received) <= _need(cp, received))
+                        last_value = _need(cp, last_received)
+                        if last_value is not None:
+                            _assert(_integer(last_value) <= _integer(_need(cp, received)))
+                        elif previous is not None and _need(previous, last_received) is not None:
+                            raise _EvidenceViolation("last received time vanished")
                         if previous is not None:
                             _assert(_need(cp, received) >= _need(previous, received))
-                            _assert(_need(cp, last_received) >= _need(previous, last_received),
-                                    "last received time regressed")
+                            previous_value = _need(previous, last_received)
+                            if last_value is not None and previous_value is not None:
+                                _assert(last_value >= previous_value,
+                                        "last received time regressed")
                     _eq(_need(cp, "cumulative_end"), _need(cp, "close_through"))
                     received_at = _integer(_need(cp, "received_at"))
                     received_mono = _integer(_need(cp, "received_mono"))
@@ -7077,10 +7141,16 @@ def _evaluate_b_rest(row, report):
             for cp in cps:
                 for axis, received, last_received in (("wall", "received_at", "last_received_at"),
                                                       ("mono", "received_mono", "last_received_mono")):
-                    _assert(_need(cp, last_received) <= _need(cp, received))
+                    last_value = _need(cp, last_received)
+                    if last_value is not None:
+                        _assert(_integer(last_value) <= _integer(_need(cp, received)))
+                    elif last and _need(last, last_received) is not None:
+                        raise _EvidenceViolation("last received time vanished")
                     if last:
                         _assert(_need(cp, received) >= _need(last, received))
-                        _assert(_need(cp, last_received) >= _need(last, last_received))
+                        previous_value = _need(last, last_received)
+                        if last_value is not None and previous_value is not None:
+                            _assert(last_value >= previous_value)
                 _eq(_need(cp, "cumulative_end"), _need(cp, "close_through"))
                 if last and last.get("close_through") is not None and cp.get("close_through") is not None:
                     _assert(cp["close_through"] >= last["close_through"])
@@ -7267,7 +7337,12 @@ def _evaluate_b_rest(row, report):
                                            t.get("id") == _need(registration, "id") and
                                            _integer(_need(t, "received_at")) <= _integer(_need(pub, "received_at")) and
                                            _integer(_need(t, "received_mono")) <= _integer(_need(pub, "received_mono"))]
+                            failures = [t for t in selected if t.get("action") == "init_failed" and
+                                        t.get("id") == _need(registration, "id") and
+                                        _integer(_need(t, "received_at")) <= _integer(_need(pub, "received_at")) and
+                                        _integer(_need(t, "received_mono")) <= _integer(_need(pub, "received_mono"))]
                             state = (_need(completions[-1], "classification") if completions else
+                                     "report_unavailable" if failures else
                                      _need(registration, "lifecycle"))
                             lifecycle[state] += 1
                     if gate_shape:
@@ -7364,8 +7439,9 @@ def _evaluate_b_rest(row, report):
                 counters = _need(cp, "diagnostic_counters")
                 for step in new_events:
                     classification = step.get("classification")
-                    if classification in causes:
-                        totals[classification] += 1
+                    counter_key = "init_failed" if classification == "report_init_failed" else classification
+                    if counter_key in causes:
+                        totals[counter_key] += 1
                         affected.add(_need(step, "source"))
                 for key in (*causes, "clock_unverified"):
                     _integer(_need(counters, key))
