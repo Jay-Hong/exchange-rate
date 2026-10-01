@@ -1061,6 +1061,28 @@ def partial_acceptance(rows, *, adapter_status, mode):
             "failing_rows": failing, "unverified_rows": unverified}
 
 
+def _smoke_row_ok(row, samples):
+    if row.get("name") not in _D02_SCENARIOS + _ADAPTER_SCENARIOS:
+        return row.get("status") == "PASS"
+    timing = row.get("timing") or {}
+    return (row.get("visit_gate") == row.get("temporary_gate") == "PASS" and
+            row.get("classification_ok") is True and
+            (row.get("sample_checks") or {}).get("failures") == [] and
+            (row.get("sample_checks") or {}).get("checked", 0) >= 2 * samples and
+            all((timing.get(phase) or {}).get("n", 0) >= samples and
+                (row["name"].startswith("adapter_") or
+                 len((timing.get(phase) or {}).get("raw_ns", [])) >= samples)
+                for phase in ("gc_disabled", "gc_enabled")))
+
+
+def _smoke_adapter_ok(adapter):
+    observations = adapter.get("observations") if isinstance(adapter, dict) else None
+    return (isinstance(observations, list) and len(observations) == 3 and
+            {item.get("source") for item in observations} == {"investing", "bs", "citi"} and
+            all(item.get("status") == "PASS" and item.get("link") == "linked" and
+                item.get("finish") == "finalized" for item in observations))
+
+
 def _empty_row(name, status="UNVERIFIED"):
     return {"name": name, "status": status, "visit_gate": "UNVERIFIED",
             "temporary_gate": "UNVERIFIED", "time_gate": "UNVERIFIED", "sample_plan": "N/A",
@@ -1148,6 +1170,7 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
     row["D"] = expected_d if isinstance(expected_d, int) else None
     row["K"] = expected_k if isinstance(expected_k, int) else None
     d_values, k_values, candidate_values, visits, peak_delta = [], [], [], None, None
+    temporary_raw = None
     setup_seconds = 0.0
     clone_seconds = 0.0
     call_seconds = 0.0
@@ -1179,6 +1202,7 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                 preparation_failed = True
                 break
             setup_seconds += wall() - started
+            prepared_at = time.perf_counter_ns() if name == "finish_accept" else None
             clone_seconds += getattr(provider, "last_clone_seconds", 0.0)
             index += 1
             if cohort_range_audit and kwargs["source"] not in row["cohort_sources"]:
@@ -1212,11 +1236,14 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                 tracemalloc.start()
                 tracemalloc.reset_peak()
                 before_bytes, _ = tracemalloc.get_traced_memory()
+                sample_origin = os.urandom(16).hex()
+                row["temporary_sample_origin"] = sample_origin
             call_started = wall() if phase not in ("gc_disabled", "gc_enabled") else None
             if phase in ("gc_disabled", "gc_enabled"):
                 prior_gc = gc.isenabled()
                 gc.disable() if phase == "gc_disabled" else gc.enable()
                 t0 = clock()
+            called_at = time.perf_counter_ns() if name == "finish_accept" else None
             try:
                 outcome, error = _snapshot_call(ledger, method, kwargs)
             finally:
@@ -1231,6 +1258,9 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                 if phase == "temporary":
                     after_bytes, peak = tracemalloc.get_traced_memory()
                     peak_delta = peak - before_bytes
+                    temporary_raw = {"current_before": before_bytes,
+                                     "current_after": after_bytes, "peak": peak,
+                                     "sample_origin": sample_origin}
                     tracemalloc.stop()
                     row["temporary_breakdown"] = {
                         "peak_delta": peak_delta,
@@ -1259,6 +1289,8 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                            "receipt_mono": kwargs.get("as_of_mono", kwargs.get("received_mono")),
                            "D_candidate": candidate_values[-1], "D": observed_d, "K": observed_k,
                            "classification": classification}
+            if name == "finish_accept":
+                observation.update(prepared_at=prepared_at, called_at=called_at)
             row["sample_observations"].append(observation)
             if index == 1:
                 row["first_call"] = observation.copy()
@@ -1306,8 +1338,8 @@ def _measure_row(name, provider, *, plan, expected, expected_d, expected_k,
                 row["visits"] = max(row.get("visits", 0), visits)
                 row["visit_limit"] = max(row.get("visit_limit", 0), visit_limit)
             if phase == "temporary":
-                row["tracemalloc"] = {"peak_delta": peak_delta}
-            if progress and index % 100 == 0:
+                row["tracemalloc"] = {**temporary_raw, "peak_delta": peak_delta}
+            if progress and (index == 1 or index % 100 == 0):
                 remaining = sum(n for _, n in phases) - index
                 eta = (setup_seconds + call_seconds) / index * remaining
                 print(f"progress {name} {index}/{sum(n for _, n in phases)} gc={phase} "
@@ -2054,6 +2086,8 @@ CHURN_NAMES = tuple(f"churn_{track}_{kind}" for track in ("most_finished", "most
                     for kind in ("short_ascii", "ascii128", "unicode128")) + (
     "churn_init_failed_most_finished_unicode128", "churn_init_failed_most_unfinished_unicode128",
     "churn_burst_ascii128", "churn_burst_unicode128")
+_PRESSURE_ID_PREFIXES = "pqrstuvwxyzABC"
+_CHURN_ID_PREFIXES = "cdefghijbk"
 
 
 def _fixture_id(index, kind, prefix="p"):
@@ -2247,12 +2281,12 @@ def _pressure_candidate_e(ledger, kwargs, before, next_q, template):
 
 
 def _post_latch_existing_transitions(ledger, *, kind, n_last, wall, predecessor_id,
-                                     predecessor_job, candidate_index, trace):
+                                     predecessor_job, candidate_index, trace, id_prefix="p"):
     """Exercise existing identities on the latched origin through public APIs."""
     transitions = {}
     before_record = ledger.record(predecessor_id)
     before_job = copy.deepcopy(ledger._previous_job.get((SOURCE, predecessor_job)))
-    serial_candidate = _fixture_id(candidate_index, kind)
+    serial_candidate = _fixture_id(candidate_index, kind, id_prefix)
     serial_result = trace.call(ledger, "register", serial_candidate, SOURCE, wall,
                                lambda: _register_fixture(ledger, serial_candidate, SOURCE, wall,
                                                          job_id=predecessor_job, serial_job=True),
@@ -2342,11 +2376,12 @@ def _post_latch_existing_transitions(ledger, *, kind, n_last, wall, predecessor_
     return transitions
 
 
-def _post_latch_job_predecessor(ledger, *, kind, n_last, wall, candidate_index, trace):
+def _post_latch_job_predecessor(ledger, *, kind, n_last, wall, candidate_index, trace,
+                                id_prefix="p"):
     """The byte-limited unique-key control preserves its previous job summary."""
     predecessor_job = f"job{n_last - 1:08d}"
     before = copy.deepcopy(ledger._previous_job.get((SOURCE, predecessor_job)))
-    candidate_id = _fixture_id(candidate_index, kind)
+    candidate_id = _fixture_id(candidate_index, kind, id_prefix)
     result = trace.call(ledger, "register", candidate_id, SOURCE, wall,
                         lambda: _register_fixture(ledger, candidate_id, SOURCE, wall,
                                                   job_id=predecessor_job, serial_job=True),
@@ -2364,6 +2399,7 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         raise ValueError("unknown pressure fixture")
     if not 1 <= limit <= CAP or fixture_detail_divisor < 1:
         raise ValueError("invalid pressure fixture scale")
+    id_prefix = _PRESSURE_ID_PREFIXES[(PRESSURE_NAMES + PRESSURE_AUX).index(name)]
     if name == "pressure_slot_first_small_limit":
         fixture_limit, kind, track = min(limit, 128), "short_ascii", "slot_aux"
         max_resident_bytes = 62_914_560
@@ -2394,10 +2430,10 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if _stop_requested is not None and _stop_requested():
             interrupted = True
             break
-        if _progress is not None and i and i % 1000 == 0:
+        if _progress is not None and (i == 1 or (i > 0 and i % 1000 == 0)):
             _progress(i)
         wall = T + i * 6 * 60 * MINUTE if track == "job_aux" else T
-        invocation_id = _fixture_id(i, kind)
+        invocation_id = _fixture_id(i, kind, id_prefix)
         job_id = f"job{i:08d}" if track == "job_aux" else "post_latch_probe" if i == 0 else None
         kwargs = dict(epoch=EPOCH, invocation_id=invocation_id, source=SOURCE,
                       started_wall=wall, started_mono=wall, received_at=wall,
@@ -2535,20 +2571,21 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     post_results = []
     if first:
         for offset, source in ((1, SOURCE), (4, "investing"), (5, "citi")):
-            new_id = _fixture_id(i + offset, kind)
+            new_id = _fixture_id(i + offset, kind, id_prefix)
             call_kwargs = dict(kwargs, invocation_id=new_id, source=source)
             outcome = trace.call(ledger, "register", new_id, source, wall,
                                  lambda call_kwargs=call_kwargs: ledger.register(**call_kwargs),
                                  job_id=job_id)
             post_results.append((source, outcome))
-    predecessor_id = _fixture_id(0, kind)
+    predecessor_id = _fixture_id(0, kind, id_prefix)
     predecessor_job = "post_latch_probe"
     transitions = (_post_latch_existing_transitions(
         ledger, kind=kind, n_last=n_last, wall=wall, predecessor_id=predecessor_id,
-        predecessor_job=predecessor_job, candidate_index=i + 3, trace=trace)
+        predecessor_job=predecessor_job, candidate_index=i + 3, trace=trace,
+        id_prefix=id_prefix)
         if first and n_last and track != "job_aux" else
         _post_latch_job_predecessor(ledger, kind=kind, n_last=n_last, wall=wall,
-                                    candidate_index=i + 3, trace=trace)
+                                    candidate_index=i + 3, trace=trace, id_prefix=id_prefix)
         if first and n_last else {})
     released = False
     prune_before = ledger._health["N_res"]
@@ -2557,7 +2594,7 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         later = wall + 7 * 60 * MINUTE
         ledger.aggregation_snapshot(as_of=later, as_of_mono=later)
         prune_after = ledger._health["N_res"]
-        release_id = _fixture_id(i + 2, kind)
+        release_id = _fixture_id(i + 2, kind, id_prefix)
         release_kwargs = dict(kwargs, invocation_id=release_id, started_wall=later,
                               started_mono=later, received_at=later, received_mono=later)
         outcome = trace.call(ledger, "register", release_id, SOURCE, later,
@@ -2615,8 +2652,8 @@ def run_pressure_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
               "requested_detail_target": requested,
               "effective_detail_target": min(target, states["finished"]) if requested else 0,
               "retained_details": retained_at_stop,
-              "state_counts": dict(states), "id_utf8_bytes": len(_fixture_id(0, kind).encode()),
-              "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind)),
+              "state_counts": dict(states), "id_utf8_bytes": len(_fixture_id(0, kind, id_prefix).encode()),
+              "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, id_prefix)),
               "N_last_accepted": n_last, "first_rejection": first, "before": before,
               "after": after, "post_latch": post, "sample_failures": failures,
               "reason": "budget" if interrupted else None if valid else
@@ -2947,7 +2984,7 @@ def _churn_evidence_violations(checkpoints) -> list[str]:
     return violations
 
 
-def _churn_transition_measurement(classification, samples=1):
+def _churn_transition_measurement(classification, samples=1, _progress=None):
     """Measure one independent public call for a churn transition class."""
     def prepare():
         ledger = new_ledger(128)
@@ -2989,7 +3026,7 @@ def _churn_transition_measurement(classification, samples=1):
             gc.enable()
         durations = []
         try:
-            for _ in range(samples):
+            for sample_index in range(samples):
                 ledger, call, identity = prepare()
                 counted = CountedRecords(ledger._records)
                 ledger._records = counted
@@ -3006,6 +3043,8 @@ def _churn_transition_measurement(classification, samples=1):
                 elif classification == "retention_expired" and ledger._health["retention_expired"] != 1:
                     raise HeadroomUnverified("independent retention expiry absent")
                 observed_visits.append(counted.visits)
+                if _progress is not None and sample_index == 0 and label == "gc_disabled":
+                    _progress(1)
         finally:
             if was_enabled:
                 gc.enable()
@@ -3041,13 +3080,16 @@ def _churn_transition_measurement(classification, samples=1):
                                                "current_after": after, "peak": peak}}
 
 
-def run_churn_fault_scenarios():
+def run_churn_fault_scenarios(_start=None, _progress=None, _end=None):
     """Run five independent faults outside the normal churn schedule."""
     expected = {"clock_step": "clock_unverified", "merge_failure": "CumulativeMergeFailureForTest",
                 "late_after_expiry": "expired_finish", "id_collision": "registration_conflict",
                 "uuid_uniqueness": "registered"}
     scenarios = []
     for kind, wanted in expected.items():
+        name = "churn_fault_" + kind
+        if _start is not None:
+            _start(name)
         ledger = new_ledger(128)
         first_id = "fault-original"
         _register_fixture(ledger, first_id, SOURCE, T)
@@ -3079,6 +3121,8 @@ def run_churn_fault_scenarios():
                                     received_at=T + 1, received_mono=T + 1)["classification"]
         else:
             first = _register_fixture(ledger, "uuid-1", SOURCE, T + 240 * MINUTE + 1)["classification"]
+        if _progress is not None:
+            _progress(name, 1)
         after = ledger._cumulative_end
         affected = ([SOURCE, *[source for source in REGISTRY if source != SOURCE]]
                     if kind == "clock_step" else [SOURCE])
@@ -3112,7 +3156,7 @@ def run_churn_fault_scenarios():
                     "uuid_uniqueness": "uuid-2"}[kind]
         fault_trace.append({"action": "register", "classification": retry["classification"],
                             "id": retry_id, "source": SOURCE})
-        scenarios.append({"name": "churn_fault_" + kind,
+        scenarios.append({"name": name,
                           "status": "PASS" if first == wanted and
                           retry["classification"] == "registered" else "FAIL",
                           "partial_acceptance_applicable": False,
@@ -3129,7 +3173,9 @@ def run_churn_fault_scenarios():
                               "fault_trace": fault_trace,
                               "retry_admission": {"attempted": 1,
                                                   "registered": int(retry["classification"] == "registered"),
-                                                  "rejected": int(retry["classification"] != "registered")}}})
+                              "rejected": int(retry["classification"] != "registered")}}})
+        if _end is not None:
+            _end(name, scenarios[-1]["status"])
     return scenarios
 
 
@@ -3273,7 +3319,9 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         raise ValueError("unknown churn fixture or invalid limit")
     if min(churn_minutes, churn_stride_minutes, fixture_detail_divisor) < 1:
         raise ValueError("invalid churn scale")
+    id_prefix = _CHURN_ID_PREFIXES[CHURN_NAMES.index(name)]
     burst = name.startswith("churn_burst_")
+    schedule_prefix = ("m" if name == "churn_burst_ascii128" else "n") if burst else id_prefix
     kind = "unicode128" if name.endswith("unicode128") else "ascii128" if name.endswith("ascii128") else "short_ascii"
     track = "burst" if burst else "most_unfinished" if "most_unfinished" in name else "most_finished"
     init_variant = name.startswith("churn_init_failed_")
@@ -3299,24 +3347,48 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     trace_enabled = not replaying
     api_trace = (_JsonlSpool(attachment_dir, name, "api_trace")
                  if stream_evidence else [])
+    transition_trace = (_JsonlSpool(attachment_dir, name, "transition_trace")
+                        if stream_evidence else [])
+    registration_inputs = {}
+    detail_charged_bytes = 0
     pruned_total = 0
     order_serial = 0
     def record(action, invocation_id, source, wall, classification, **extra):
-        nonlocal pruned_total, order_serial
+        nonlocal pruned_total, order_serial, detail_charged_bytes
         if not trace_enabled:
             return
         if action == "prune":
             pruned_total += 1
         rec = ledger._records.get(invocation_id)
+        if action == "register" and classification == "registered" and rec is not None:
+            registration_inputs[invocation_id] = (rec["seq"], wall, extra.get("job_id"))
+        charged = extra.get("detail_charge_bytes", 0)
+        detail_charged_bytes += charged
+        registered = registration_inputs.get(invocation_id)
+        # A02 requires an integer on every trace event. Accepted identities
+        # retain their admission sequence here, including after prune; an
+        # unadmitted attempt has no admission sequence, so use the observed
+        # N_total watermark without adding it to registration_inputs.
+        registered_seq = registered[0] if registered else ledger._health["N_total"]
+        started_at = registered[1] if registered else wall
+        job_id = extra.get("job_id", registered[2] if registered else None)
         event_order = order_serial * 4 + 2
         order_serial += 1
         api_trace.append({"call_index": len(api_trace), "event_order": event_order,
                           "action": action, "id": invocation_id, "source": source,
                           "received_at": wall, "received_mono": wall,
+                          "started_at": started_at, "started_mono": started_at,
+                          "job_id": job_id,
+                          "detail_charge_bytes": charged,
+                          "state_before": "absent" if action == "register" else None,
+                          "state_after": "live" if action == "register" and
+                          classification == "registered" else "absent" if action == "register" else None,
                           **({"N_res": ledger._health["N_res"]} if detailed_trace else {}),
                           "classification": classification,
-                          "registered_seq": rec["seq"] if rec is not None else None,
+                          "registered_seq": registered_seq,
                           **extra})
+        transition_trace.append({"action": action, "classification": classification,
+                                 "detail_charge_bytes": charged, "seq": registered_seq})
         return event_order
     def finish_fields(rec, charge):
         fields = {"detail_charge_bytes": charge}
@@ -3688,7 +3760,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             if _stop_requested is not None and _stop_requested():
                 failure = {"phase": "budget"}
                 break
-            invocation_id = _fixture_id(i, kind, "b")
+            invocation_id = _fixture_id(i, kind, id_prefix)
             r = register_checked(invocation_id, SOURCE, T, -1, auxiliary_call=True)
             if r["classification"] != "registered":
                 failure = {"phase": "burst", "index": i, "classification": r["classification"]}
@@ -3719,7 +3791,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         max_details = ledger._health["retained_details"]
         add_checkpoint("detail_open", -1, T)
         if failure is None:
-            probe = register_checked(_fixture_id(target, kind, "b"), SOURCE, T,
+            probe = register_checked(_fixture_id(target, kind, id_prefix), SOURCE, T,
                                      -1, auxiliary_call=True)
             if probe["classification"] == "registered":
                 auxiliary += 1
@@ -3729,7 +3801,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             if finish_step() and replaying:
                 return replay_result()
             if failure is None:
-                schedule_witness("burst_probe", _fixture_id(target, kind, "b"), T)
+                schedule_witness("burst_probe", _fixture_id(target, kind, id_prefix), T)
                 add_checkpoint("highwater", -1, T)
         release_at = T + 71 * MINUTE
         flush_probes(release_at, -1)
@@ -3749,8 +3821,6 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         if _stop_requested is not None and _stop_requested():
             failure = {"phase": "budget", "minute": minute}
             break
-        if _progress is not None and minute and minute % 60 == 0:
-            _progress(minute)
         base = schedule_start + minute * churn_stride_minutes * MINUTE
         flush_probes(base, minute)
         ledger.aggregation_snapshot(as_of=base, as_of_mono=base)
@@ -3760,7 +3830,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                 break
             wall = base + offset
             flush_probes(wall, minute)
-            invocation_id = _fixture_id(scheduled, kind, "c")
+            invocation_id = _fixture_id(scheduled, kind, schedule_prefix)
             job = job_by_source[source]
             r = register_checked(invocation_id, source, wall, minute, job)
             if r["classification"] != "registered":
@@ -3828,11 +3898,13 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             if hour_index % 24 == 0:
                 add_checkpoint("day", minute, boundary)
         max_details = max(max_details, ledger._health["retained_details"])
+        if _progress is not None and (minute == 0 or (minute + 1) % 60 == 0):
+            _progress(minute + 1)
     if failure is None:
         tail_time = schedule_start + churn_minutes * churn_stride_minutes * MINUTE
         flush_probes(tail_time, churn_minutes)
         full = churn_minutes == 10_080 and churn_stride_minutes == 1
-        tail = register_checked(_fixture_id(scheduled, kind, "c"), "investing",
+        tail = register_checked(_fixture_id(scheduled, kind, schedule_prefix), "investing",
                                 tail_time, churn_minutes, job_by_source["investing"])
         if tail["classification"] == "registered":
             scheduled += 1
@@ -3925,6 +3997,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     register_attempts = None
     if stream_evidence:
         api_trace.finish()
+        transition_ref = transition_trace.finish()
     ledger_total_at_tail = ledger._health["N_total"] if tail else None
     ledger_counts_consistent = (ledger._health["registered_records"] ==
                                 ledger._health["N_total"] == ledger._seq.total)
@@ -3945,7 +4018,7 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
             name, limit=limit, max_resident_bytes=max_resident_bytes,
             churn_minutes=churn_minutes, churn_stride_minutes=churn_stride_minutes,
             fixture_detail_divisor=fixture_detail_divisor, _capacity_observer=_capacity_observer,
-            _stop_requested=_stop_requested, _progress=_progress, _replay_hook=_replay_hook,
+            _stop_requested=_stop_requested, _progress=None, _replay_hook=_replay_hook,
             _replay_expected=steps, _replay_expected_digests=pass1_digests,
             _replay_stop=selected_seqs[-1],
             _replay_selected=selected_kinds)
@@ -4133,7 +4206,8 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
         seq_evidence_ref = seq_evidence.finish()
         for cp in checkpoints:
             cp["seq_evidence_ref"] = seq_evidence_ref
-        for spool in (api_trace, tomb_due_ledger, recent_input_ledger, seq_evidence):
+        for spool in (api_trace, transition_trace, tomb_due_ledger,
+                      recent_input_ledger, seq_evidence):
             spool.discard_read_copy()
     if register_attempts is not None:
         register_attempts.discard_read_copy()
@@ -4141,8 +4215,11 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
     return {"name": name, "status": status, "id_kind": kind,
             **({"attachment_root": str(attachment_dir)} if stream_evidence or stream_attempts else {}),
             "state_track": track + ("_init_failed" if init_variant else ""),
-            "job_key_counts": _job_counts(jobs), "id_utf8_bytes": len(_fixture_id(0, kind, "c").encode()),
-            "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, "c")),
+            "job_key_counts": _job_counts(jobs),
+            **({"state_registration_counts": dict(sources),
+                "transition_trace_ref": transition_ref} if stream_evidence else {}),
+            "id_utf8_bytes": len(_fixture_id(0, kind, id_prefix).encode()),
+            "id_getsizeof_bytes": sys.getsizeof(_fixture_id(0, kind, id_prefix)),
             "minute_batches": churn_minutes, "stride_minutes": churn_stride_minutes,
             "scheduled_target": 8 * churn_minutes + 1, "scheduled_registered": scheduled,
             "auxiliary_registered": auxiliary, "N_total_at_tail": ledger_total_at_tail,
@@ -4163,7 +4240,10 @@ def run_churn_fixture(name, *, limit=CAP, max_resident_bytes=62_914_560,
                                 "action": ("finish" if i < (4 if track == "most_unfinished" else 16)
                                            else "link" if i < (8 if track == "most_unfinished" else 18)
                                            else "unbound")} for i in range(20)],
-                "fixture_provenance": provenance}
+                "fixture_provenance": {**provenance, "detail_charged_bytes": detail_charged_bytes,
+                    "clone_equivalence": {"used": False, "original_before_sha256": None,
+                                          "original_after_sha256": None,
+                                          "clone_replay_sha256": None}}}
                if trace_enabled else {}),
             "first_failure": failure, "reason": reason}
 
@@ -4226,8 +4306,17 @@ def _capacity_point(ledger, baseline_sizes, fixture_name, kind, minute_index, *,
             "container_backings": backings}
 
 
-def _capacity_proof(points, churn_fixtures=(), required_churn_names=()):
-    qcap = _budget_q(CAP) + 512 * CAP + 1536 * 12
+def _capacity_proof(points, churn_fixtures=(), required_churn_names=(), *,
+                    at_count=CAP, fixed_charge=None):
+    dict_steps, set_steps = _runtime_budget_steps(at_count)
+    steps = {"at_count": at_count, "list_header_bytes": sys.getsizeof([]),
+             "list_slot_bytes": sys.getsizeof([None]) - sys.getsizeof([]),
+             "block_width": 257, "detail_cap": min(at_count, DETAIL_CAP),
+             "dict_steps": dict_steps, "set_steps": set_steps}
+    steps["computed_q_at_limit"] = _actual_budget_q(at_count, steps)
+    qcap = steps["computed_q_at_limit"] + 512 * at_count + 1536 * 12
+    if fixed_charge is None:
+        fixed_charge = new_ledger(1).budget_state()["F_4"]
     observed = max((p["Q_4_bytes"] for p in points), default=None)
     actual = max((p["Q_actual_bytes"] for p in points), default=None)
     required = Counter()
@@ -4270,7 +4359,12 @@ def _capacity_proof(points, churn_fixtures=(), required_churn_names=()):
         reasons.append("churn budget interrupted capacity evidence")
     if unknown_ownership:
         reasons.append("owned graph unverified")
-    return {"status": status, "formula": "_budget_q(131072)+512*131072+1536*12",
+    return {"status": status,
+            "formula": f"_budget_q({at_count})+512*{at_count}+1536*12",
+            "budget_q_size_steps": steps,
+            "F4_ownership": {"total_bytes": fixed_charge,
+                             "items": [{"path": "ledger.budget_state.F_4",
+                                        "bytes": fixed_charge, "owner": "F_4"}]},
             "job_key_limit": 12, "H_res": max((p["N_res"] for p in points), default=None),
             "H_job": max((p["H_job"] for p in points), default=None),
             "Q_cap_bytes": qcap, "Q_obs_bytes": observed,
@@ -4321,7 +4415,7 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
              churn_stride_minutes=1, fixture_detail_divisor=1, calibration=False,
              budget_agreement_ref=None, attachment_dir=None,
              calibration_evidence_path=None, budget_agreement_path=None,
-             locked_tests_path=None):
+             locked_tests_path=None, integration_smoke=False):
     """Measure the plan; selected scenario rows form a small, non-accepting run."""
     if not 1 <= limit <= CAP or samples < 1 or warmup < 0 or budget_seconds < 0:
         raise ValueError("invalid gate parameter")
@@ -4343,6 +4437,11 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
                                      or set(selected) - set(available)):
             raise ValueError("invalid fixture selection")
     selected_any = any(x is not None for x in (chosen, selected_pressure, selected_churn))
+    if integration_smoke and (quick or calibration or selected_any or
+                              (limit, samples, warmup, churn_minutes,
+                               churn_stride_minutes, fixture_detail_divisor) !=
+                              (128, 2, 0, 41, 60, 256)):
+        raise ValueError("integration smoke requires its complete reduced profile")
     if quick and (limit, samples, warmup) == (CAP, 1000, 100):
         limit, samples, warmup = 96, 8, 2
     if quick and (churn_minutes, churn_stride_minutes, fixture_detail_divisor) == (10_080, 1, 1):
@@ -4353,7 +4452,9 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         raise ValueError("selected full run requires a reduced scale")
     if calibration and default_scale and not selected_any:
         raise ValueError("calibration requires a selection or reduced scale")
-    mode = "quick" if quick else "calibration" if calibration else "full" if default_scale and not selected_any else "full_small"
+    mode = ("integration_smoke" if integration_smoke else "quick" if quick else
+            "calibration" if calibration else "full" if default_scale and not selected_any else
+            "full_small")
     if mode == "full" and budget_seconds > 14_400 and (
             not isinstance(budget_agreement_ref, str) or not budget_agreement_ref.strip()):
         raise ValueError("extended full budget requires agreement reference")
@@ -4638,29 +4739,43 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         if fixture["first_failure"] and fixture["first_failure"].get("phase") == "budget":
             aborted = "budget"
     if churn_fixtures and aborted is None:
-        independent_rows = run_churn_fault_scenarios()
+        independent_rows = run_churn_fault_scenarios(
+            _start=lambda name: print(f"start {name}", file=progress),
+            _progress=lambda name, count: print(f"progress {name} checked={count}", file=progress),
+            _end=lambda name, status: print(f"end {name} {status}", file=progress))
         if any(p["kind"] == "prune" for p in capacity_points):
             prune_sample = _churn_transition_measurement("pruned")
             prune_sample["name"] = "prune_capacity_temporary"
             independent_rows.append(prune_sample)
         independent = {row["measured_transition"]: row for fixture in churn_fixtures
                        for row in fixture.get("transition_measurements", [])}
-        if mode == "full":
-            independent = {kind: _churn_transition_measurement(kind, samples=1000)
-                           for kind in independent}
+        measured = {}
+        for kind in independent:
+            name = "churn_" + kind + "_independent"
+            print(f"start {name}", file=progress)
+            measured[kind] = _churn_transition_measurement(
+                kind, samples=1000 if mode == "full" else 1,
+                _progress=lambda count, name=name: print(
+                    f"progress {name} checked={count}", file=progress))
+            print(f"end {name} {measured[kind]['status']}", file=progress)
+        independent = measured
         independent_rows.extend(independent.values())
         for item in independent_rows:
             name = item["name"]
-            print(f"start {name}", file=progress)
+            if not name.startswith("churn_"):
+                print(f"start {name}", file=progress)
             row = _empty_row(name, item["status"])
             row.update(item, sample_plan="independent",
                        sample_checks=item.get("sample_checks", {"checked": 1, "failures": []}),
                        partial_acceptance_applicable=False)
             rows.append(row)
-            print(f"end {name} {row['status']}", file=progress)
+            if not name.startswith("churn_"):
+                print(f"end {name} {row['status']}", file=progress)
         if wall() >= deadline:
             aborted = "budget"
-    capacity = _capacity_proof(capacity_points, churn_fixtures, churn_plan)
+    capacity = _capacity_proof(capacity_points, churn_fixtures, churn_plan,
+                               at_count=limit if integration_smoke else CAP,
+                               fixed_charge=fixed)
     if calibration and capacity_points:
         note_calibration("capacity", "capacity_all", len(capacity_points),
                          len(CHURN_NAMES) * (168 + 7 + 2) + len(PRESSURE_NAMES),
@@ -4742,6 +4857,17 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
         elif overall == "PASS" and aborted is None:
             verdicts["slice5a4"] = "PASS"
             reasons["slice5a4"] = []
+    elif mode == "integration_smoke":
+        smoke_ok = (aborted is None and _smoke_adapter_ok(adapter) and
+                    all(_smoke_row_ok(row, samples) for row in rows if
+                        row["name"] != "record_baseline" and row["status"] != "baseline"
+                        and row.get("kind") != "rebuild") and
+                    all(p["status"] == "PASS" for p in pressure_fixtures) and
+                    all(f["status"] == "PASS" for f in churn_fixtures) and
+                    capacity["status"] == "PASS")
+        overall = "PASS" if smoke_ok else "FAIL"
+        verdicts = dict.fromkeys(verdicts, overall)
+        reasons = {key: [] if smoke_ok else ["smoke measurement incomplete"] for key in verdicts}
     calibration_result = {"status": "not_run", "observations": [], "reason": None}
     if calibration:
         calibration_result = {"status": "complete" if aborted is None else "incomplete",
@@ -4758,6 +4884,12 @@ def run_gate(*, limit=CAP, samples=1000, warmup=100, quick=False,
     return {"contract": "slice5a4c_contract_r2.md C-prime + slice5a_contract_r2.md S5a.4 B1-B7",
             **({"attachment_root": str(attachment_dir)} if attachment_dir else {}),
             "acceptance_stage": "provisional",
+            **({"acceptance_scope": "integration_smoke",
+                "test_scale": {"max_records": limit, "job_key_limit": 12,
+                               "samples_per_gc": samples, "churn_minutes": churn_minutes,
+                               "churn_stride_minutes": churn_stride_minutes,
+                               "fixture_detail_divisor": fixture_detail_divisor}}
+               if mode == "integration_smoke" else {}),
             "mode": mode, "complete": aborted is None, "aborted_reason": aborted,
             "overall": overall, "summary": summarize(rows), "scenarios": rows,
             "adapter": adapter, "partial_acceptance": partial,
@@ -4902,6 +5034,9 @@ def _attachment_view(ref):
 
 
 def _need(value, *path):
+    if isinstance(value, dict) and path == ("transition_trace",) and \
+            "transition_trace" not in value and "transition_trace_ref" in value:
+        return _attachment_view(value["transition_trace_ref"])
     if isinstance(value, dict) and path in (("retained_seqs",), ("open_seqs",)) and \
             path[0] not in value and "seq_evidence_ref" in value:
         row = _attachment_view(value["seq_evidence_ref"])[_integer(_need(value, "seq_evidence_index"))]
@@ -5138,6 +5273,7 @@ def _temporary(scenario):
 
 def _evaluate_a(row, report):
     unit = report.get("mode") == "predicate_unit"
+    smoke_unit = unit and "churn_stride_minutes" in report.get("test_scale", {})
     if row == "A01":
         limits = _need(report, "limits")
         names = ("max_records", "max_retained_details", "max_detail_bytes",
@@ -5199,7 +5335,7 @@ def _evaluate_a(row, report):
                     _eq(_need(clone, key), None)
     elif row == "A03":
         fixtures = _items(_need(report, "pressure_fixtures"))
-        for fixture in (fixtures if unit else
+        for fixture in (fixtures if unit and not smoke_unit else
                         [p for p in fixtures if p.get("name") in PRESSURE_NAMES +
                          ("pressure_slot_first_small_limit",)]):
             inv = _need(fixture, "receipt_invariants")
@@ -5244,7 +5380,8 @@ def _evaluate_a(row, report):
         scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
         kinds = _need(report, "test_scale", "id_kinds") if unit else ("short_ascii", "ascii128", "unicode128")
         tracks = _need(report, "test_scale", "tracks") if unit else ("p0", "p1", "p2", "p3")
-        primary = fixtures if unit else [p for p in fixtures if p.get("name") in PRESSURE_NAMES]
+        primary = (fixtures if unit and not smoke_unit else
+                   [p for p in fixtures if p.get("name") in PRESSURE_NAMES])
         if not unit:
             _eq(len(primary), len(PRESSURE_NAMES))
             _eq({p.get("name") for p in primary}, set(PRESSURE_NAMES))
@@ -5253,21 +5390,35 @@ def _evaluate_a(row, report):
         for p in primary:
             if not unit:
                 _eq(_need(p, "name"), f"pressure_{_need(p, 'track')}_{_need(p, 'id_kind')}")
-            target = (0 if p["track"].lower() in ("p0", "p1") else
-                      512 if p["track"].lower() == "p2" else 2048)
-            _eq(_need(p, "requested_detail_target"), target)
+            requested = (0 if p["track"].lower() in ("p0", "p1") else
+                         512 if p["track"].lower() == "p2" else 2048)
+            target = (min((requested + _need(report, "test_scale", "fixture_detail_divisor") - 1) //
+                          _need(report, "test_scale", "fixture_detail_divisor"),
+                          DETAIL_CAP, _need(p, "fixture_limit") - 1)
+                      if unit and "fixture_detail_divisor" in report.get("test_scale", {}) and requested
+                      else requested)
+            _eq(_need(p, "requested_detail_target"), requested)
             _eq(_need(p, "effective_detail_target"), target)
             _eq(_need(p, "status"), "PASS")
             _eq(_need(scenarios, _need(p, "name"), "status"), "PASS")
     elif row == "A05":
         fixtures = _items(_need(report, "pressure_fixtures"))
-        for p in (fixtures if unit else [p for p in fixtures if p.get("name") in PRESSURE_NAMES]):
+        for p in (fixtures if unit and not smoke_unit else
+                  [p for p in fixtures if p.get("name") in PRESSURE_NAMES]):
             trace = _items(_need(p, "fixture_provenance", "api_trace"))
             trans = _items(_need(p, "transition_trace"))
             _trace_projection(trace, trans)
             _eq(_need(p, "fixture_provenance", "detail_charged_bytes"),
                 sum(_need(s, "detail_charge_bytes") for s in trans))
-            target = _need(report, "test_scale", "detail_target") if unit else _need(p, "requested_detail_target")
+            target = (_need(p, "effective_detail_target")
+                      if unit and "fixture_detail_divisor" in report.get("test_scale", {})
+                      else _need(report, "test_scale", "detail_target") if unit else
+                      _need(p, "requested_detail_target"))
+            if unit and "fixture_detail_divisor" in report.get("test_scale", {}):
+                requested = _need(p, "requested_detail_target")
+                _eq(target, min((requested + _need(report, "test_scale", "fixture_detail_divisor") - 1) //
+                                _need(report, "test_scale", "fixture_detail_divisor"),
+                                DETAIL_CAP, _need(p, "fixture_limit") - 1) if requested else 0)
             _eq(_need(p, "retained_details"), target)
             _eq(_need(p, "effective_detail_target"), target)
             tracks = ("p0", "p1", "p2", "p3", "P0", "P1", "P2", "P3") if unit else ("p0", "p1", "p2", "p3")
@@ -5366,8 +5517,9 @@ def _evaluate_a(row, report):
     elif row == "A08":
         sources = _need(report, "test_scale", "sources") if unit else ("investing", "bs", "citi")
         fixtures = _items(_need(report, "pressure_fixtures"))
-        for p in (fixtures if unit else [p for p in fixtures if p.get("name") !=
-                                   "pressure_unique_job_keys_byte_stop"]):
+        for p in (fixtures if unit and not smoke_unit else
+                  [p for p in fixtures if p.get("name") !=
+                   "pressure_unique_job_keys_byte_stop"]):
             r = _need(p, "first_rejection")
             post = _need(p, "post_latch")
             _index_audit(_need(r, "index_audit"))
@@ -5395,8 +5547,9 @@ def _evaluate_a(row, report):
     elif row == "A09":
         kinds = _need(report, "test_scale", "existing_transitions") if unit else None
         fixtures = _items(_need(report, "pressure_fixtures"))
-        for p in (fixtures if unit else [p for p in fixtures if p.get("name") !=
-                                   "pressure_unique_job_keys_byte_stop"]):
+        for p in (fixtures if unit and not smoke_unit else
+                  [p for p in fixtures if p.get("name") !=
+                   "pressure_unique_job_keys_byte_stop"]):
             post = _need(p, "post_latch")
             transitions = _need(post, "existing_id_transitions")
             budgets = _items(_need(post, "existing_id_budget"))
@@ -5430,7 +5583,8 @@ def _evaluate_a(row, report):
         fixtures = _items(_need(report, "pressure_fixtures"))
         slot_rows = _items(_need(report, "131072_slots", "by_fixture"))
         slots = {r.get("name"): r for r in slot_rows}
-        unreachable = _items(_need(report, "unreachable_rows"))
+        unreachable = (_need(report, "unreachable_rows") if smoke_unit else
+                       _items(_need(report, "unreachable_rows")))
         scenarios = {s.get("name"): s for s in _items(_need(report, "scenarios"))}
         auxiliary = [p for p in fixtures if p.get("name") == "pressure_slot_first_small_limit"]
         if len(auxiliary) != 1:
@@ -5444,8 +5598,8 @@ def _evaluate_a(row, report):
             _eq(_need(control, "status"), "PASS")
             _eq(len(slot_rows), len(PRESSURE_NAMES))
             _eq(set(slots), set(PRESSURE_NAMES))
-        primary = ([p for p in fixtures if p.get("name") in PRESSURE_NAMES] if not unit else
-                   [p for p in fixtures if p is not control])
+        primary = ([p for p in fixtures if p.get("name") in PRESSURE_NAMES]
+                   if not unit or smoke_unit else [p for p in fixtures if p is not control])
         if not unit:
             _eq(len(primary), len(PRESSURE_NAMES))
         for p in primary:
@@ -5465,7 +5619,9 @@ def _evaluate_a(row, report):
                             u.get("reason") == "N/A (unreachable by byte policy)"
                             for u in unreachable))
             else:
-                _eq(cause, "slot"); _eq(n, 131072); _eq(_need(slot, "status"), "PASS")
+                _eq(cause, "slot")
+                _eq(n, _need(report, "test_scale", "max_records") if smoke_unit else 131072)
+                _eq(_need(slot, "status"), "PASS")
             _eq(_need(scenarios, p["name"], "status"), "PASS")
     elif row == "A11":
         names = (_need(report, "test_scale", "measured_scenarios") if unit else
@@ -5487,7 +5643,8 @@ def _evaluate_a(row, report):
             _eq(_need(checks, "failures"), [])
             _assert(_integer(_need(checks, "checked")) >= 2 * required_n,
                     "insufficient independently checked calls")
-            if not unit and name in ("register_accept", "finish_accept"):
+            if (not unit or "churn_stride_minutes" in report.get("test_scale", {})) and \
+                    name in ("register_accept", "finish_accept"):
                 observations = _items(_need(s, "sample_observations"))
                 for phase in ("gc_disabled", "gc_enabled"):
                     measured = [o for o in observations if o.get("phase") == phase]
@@ -5892,7 +6049,10 @@ def _b_followup(row, report, fixtures, unit):
                     events_by_seq[event["registered_seq"]].append(event)
             first_unbound = next((i for i, e in enumerate(cycle) if e.get("action") == "unbound"), None)
             cycles = _need(report, "test_scale").get("cycles") if unit else None
-            count = len(cycle) * cycles if cycles is not None else (len(cycle) if unit else 80640)
+            count = (_need(report, "test_scale", "normal_calls") - 1
+                     if unit and "churn_stride_minutes" in report.get("test_scale", {}) else
+                     len(cycle) * cycles if cycles is not None else
+                     len(cycle) if unit else 80640)
             for i, reg in enumerate(_b02_cycle_calls(f, registers, count, gate_shape)):
                 position = i % len(cycle)
                 entry = cycle[position]
@@ -5953,8 +6113,11 @@ def _b_followup(row, report, fixtures, unit):
             _eq([_integer(_need(t, "call_index")) for t in trace], list(range(len(trace))))
             _assert(len(normal) >= n)
             cps = _items(_need(f, "checkpoints"))
-            _eq(len([c for c in cps if c.get("kind") == "tail_80640"]), 1)
-            _eq(len([c for c in cps if c.get("kind") == "tail_80641"]), 1)
+            before_kind, after_kind = (("tail_before", "tail_after")
+                                       if unit and "churn_stride_minutes" in report.get("test_scale", {}) else
+                                       ("tail_80640", "tail_80641"))
+            _eq(len([c for c in cps if c.get("kind") == before_kind]), 1)
+            _eq(len([c for c in cps if c.get("kind") == after_kind]), 1)
             _eq(len({_need(c, "checkpoint_id") for c in cps}), len(cps),
                 "simultaneous checkpoints reused an identity")
     elif row == "B05":
@@ -6399,7 +6562,8 @@ def _evaluate_b(row, report):
             _assert(all(t.get("classification") == "registered" for t in normal))
             start = normal[0]
             for i, t in enumerate(normal):
-                offset = (i % 8) * 7_500_000 + (i // 8) * 60_000_000
+                offset = ((i % 8) * 7_500_000 +
+                          (i // 8) * (_need(f, "stride_minutes") if unit and gate_shape else 1) * MINUTE)
                 _eq(_need(t, "received_at"), _need(start, "received_at") + offset)
                 _eq(_need(t, "received_mono"), _need(start, "received_mono") + offset)
                 _eq(_need(t, "source"), ("investing" if i % 8 < 6 else "bs" if i % 8 == 6 else "citi"))
@@ -6411,7 +6575,9 @@ def _evaluate_b(row, report):
             _eq(_need(f, "source_registered"), dict(Counter(_need(t, "source") for t in registered)))
             _eq(_need(f, "classification_counts", "registered"), len(registered))
             _eq(_need(f, "tail_classification"), "registered")
-            b, a = _checkpoint_pair(f, "tail_80640", "tail_80641")
+            b, a = _checkpoint_pair(f, *("tail_before", "tail_after")
+                                    if unit and "churn_stride_minutes" in report.get("test_scale", {}) else
+                                    ("tail_80640", "tail_80641"))
             running_prefix = []
             cuts = iter(_checkpoint_deltas(trace, (b, a))) if gate_shape else None
             for cp, count in ((b, n - 1), (a, n)):
@@ -6453,9 +6619,10 @@ def _evaluate_b(row, report):
             _eq(len(cycle), length)
             _eq([_need(c, "position") for c in cycle], list(range(length)))
             actions = Counter(_need(c, "action") for c in cycle)
-            if unit:
+            if unit and "churn_stride_minutes" not in scale:
                 _eq(actions.get("finish", 0), _need(scale, "finished"))
                 _eq(actions.get("unbound", 0), _need(scale, "unbound"))
+            if unit:
                 if length == 20:
                     track = _need(f, "state_track")
                     _assert(track in ("most_finished", "most_finished_init_failed",
@@ -6482,7 +6649,9 @@ def _evaluate_b(row, report):
                 for registration in registers:
                     _assert(_churn_auxiliary(registration, gate_shape) is False,
                             "state cycle registration was auxiliary")
-            expected_cycles = length * _need(scale, "cycles") if unit and "cycles" in scale else length
+            expected_cycles = (_need(scale, "normal_calls") - 1
+                               if unit and "churn_stride_minutes" in scale else
+                               length * _need(scale, "cycles") if unit and "cycles" in scale else length)
             cycle_calls = _b02_cycle_calls(f, registers, expected_cycles if unit else 80640,
                                           gate_shape)
             # The locked r2 clause examples are compact synthetic rows without
@@ -6581,7 +6750,8 @@ def _evaluate_b(row, report):
             _eq(_need(expire, "received_mono"), _need(probe, "received_mono") + 14_400_000_000)
             _assert(any(s.get("id") == probe["id"] and s.get("observed") == "tombstoned"
                         for s in _need(expire, "identity_samples")))
-            _eq(_need(_items([p for p in f["checkpoints"] if p.get("kind") == "tail_80641"])[0], "N_total"), n + d + 1)
+            tail_kind = "tail_after" if unit and "churn_stride_minutes" in report.get("test_scale", {}) else "tail_80641"
+            _eq(_need(_items([p for p in f["checkpoints"] if p.get("kind") == tail_kind])[0], "N_total"), n + d + 1)
     elif row == "B04":
         hours = _need(report, "test_scale", "hours") if unit else 168
         days = _need(report, "test_scale", "days") if unit else 7
@@ -6605,7 +6775,10 @@ def _evaluate_b(row, report):
                 for i, cp in enumerate(selected, 1):
                     _eq(_need(cp, "received_at"), _need(start, "received_at") + i * increment)
                     _eq(_need(cp, "received_mono"), _need(start, "received_mono") + i * increment)
-            for kind, index in (("tail_80640", n - 2), ("tail_80641", n - 1)):
+            tail_kinds = (("tail_before", n - 2), ("tail_after", n - 1)) if unit and \
+                "churn_stride_minutes" in report.get("test_scale", {}) else \
+                (("tail_80640", n - 2), ("tail_80641", n - 1))
+            for kind, index in tail_kinds:
                 cp = _items([c for c in checkpoints if c.get("kind") == kind])[0]
                 for key in ("received_at", "received_mono"):
                     _eq(_need(cp, key), _need(normal[index], key))
@@ -6826,6 +6999,7 @@ def _evaluate_b(row, report):
             previous_res, previous_total = 0, 0
             previous_pruned = 0
             accepted_total = pruned_total = 0
+            normal_pruned_total = 0
             cuts = (_checkpoint_deltas(trace, checkpoints) if gate_shape else
                     ((cp, (), None) for cp in checkpoints))
             for hour, (cp, new_events, _) in enumerate(cuts, 1):
@@ -6846,12 +7020,17 @@ def _evaluate_b(row, report):
                     _eq(_need(cp, "N_res"), accepted_total - pruned_total)
                     previous_pruned = pruned_total
                 normal_pruned = pruned - auxiliary_due[hour] - (early_auxiliary if hour == 1 else 0)
-                _assert(normal_pruned == 0 if hour <= pre else normal_pruned > 0)
+                normal_pruned_total += normal_pruned
+                _assert(normal_pruned == 0 if hour <= pre else
+                        normal_pruned >= 0 if unit and "churn_stride_minutes" in report.get("test_scale", {}) else
+                        normal_pruned > 0)
                 accepted = _integer(_need(cp, "N_total")) - previous_total
                 other = _integer(_need(cp, "other_recorded_resident_removals"))
                 _assert(other >= 0)
                 _eq(pruned + other, previous_res + accepted - _integer(_need(cp, "N_res")))
                 previous_res, previous_total = cp["N_res"], cp["N_total"]
+            if unit and "churn_stride_minutes" in report.get("test_scale", {}):
+                _assert(normal_pruned_total > 0, "smoke observed no normal pruning")
     elif row == "B11":
         for f in fixtures:
             b, a = _checkpoint_pair(f, "probe_prune_before", "probe_prune_at")
@@ -7570,7 +7749,8 @@ def _evaluate_b_rest(row, report):
             cps = _items(_need(f, "checkpoints"))
             _assert(all(_need(cp, "N_res") <= maximum for cp in cps))
             _assert(any(_need(cp, "pruned_since_previous_hour") > 0 for cp in cps if cp.get("kind") == "hour"))
-            tail = _items([cp for cp in cps if cp.get("kind") == "tail_80641"])[0]
+            tail_kind = "tail_after" if unit and "churn_stride_minutes" in report.get("test_scale", {}) else "tail_80641"
+            tail = _items([cp for cp in cps if cp.get("kind") == tail_kind])[0]
             _assert(any(s.get("observed") == "expired_or_untracked" for s in _need(tail, "identity_samples")))
             if gate_shape:
                 previous = 0
@@ -8625,7 +8805,7 @@ def _d02_own(report, attachments, rows):
             if name in _D02_SCENARIOS:
                 _observed_timing(scenario)
                 _measured_time_gate(scenario, required_n=1000)
-    _eq(_need(report, "adapter", "status"), "PASS")
+    _assert(_smoke_adapter_ok(_need(report, "adapter")), "adapter evidence incomplete")
     observations = _items(_need(report, "adapter", "observations"), 3)
     _eq(len(observations), 3)
     _eq({_need(obs, "source") for obs in observations}, {"investing", "bs", "citi"})
@@ -8662,6 +8842,196 @@ def _d_verdict(report, attachments, rows, stage):
     return _result(f"D0{stage if stage != 2 else 2}", "PASS")
 
 
+def _smoke_check(row_id, check):
+    try:
+        check()
+    except _EvidenceMissing as exc:
+        return _result(row_id, "UNVERIFIED", str(exc))
+    except _EvidenceViolation as exc:
+        return _result(row_id, "FAIL", str(exc))
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError, StopIteration,
+            OverflowError, UnicodeError, ZeroDivisionError) as exc:
+        return _result(row_id, "UNVERIFIED", f"malformed smoke evidence: {type(exc).__name__}")
+    return _result(row_id, "PASS")
+
+
+def _smoke_scope(report):
+    _eq(_need(report, "mode"), "integration_smoke")
+    _eq(_need(report, "acceptance_scope"), "integration_smoke")
+    _assert(_need(report, "complete") is True and _need(report, "aborted_reason") is None)
+    _eq((_need(report, "limits", "max_records"), _need(report, "test_scale", "samples_per_gc"),
+         _need(report, "limits", "churn_minutes"), _need(report, "limits", "churn_stride_minutes"),
+         _need(report, "limits", "fixture_detail_divisor")), (128, 2, 41, 60, 256))
+    pressure = _items(_need(report, "pressure_fixtures"), len(PRESSURE_NAMES + PRESSURE_AUX))
+    churn = _items(_need(report, "churn_fixtures"), len(CHURN_NAMES))
+    _eq({p.get("name") for p in pressure}, set(PRESSURE_NAMES + PRESSURE_AUX))
+    _eq({f.get("name") for f in churn}, set(CHURN_NAMES))
+    _eq(len(pressure), len(PRESSURE_NAMES + PRESSURE_AUX))
+    _eq(len(churn), len(CHURN_NAMES))
+    scenarios = _items(_need(report, "scenarios"))
+    names = [s.get("name") for s in scenarios]
+    _eq(len(names), len(set(names)))
+    _assert(set(_D02_SCENARIOS + _ADAPTER_SCENARIOS) <= set(names),
+            "D02 scenario missing")
+    _assert({"churn_fault_clock_step", "churn_fault_merge_failure",
+             "churn_fault_late_after_expiry", "churn_fault_id_collision",
+             "churn_fault_uuid_uniqueness"} <= set(names), "fault scenario missing")
+    _assert(any(f.get("name", "").startswith("churn_init_failed_") for f in churn))
+    _assert(any(f.get("name", "").startswith("churn_burst_") for f in churn))
+
+
+def _smoke_measurements(report):
+    scenarios = {s["name"]: s for s in _items(_need(report, "scenarios"))}
+    for name in _D02_SCENARIOS + _ADAPTER_SCENARIOS:
+        _assert(_smoke_row_ok(_need(scenarios, name), 2),
+                f"smoke scenario {name} incomplete")
+    _eq(_need(report, "adapter", "status"), "PASS")
+    for fixture in _items(_need(report, "pressure_fixtures")) + _items(_need(report, "churn_fixtures")):
+        _eq(_need(fixture, "status"), "PASS", f"smoke fixture {fixture.get('name')} incomplete")
+    _eq(_need(report, "capacity_proof", "status"), "PASS")
+
+
+def _smoke_a11(projected):
+    scenarios = {s.get("name"): s for s in _items(_need(projected, "scenarios"))}
+    for name in ("register_accept", "finish_accept"):
+        scenario = _need(scenarios, name)
+        _observed_timing(scenario)
+        _assert(_smoke_row_ok(scenario, 2), f"{name} timing evidence incomplete")
+        _eq(_need(scenario, "sample_plan"), "sequential_reprepared")
+    finish = _need(scenarios, "finish_accept")
+    observations = _items(_need(finish, "sample_observations"))
+    for phase in ("gc_disabled", "gc_enabled"):
+        measured = [row for row in observations if row.get("phase") == phase]
+        _assert(len(measured) >= 2, "finish timing samples missing")
+        for row in measured:
+            _eq(_need(row, "classification"), "finalized")
+            _assert(_integer(_need(row, "prepared_at")) <=
+                    _integer(_need(row, "called_at")), "finish measured before preparation")
+
+
+def _smoke_attachments(report):
+    for fixture in _items(_need(report, "churn_fixtures"), len(CHURN_NAMES)):
+        _assert({"tail_before", "tail_after"} <=
+                {cp.get("kind") for cp in _items(_need(fixture, "checkpoints"))},
+                "both churn tails required")
+        provenance = _need(fixture, "fixture_provenance")
+        for ref in (_need(provenance, "api_trace_ref"),
+                    _need(fixture, "transition_trace_ref"),
+                    _need(fixture, "tomb_due_ledger_ref"),
+                    _need(fixture, "recent_input_ledger_ref"),
+                    _need(fixture, "highwater_checks", "register_attempts_ref")):
+            _items(_attachment_view(ref))
+        for cp in _items(_need(fixture, "checkpoints")):
+            if "seq_evidence_ref" in cp:
+                _items(_attachment_view(cp["seq_evidence_ref"]))
+
+
+def _finalize_smoke(report, extra, stderr_bytes, exit_code, attachments):
+    cache = {"report_id": id(report), "bool_checked": False, "attempts": {},
+             "attachments": attachments, "views": {}}
+    token = _finalize_cache.set(cache)
+    try:
+        scope = _smoke_check("SMOKE_SCOPE", lambda: _smoke_scope(report))
+        limits = report.get("limits", {})
+        minutes = limits.get("churn_minutes", 41)
+        divisor = limits.get("fixture_detail_divisor", 256)
+        scale = {**report.get("test_scale", {}),
+                 "normal_calls": minutes * 8 + 1, "hours": minutes, "days": 1,
+                 "cycles": minutes * 8 // 20, "burst_details": (2048 + divisor - 1) // divisor,
+                 "id_kinds": ["short_ascii", "ascii128", "unicode128"],
+                 "tracks": ["p0", "p1", "p2", "p3"], "sources": list(REGISTRY),
+                 "existing_transitions": list(_EXISTING_TRANSITION_CLASSES),
+                 "measured_scenarios": ["register_accept", "finish_accept"],
+                 "temporary_scenarios": list(_D02_SCENARIOS),
+                 "fault_kinds": ["clock_step", "merge_failure", "late_after_expiry",
+                                 "id_collision", "uuid_uniqueness"],
+                 "churn_names": list(CHURN_NAMES), "cycle_length": 20,
+                 "finished": 16, "unbound": 2, "pre_prune_hours": 3,
+                 "required_budget_points": ["hour", "day", "tail_before", "tail_after",
+                                            "highwater_before", "highwater_after"]}
+        projected = {**report, "mode": "predicate_unit", "test_scale": scale}
+        cache["report_id"] = id(projected)
+        # These predicates require input that this bounded run cannot produce.
+        exclusions = {
+            "A01": "default 131072-slot/10080-minute limits are not measured by the smoke profile",
+            "A10": "131072-slot acceptance cannot be observed at the 128-slot smoke limit",
+            "C10": "a pre-full calibration and linked ETA are not part of the smoke run",
+        }
+        excluded_rows = []
+        evidence = []
+        for row_id in EVIDENCE_ROW_IDS:
+            row_report = projected
+            if row_id == "A02":
+                row_report = {**report, "mode": "full"}
+            elif row_id == "B02":
+                row_report = {**projected, "churn_fixtures": [f for f in report["churn_fixtures"]
+                                                               if f.get("name") in CHURN_NAMES[:-2]]}
+            elif row_id == "B23":
+                row_report = {**projected, "pressure_fixtures": [p for p in report["pressure_fixtures"]
+                                                                 if p.get("name") ==
+                                                                 "pressure_unique_job_keys_byte_stop"]}
+            # Every projection reuses validated report values; only its mode,
+            # scale, or a subset of the already checked fixture lists differs.
+            if cache["bool_checked"]:
+                cache["report_id"] = id(row_report)
+            result = evaluate_row(row_id, row_report, attachments=attachments)
+            if row_id in exclusions and result["status"] != "PASS":
+                excluded_rows.append({"row_id": row_id, "reason": exclusions[row_id],
+                                      "evaluated_status": result["status"],
+                                      "evaluated_reason": result["reason"]})
+                result = _result(row_id, "N/A", "smoke exclusion: " + exclusions[row_id])
+            evidence.append(result)
+        checks = [scope, *evidence,
+                  _smoke_check("SMOKE_A11_PREPARATION", lambda: _smoke_a11(projected)),
+                  _smoke_check("SMOKE_MEASUREMENTS", lambda: _smoke_measurements(report)),
+                  _smoke_check("SMOKE_ATTACHMENTS", lambda: _smoke_attachments(report))]
+    finally:
+        for view in cache["views"].values():
+            view.close()
+        _finalize_cache.reset(token)
+    d05 = _d05(report, stderr_bytes, exit_code, extra)
+    checks.append(d05)
+    by_id = {entry["row_id"]: entry for entry in checks}
+
+    def stage(row_id, prerequisites):
+        failed = [key for key in prerequisites if by_id[key]["status"] not in ("PASS", "N/A")]
+        return _result(row_id, "PASS" if not failed else "FAIL",
+                       None if not failed else "smoke evidence incomplete: " + ", ".join(failed))
+
+    d02 = stage("D02", ("SMOKE_SCOPE", "SMOKE_MEASUREMENTS", "D05"))
+    by_id["D02"] = d02
+    d03 = stage("D03", ("D02", "SMOKE_A11_PREPARATION") +
+                tuple(row for row in EVIDENCE_ROW_IDS if row.startswith("A")))
+    by_id["D03"] = d03
+    d04 = stage("D04", ("D03", "SMOKE_ATTACHMENTS") +
+                tuple(row for row in EVIDENCE_ROW_IDS if row.startswith(("B", "C"))))
+    by_id["D04"] = d04
+    final = {"slice5a2_partial": d02["status"], "slice5a3": d03["status"],
+             "slice5a4": d04["status"]}
+    provisional = report.get("verdicts", {})
+    expected_overall = "PASS" if d04["status"] == d05["status"] == "PASS" else "FAIL"
+    consistent = (report.get("overall") == expected_overall and
+                  all(provisional.get(name) == status for name, status in final.items()))
+    consistency = _result("SMOKE_CONSISTENCY", "PASS" if consistent else "FAIL",
+                          None if consistent else "provisional smoke verdict differs from evidence")
+    checks.append(consistency)
+    by_id["SMOKE_CONSISTENCY"] = consistency
+    d01 = stage("D01", ("D04", "D05", "SMOKE_CONSISTENCY"))
+    by_id["D01"] = d01
+    diffs = {}
+    if report.get("overall") != d01["status"]:
+        diffs["overall"] = {"provisional": report.get("overall"), "final": d01["status"]}
+    for name, status in final.items():
+        if provisional.get(name) != status:
+            diffs[name] = {"provisional": provisional.get(name), "final": status}
+    return {"acceptance_scope": "integration_smoke",
+            "excluded_rows": excluded_rows,
+            "checked_rows": [entry["row_id"] for entry in checks],
+            "acceptance_checklist": checks + [by_id[key] for key in ("D01", "D02", "D03", "D04")],
+            "overall": d01["status"], "verdicts": final,
+            "provisional_consistency": {"matches": not diffs, "diffs": diffs}}
+
+
 def finalize_acceptance(*, stdout_bytes: bytes, stderr_bytes: bytes,
                         exit_code: int, attachments: dict[str, bytes]) -> dict:
     report, extra = _parse_stdout(stdout_bytes)
@@ -8669,6 +9039,9 @@ def finalize_acceptance(*, stdout_bytes: bytes, stderr_bytes: bytes,
 
 
 def _finalize_acceptance_parsed(report, extra, stderr_bytes, exit_code, attachments):
+    if report is not None and (report.get("mode") == "integration_smoke" or
+                               report.get("acceptance_scope") == "integration_smoke"):
+        return _finalize_smoke(report, extra, stderr_bytes, exit_code, attachments)
     if report is None:
         entries = [_result(r, "UNVERIFIED", "usable JSON report absent") for r in EVIDENCE_ROW_IDS]
     else:
@@ -8741,6 +9114,7 @@ def _finalize_cli(argv):
                 references.append(ref["path"])
                 streamed.add(ref["path"])
             for entry in (fixture.get("fixture_provenance", {}).get("api_trace_ref"),
+                          fixture.get("transition_trace_ref"),
                           fixture.get("tomb_due_ledger_ref"),
                           fixture.get("recent_input_ledger_ref")):
                 if isinstance(entry, dict) and "path" in entry:
@@ -8770,6 +9144,7 @@ def main():
         return _finalize_cli(sys.argv[2:])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--quick", action="store_true")
+    parser.add_argument("--integration-smoke", action="store_true")
     parser.add_argument("--limit", type=int, default=CAP)
     parser.add_argument("--samples", type=int, default=1000)
     parser.add_argument("--warmup", type=int, default=100)
@@ -8804,7 +9179,8 @@ def main():
                       calibration_evidence_path=args.calibration_evidence_path,
                       budget_agreement_path=args.budget_agreement_path,
                       locked_tests_path=args.locked_tests_path,
-                      attachment_dir=args.attachments_dir)
+                      attachment_dir=args.attachments_dir,
+                      integration_smoke=args.integration_smoke)
     print(json.dumps(report, ensure_ascii=False, separators=(",", ":")))
 
 
