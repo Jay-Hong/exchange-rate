@@ -6533,11 +6533,11 @@ stale 값은 **1시간 직전까지** 쓰인다. 그 마지막 hit가 갱신 기
 - 책임: 불변식 · 결정 · arming 게이트
 - 상태: Draft — 구현 착수 전 합의 대상
 - 코드 근거 기준일: 2026-08-09
-- server 기준 commit: `f7d2bcad03301259beb80b7c3d2e000ceabd6428`
+- server 기준 commit: `47cd8db7c3263f5cd113d85ca7f21042b9099367`
 - iOS 기준 commit: `8f6afff299621d50c3431dbea739ed07c378c59a`
 - archive SHA: `cde1d2ca3e714733776e1b0d7e821a542e1f8d183cb2951bef8c93fb444d9814`
-- manifest SHA: `6c0a9799839105398e78fd53b87312726fea5a19e4d7679dd48ff4061ff79eeb`
-- baseline SHA: `40977d20c51a8cf027520e771f8b8e80aeed1d973b32ca4cc4427fa991b268b9`
+- manifest SHA: `07ca054ee04f294eefc4384f5849edae1c679f67f24b30a7de3099ef9728ec41`
+- baseline SHA: `69d1d124d15d4b6c43a7b1c86bfa6dcd214a75d4a06a8c552d0e610e0db9c3f1`
 - 검증: `python3 scripts/topic_migration_manifest.py preflight`
 
 이 ADR 은 topic-only 전환의 **불변식 · 결정 · arming 게이트**를 소유한다. 서버 build/ack/close 계약,
@@ -6628,7 +6628,7 @@ fallback 빌드가 아니며 출시할 수 없다.
 (`app/topic_policy.py:278-323` · `app/topic_dispatcher.py:792-948`). 적용 여부는
 `WS_TOPIC_AUTH_STAGE` 에 따른다:
 
-코드 기본값은 `compatibility` 다(`app/config.py:793-795`). production 의 실제 값은 아래 표가
+코드 기본값은 `compatibility` 다(`app/config.py:800-802`). production 의 실제 값은 아래 표가
 아니라 운영 직접 측정으로 확정한다.
 
 | stage | 익명 FX | 익명 USDT | 식별 FX/USDT | 식별 KRX |
@@ -6642,10 +6642,10 @@ fallback 빌드가 아니며 출시할 수 없다.
 컨테이너와 env 를 직접 확인해야 한다. 최종 stage 에서는 authorizable topic 이 있는 식별 subscribe
 마다 RevenueCat 왕복이 1회 생기고(stale fallback 은 REST 전용), FX 의 실효는 무인증 legacy
 브로드캐스트 때문에 Stage B 까지 제한된다([R-OPEN-4](#r-open-4)).
-근거: `app/config.py:752-795`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
+근거: `app/config.py:759-802`(기본값 `compatibility`) · `app/topic_authorization.py:278-315`
 (cache-free `fetch_revenuecat_result`) · `app/subscription.py:403-464`(stale fallback 은 REST 전용).
 
-구현 근거: `app/config.py:752-795`(stage) · `app/topic_policy.py:78-85`(정책표) ·
+구현 근거: `app/config.py:759-802`(stage) · `app/topic_policy.py:78-85`(정책표) ·
 `app/topic_policy.py:237-275`(익명 planner) · `app/topic_policy.py:278-323`(식별 planner) ·
 `app/topic_authorization.py:372-402`(coordinator) · `app/topic_dispatcher.py:792-948`(배선·등록) ·
 `app/main.py:3304-3308`(REST twin).
@@ -6725,7 +6725,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
   코드 기본값 false / 운영은 2026-05-26 활성). 일반 KRX writer 는 매번 SET 한다.
   그리고 장마감(15:45) 후 무발행이 정상 — 이미 시간 기반 staleness 가 **없다**(ADR-038 D2).
   근거: baseline B3 · B3-op · `app/latest_rates_cache.py:818-824` ·
-  `app/latest_rates_cache.py:662-667` · `app/config.py:403`.
+  `app/latest_rates_cache.py:662-667` · `app/config.py:410`.
 <!-- /evidence: E-B-2 -->
 
 <!-- evidence: E-B-3 supports=R-DEC-1 -->
@@ -6735,7 +6735,7 @@ after:   45초 = 전달 이상 의심 → 조용히 재검증 → 실패 확정 
 <!-- evidence: E-B-4 supports=R-DEC-1 -->
 - publisher 모듈 자체에는 timer 가 없다(baseline B1 의 **범위 한정**). 외부의
   `broadcast_rates_once` 는 매초 wake-up 하지만 publisher 호출은 payload `is_changed` 분기 안이다
-  (`app/scheduler.py:1955-1961` · `app/main.py:980-1003`). 따라서 현재 경로에는
+  (`app/scheduler.py:1957-1963` · `app/main.py:980-1003`). 따라서 현재 경로에는
   **topic data-plane heartbeat·무조건 주기 재발행 계약이 없다**.
   ⚠️ transport 레벨 ping/pong 은 **있다**(iOS 30초 ping ↔ 서버 pong) — 그건 연결 생존만 증명하고
   특정 topic publisher 의 생존은 증명하지 않는다.

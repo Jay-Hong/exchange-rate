@@ -55,7 +55,7 @@
 
 - **C1 [코드]** 익명(미식별) subscribe 의 처리는 **`WS_TOPIC_AUTH_STAGE` 에 따라 갈린다**
   (기본값 `compatibility`). 한 파일만 봐서는 증명되지 않아 네 계층을 함께 인용한다:
-  stage 정의·엄격 파서·코드 기본값 `app/config.py:752-795` · **정책 정본**
+  stage 정의·엄격 파서·코드 기본값 `app/config.py:759-802` · **정책 정본**
   `app/topic_policy.py:237-275`(`plan_anonymous`) · 그 위임 wrapper
   `app/topic_auth_rollout.py:308-323` · 필터 호출과 등록 `app/topic_dispatcher.py:620-648` ·
   production 주입 `app/main.py:342-350`.
@@ -130,9 +130,9 @@
   `for topic in topics: ... payload = await build_snapshot_observed(topic, budget=request_budget)`. 그 공유 래퍼가
   `app/topic_initial_snapshot.py:497-838` 에서 같은 topic generation의 동시 요청을 shared build 하나로
   합치고 성공 결과만 최대 1초 cache한다. 새 shared flight는
-  `app/config.py:661-671`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리며, join/cache hit는
+  `app/config.py:668-678`의 기본 4-slot FIFO admission을 남은 S3 예산까지만 기다리며, join/cache hit는
   slot을 쓰지 않는다. transient build 실패는 같은 exact key에서 기본 1초 동안 새 build를 억제한다
-  (`app/config.py:674-681` · `app/topic_initial_snapshot.py:651-709` ·
+  (`app/config.py:681-688` · `app/topic_initial_snapshot.py:651-709` ·
   `app/topic_initial_snapshot.py:733-817`). 실제 worker는 `app/topic_initial_snapshot.py:841-895`에서
   독립된 shared 예산으로 `asyncio.to_thread(..., _run_snapshot_worker, topic, request_budget)`를
   감싼다 — **REST twin도 같은 single-flight·worker 래퍼를 쓴다**
