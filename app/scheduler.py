@@ -31,7 +31,7 @@ from app.crawlers import bs
 from app.crawlers import citi
 # Selenium 크롤러(shinhan, ibk, nh, sc)는 subprocess로 실행되므로 import 불필요
 from app.crawlers.constants import SELENIUM_PRIORITY_MAP, SELENIUM_TIMEOUT_MAP
-from app import config, crud
+from app import config, crud, source_stall_monitor
 from app.config import LATEST_MIRROR_INTERVAL_SECONDS, REDIS_LATEST_ENABLED
 from app.database import SessionLocal
 from app.admin.crawler_stats import crawler_stats
@@ -1918,6 +1918,8 @@ def _register_usdt_legacy_polling_job(target_scheduler) -> bool:
 
 def start_scheduler():
     global crawler_manager
+
+    source_stall_monitor.register(scheduler)
 
     # Lazy import: the process epoch starts at scheduler startup, before the DB read.
     from app import collection_config_observer

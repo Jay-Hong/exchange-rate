@@ -1,6 +1,7 @@
 # Source-Health Plan (무료 스냅샷 소스별 건강 관측)
 
-> **상태: Investing 슬라이스 1 보고 전용 — 구현 완료(§7.10) / 2026-09-18 운영 배포·promote 완료 / 집계·알림 미구현**
+> **상태: Investing 슬라이스 1 보고 전용 운영 중. 수집 멈춤 S1 기록기·S2 1분 점검기는 2026-10-02 로컬 구현 단계(운영 미배포), 발송 기본 OFF·shadow 로그 전용. 결과 기반 집계·API/UI는 미구현.**
+> **수집 멈춤 S3 발송 전제**: SHADOW=나 — 10-09 휴일·10-10~11 주말·10-12 월요일 재개를 실제 관측하고 모든 전이를 분류하여 설명되지 않은 오탐이 0일 때만 발송을 켠다. 그 관측 구간을 놓치면 날짜만 맞춰 켜지 않는다. S1은 writer에 도달한 유효 값 수신이며 DB commit 성공 신호가 아니다.
 > 검증: 5-agent Workflow 코드 인벤토리 + codex 다라운드 리뷰(인벤토리→계약 정정 반복) + Claude 코드 재검증 (2026-07-22).
 > **2026-09-13 개정**: §7 신설 — 9은행 + Investing의 결과 보고·집계 계약, 지속장애 알림, 작업 미실행 감지. §2·§2.1·§4·§6-2의 낡은 현재형 서술 정정. **현재 Investing 보고 전용 구현은 완료(§7.10)했고, 집계·알림은 여전히 미구현이다.**
 > **2026-09-18 배포**: `721a323` 를 §8.1a 방식으로 배포·promote 완료(§7.11). 수동 보존·일별 집계 도구는
@@ -143,7 +144,7 @@
    - 재시작 직후(crawler_stats 휘발) / crawler_stats 미커버 소스(USDT/KRX) / §2.1로 신뢰 불가한 collector 모두 `unknown`.
 4. **as_of(HH:30:00) ≠ eval(HH:30:19)** — precompute cron은 :30:19 발화([free_snapshot.py:35](app/free_snapshot.py)), as_of는 :30:00 floor. liveness는 eval-now(:30:19) 상태로 읽되 basis 라벨 병기, 계약에 어느 기준인지 명시.
 5. **USDT는 초기엔 관대 판정 or unknown** — value 신호(seen_at age)만으론 저유동 오탐 → liveness export(§6-4, 특히 데이터 진행성 신호) 전까진 무리한 stall 판정 금지.
-6. **API/UI 노출 0** → **≥7일 log-only 관측**(주간 모드 사이클 + deterministic 휴일 테스트, §6-5) → 오탐률 확인 → 그 후 영속 heartbeat(Redis) 필요성 + API/UI 계약 결정. **단일-worker in-memory 직접참조를 정식 계약으로 즉시 승격 금지**(codex ③ — [Dockerfile:118](Dockerfile) `--workers 1` 의존, multi-worker 시 깨짐. 리포 전반 USDT/KRX in-memory coalesce와 동일 load-bearing 가정).
+6. **API/UI 노출 0** → 수집 멈춤 알림 S2는 Redis 유효 수신 시각으로 log-only shadow를 실행하고, **S3 발송은 SHADOW=나 조건**(10-09 휴일·10-10~11 주말·10-12 재개 실제 관측, 전이 전수 분류, 설명되지 않은 오탐 0)을 충족한 뒤 별도로 켠다. 구간을 놓치면 날짜만 맞춰 켜지 않는다. 결과 기반 health/API/UI 계약은 별도 검토한다. **단일-worker in-memory 직접참조를 정식 계약으로 즉시 승격 금지**(codex ③ — [Dockerfile:118](Dockerfile) `--workers 1` 의존, multi-worker 시 깨짐. 리포 전반 USDT/KRX in-memory coalesce와 동일 load-bearing 가정).
 
 ---
 
@@ -158,7 +159,7 @@
    collector 실행결과는 **run 계층만 반환**(eligibility·dispatch는 안 돌았으니 스케줄러 계층에서 별도 관측). run 계층에서 §6-1 유효성으로 `attempted_assets`/`observed_assets`/`failed_assets` 판정. 다수 collector가 총실패를 삼키고, 예외를 올리는 collector도 부분 통화·저장 결과를 구분하지 못하므로(§2.1) 이 계약 선행 없이 shadow 무의미. 구체 계약은 §7.2. **저장소(§6-4/D1/D4)는 observed_assets 반환한 다음**(crawler_stats는 source 단위라 per-asset 단독 미충족).
 3. **collection_expected(eligibility + interval-aware) + market_expected + 공휴일 정책 정의** — collection_expected = eligibility(`scheduled_off`/`admin_disabled`)이며 timing은 Bool 아닌 **`expected_interval`/`next_due_at + grace`**(현재 등록 소스는 IN/OUT 모두 10~60s). **dispatch(queue_full/misfire)·run(timeout/transition) 결과는 collection_expected가 아니라 §6-2 3계층** — queue 포화는 억제가 아니라 health 영향(§4·§6-2 정합). market_mode(eligibility 파생) + kr_holidays(market_expected) realtime 연결.
 4. **timezone-aware heartbeat 저장 설계** — collection_success_at을 per-(source,asset) 영속(Redis/DB), tz-aware. USDT는 in-process liveness(is_stale/ticker-dead/task.done) export 포함.
-5. **≥7일 shadow 관측 + deterministic 휴일 테스트** (log-only) — 1~2일은 평일만 보고 끝나 BREAK/OUT·주말 전환 오탐을 검증 못 함(codex). 주간 모드 사이클(평일 IN/BREAK + 주말 OUT) 전체 + **주입식 공휴일 테스트**(실휴일 대기 불요)로 cadence 마스크 검증.
+5. **수집 멈춤 알림의 shadow 발송 게이트(SHADOW=나)** (log-only) — 10-09 휴일·10-10~11 주말·10-12 월요일 재개를 실제 관측하고 모든 전이를 분류해 설명되지 않은 오탐 0을 확인한다. 이 구간을 놓치면 날짜만 맞춰 발송을 켜지 않는다. 결과 기반 health의 주간 모드·휴일 검증은 별도 계약으로 유지한다.
 6. **오탐률 확인 후 API/UI 계약 검토** (additive health 필드 → iOS 최소 배지, 확실한 장애만).
 
 ---
@@ -172,7 +173,7 @@
 
 - **이번**: 결과 보고·집계 계약 · 지속장애 알림 · 작업 미실행 최소 감지.
 - **후속**: 영속 heartbeat · 사용자 건강 배지 · 정체 감지 확장 · 거래소·DXY.
-- §5·§6-5의 ≥7일 shadow는 **알림 활성화의 선행 조건**이다. 거짓 성공 수리의 선행 조건으로 쓰지 않는다.
+- 수집 멈춤 알림의 발송 선행 조건은 §6-5의 **SHADOW=나 실제 관측·전이 전수 분류·설명되지 않은 오탐 0**이다. 거짓 성공 수리의 선행 조건으로 쓰지 않는다.
 - 결과 기반 감지만으로는 **작업이 아예 안 도는 상태를 영원히 못 잡는다** → 최소 미실행 감지(§7.6)는 이번 범위다.
 
 ### 7.2 공통 결과 계약 — 5축

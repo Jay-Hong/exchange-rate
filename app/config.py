@@ -38,6 +38,13 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD") or None  # 빈 문자열 → None 변환
 
+# Source stall monitor: shadow logging until observed transitions are classified.
+SOURCE_STALL_ALERT_SEND = os.getenv("SOURCE_STALL_ALERT_SEND", "false").lower() == "true"
+SOURCE_STALL_MIN_GAP_S = int(os.getenv("SOURCE_STALL_MIN_GAP_S", "600"))
+SOURCE_STALL_LAG_REQUEST_S = int(os.getenv("SOURCE_STALL_LAG_REQUEST_S", "120"))
+SOURCE_STALL_LAG_QUEUE_S = int(os.getenv("SOURCE_STALL_LAG_QUEUE_S", "300"))
+SOURCE_STALL_LOOKBACK_S = int(os.getenv("SOURCE_STALL_LOOKBACK_S", "2700"))
+
 # Redis-first broadcast (PR3 - latest mirror)
 # REDIS_LATEST_ENABLED: PR3 활성화 토글. default OFF로 코드 배포 후 운영 영향 없이 들어가고,
 # 운영에서 env=true로 canary 활성화. guardrail 위반 시 env=false로 즉시 rollback 가능.

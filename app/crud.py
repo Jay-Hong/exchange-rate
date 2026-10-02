@@ -17,6 +17,7 @@ from sqlalchemy.sql import func, and_
 from app import models
 from app import atomic_write_runtime  # P1b A2-2: write-mode gate (snapshot read, module import for patchability)
 from app import atomic_revision  # P1b A2-4: revision primitives (stdlib-only, dormant)
+from app import source_seen
 from app.atomic_write_control import WriterMode  # P1b A2-2: enforced_action 비교
 
 # 로거 설정
@@ -730,6 +731,7 @@ def insert_bank_rates_into_db(db: Session, current_rates: dict, bank_name: str, 
         if observer is not None:
             observer.writer_guard("blocked", "uninitialized")
         return 0
+    source_seen.record_valid_seen(bank_name, current_rates)
     enforced = atomic_write_runtime.snapshot().enforced_action
     if enforced == WriterMode.ATOMIC:
         if observer is not None:
@@ -957,6 +959,7 @@ def insert_investing_rates_into_db(db: Session, current_rates: dict) -> int:
     if not atomic_write_runtime.is_initialized():
         _record_write_mode_skip("investing", "uninitialized")
         return 0
+    source_seen.record_valid_seen("investing", current_rates)
     enforced = atomic_write_runtime.snapshot().enforced_action
     if enforced == WriterMode.ATOMIC:
         return _insert_investing_rates_atomic(db, current_rates)

@@ -157,6 +157,16 @@ ADMIN_PASSWORD=강력한비밀번호123!   # 보안 강화
 TELEGRAM_ENABLED=false            # Phase 2에서 활성화
 ```
 
+수집 멈춤 점검기(S2)는 다음 환경 변수로 조정한다. 발송은 shadow 전이 검토를 마친 뒤 별도로 켠다.
+
+| 환경 변수 | 기본값 | 용도 |
+| --- | --- | --- |
+| `SOURCE_STALL_ALERT_SEND` | `false` | `false`: shadow 로그, `true`: Telegram 발송과 별도 live 상태 |
+| `SOURCE_STALL_MIN_GAP_S` | `600` | 두 기대 회차 사이 최소 간격(초) |
+| `SOURCE_STALL_LAG_REQUEST_S` | `120` | Request 크롤러 회차 완료 여유(초) |
+| `SOURCE_STALL_LAG_QUEUE_S` | `300` | 큐 크롤러 회차 완료 여유(초) |
+| `SOURCE_STALL_LOOKBACK_S` | `2700` | 기대 회차 탐색 창(초, 45분) |
+
 ### 4.3 ⚠️ 로그 디렉토리 권한 설정 (중요!)
 
 **이 단계를 빠뜨리면 컨테이너 시작 실패합니다!**
