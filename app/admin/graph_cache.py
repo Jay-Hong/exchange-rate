@@ -134,7 +134,9 @@ def build_graph_series(source: str, currency: str, now_kst: Optional[datetime] =
         bucket_start_ts = window_start_ts - (window_start_ts % 600)
 
         # 모든 DB에서 UTC 기준으로 쿼리
-        start_query = window_start_kst.astimezone(timezone.utc)
+        # 쿼리 시작점: bucket_start_ts (carry-in 경계와 동일). now-24h에서 시작하면
+        # (bucket_start_ts, now-24h) 행이 본문·carry-in 양쪽에서 빠져 더 오래된 값이 그려진다.
+        start_query = datetime.fromtimestamp(bucket_start_ts, tz=timezone.utc)
         end_query = now_kst.astimezone(timezone.utc)
 
         # 윈도우 내 데이터 조회

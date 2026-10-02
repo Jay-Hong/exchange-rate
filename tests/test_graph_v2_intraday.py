@@ -6,12 +6,16 @@ conftest.py가 firebase stub + DATABASE_URL=sqlite를 import 전에 설정.
   - 진행 중 10분 버킷 제외 (_trim_in_progress closed-bucket 경계).
   - source_rates change-only 데이터에서 carry-forward (빈 버킷=직전 close).
   - build_catalog: 테더 1d만 11 series, usd 등 다른 탭은 1d 미노출 (장기 5 series와 미혼합).
+  - 1d 본문 조회 시작 = carry-in 경계 (정렬 시작 ~ now-24h 사이 행 누락 회귀).
 """
 import unittest
 from unittest.mock import MagicMock, call, patch
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import text
+
 from app import models
+from app.admin.graph_cache import build_dxy_graph_series, build_graph_series, fetch_last_before
 from app.database import SessionLocal, engine
 from app.graph_v2 import build_catalog
 from app.graph_v2_intraday import (
@@ -336,6 +340,159 @@ class TestBuildTether1dInProgress(unittest.TestCase):
         seed = ip["upbit.usdt-krw"]
         self.assertEqual(seed["high"], seed["low"])   # zero-width(무변동)
         self.assertEqual(seed["close"], 1490.0)       # carry-forward
+
+
+def _utc(*kst_args):
+    """KST 시각 → DB 저장 형식(naive UTC)."""
+    return datetime(*kst_args, tzinfo=KST).astimezone(timezone.utc).replace(tzinfo=None)
+
+
+class TestOneDayBodyStartsAtCarryBoundary(unittest.TestCase):
+    """1d 본문 조회는 carry-in 경계(align(now-24h))에서 시작해야 한다.
+
+    회귀(2026-09-20 신한 1d 오른쪽 끝): 본문은 now-24h부터, carry-in은 align(now-24h) 이하만 읽어
+    (align(now-24h), now-24h) 사이 행이 양쪽에서 빠졌다. 마지막 값이 그 구간에 있는 소스(주말 은행)는
+    다음 10분 경계까지 더 오래된 값으로 그려졌다 — 진행 중 봉 seed가 15초마다 이 상태로 계산됨.
+    값은 격리 fixture용이다(9/19 19:22:32 마지막 행 값만 당시 신한 값과 같게 둠).
+    """
+
+    # 9/19(토) 신한 마지막 행 19:22:32. 그 이전 행은 fixture용 다른 값.
+    _OLDER = {"usd-krw": 1392.50, "jpy-krw": 887.10, "eur-krw": 1598.00}
+    _LAST = {"usd-krw": 1390.00, "jpy-krw": 886.02, "eur-krw": 1596.27}
+    # 9/20 재현 시각: precompute(:12) / 틈 시작 / 틈 중간 / 틈 끝 / 다음 경계
+    _NOWS = [(19, 20, 12), (19, 22, 33), (19, 25, 0), (19, 29, 59), (19, 30, 0)]
+
+    def setUp(self):
+        for tbl in (models.SourceRate, models.BankExchangeRate, models.InvestingExchangeRate, models.MarketIndexRate):
+            db = SessionLocal()
+            db.query(tbl).delete()
+            db.commit()
+            db.close()
+
+    tearDown = setUp
+
+    def _add(self, *rows):
+        db = SessionLocal()
+        db.add_all(rows)
+        db.commit()
+        db.close()
+
+    def _add_shinhan(self, values_by_kst):
+        rows = []
+        for kst_args, values in values_by_kst:
+            for currency, rate in values.items():
+                rows.append(models.BankExchangeRate(bank="shinhan", currency=currency, rate=rate,
+                                                    timestamp=_utc(*kst_args)))
+        self._add(*rows)
+
+    def _seed_weekend_shinhan(self):
+        self._add_shinhan([((2026, 9, 19, 18, 50, 0), self._OLDER),
+                           ((2026, 9, 19, 19, 22, 32), self._LAST)])
+
+    def test_fx_series_keeps_last_row_across_gap(self):
+        """재현 5개 시각 × 3통화 — 모든 버킷 close가 마지막 값, 마지막 버킷 = 진행 중 봉."""
+        self._seed_weekend_shinhan()
+        for hms in self._NOWS:
+            now_kst = datetime(2026, 9, 20, *hms, tzinfo=KST)
+            for currency, expected in self._LAST.items():
+                with self.subTest(now=hms, currency=currency):
+                    series, latest_ts = build_graph_series("shinhan", currency, now_kst)
+                    self.assertTrue(series)
+                    self.assertEqual({p[3] for p in series}, {expected})
+                    self.assertEqual(latest_ts, _bucket_align(int(now_kst.timestamp())))
+
+    def test_in_progress_seed_and_closed_payload_keep_last_row(self):
+        """증상 경로 — 진행 중 봉 seed와 closed payload 마지막 점이 같은 마지막 값."""
+        self._seed_weekend_shinhan()
+        for hms in self._NOWS:
+            now_kst = datetime(2026, 9, 20, *hms, tzinfo=KST)
+            for tab, currency in (("usd", "usd-krw"), ("jpy", "jpy-krw"), ("eur", "eur-krw")):
+                expected = self._LAST[currency]
+                with self.subTest(now=hms, tab=tab):
+                    seed = build_tab_1d_in_progress(tab, now_kst=now_kst)[f"shinhan.{tab}"]
+                    self.assertEqual((seed["high"], seed["low"], seed["close"]),
+                                     (expected, expected, expected))
+                    payload = build_tab_1d_payload(tab, now_kst=now_kst)
+                    shinhan = next(s for s in payload["series"] if s["id"] == f"shinhan.{tab}")
+                    self.assertEqual(shinhan["data"][-1]["rate"], expected)
+
+    def test_row_exactly_at_bucket_start_overlaps_carry_in_harmlessly(self):
+        """정렬 경계와 같은 시각의 행 — carry-in(<=)과 본문(>=)이 함께 잡아도 첫 버킷 OHLC는 본문 값만.
+
+        ORM 저장값('…:00.000000')은 SQLite 문자열 비교에서 carry-in에 안 잡히므로,
+        초 단위 문자열로 직접 넣어 PostgreSQL과 같은 겹침을 만든다.
+        """
+        db = SessionLocal()
+        for kst_args, rate in (((2026, 9, 19, 18, 50, 0), 1392.50),
+                               ((2026, 9, 19, 19, 20, 0), 1389.00),
+                               ((2026, 9, 19, 19, 21, 0), 1391.00)):
+            db.execute(text("INSERT INTO bank_exchange_rates (bank, currency, rate, timestamp) "
+                            "VALUES ('shinhan', 'usd-krw', :rate, :ts)"),
+                       {"rate": rate, "ts": _utc(*kst_args).strftime("%Y-%m-%d %H:%M:%S")})
+        db.commit()
+        db.close()
+
+        bucket_start = int(datetime(2026, 9, 19, 19, 20, tzinfo=KST).timestamp())
+        self.assertEqual(fetch_last_before("shinhan", "usd-krw", bucket_start), [bucket_start, 1389.00])
+        series, _ = build_graph_series("shinhan", "usd-krw", datetime(2026, 9, 20, 19, 25, tzinfo=KST))
+        self.assertEqual(series[0], [bucket_start, 1391.00, 1389.00, 1391.00])
+        self.assertEqual({p[3] for p in series}, {1391.00})
+
+    def test_row_exactly_at_window_start(self):
+        """now-24h와 같은 시각의 행 — 수정 전에도 포함되던 경계, 그대로 유지."""
+        self._seed_weekend_shinhan()
+        series, _ = build_graph_series("shinhan", "usd-krw", datetime(2026, 9, 20, 19, 22, 32, tzinfo=KST))
+        self.assertEqual({p[3] for p in series}, {1390.00})
+
+    def test_first_bucket_high_low_include_rows_before_window_start(self):
+        """첫 버킷은 정렬 시작부터 집계 — now-24h 이전 행도 high/low/close에 반영."""
+        self._add_shinhan([((2026, 9, 19, 18, 50, 0), {"usd-krw": 1392.50}),
+                           ((2026, 9, 19, 19, 21, 0), {"usd-krw": 1391.00}),
+                           ((2026, 9, 19, 19, 22, 32), {"usd-krw": 1390.00})])
+        series, _ = build_graph_series("shinhan", "usd-krw", datetime(2026, 9, 20, 19, 25, tzinfo=KST))
+        bucket_start = int(datetime(2026, 9, 19, 19, 20, tzinfo=KST).timestamp())
+        self.assertEqual(series[0], [bucket_start, 1391.00, 1390.00, 1390.00])
+
+    def test_precompute_second_delay_keeps_row_after_boundary(self):
+        """cron이 경계 몇 초 뒤 돌 때 — 경계 직후 행(19:30:01)이 closed payload에서 빠지지 않음."""
+        self._add_shinhan([((2026, 9, 19, 18, 50, 0), {"usd-krw": 1392.50}),
+                           ((2026, 9, 19, 19, 30, 1), {"usd-krw": 1388.50})])
+        payload = build_tab_1d_payload("usd", now_kst=datetime(2026, 9, 20, 19, 30, 12, tzinfo=KST))
+        shinhan = next(s for s in payload["series"] if s["id"] == "shinhan.usd")
+        self.assertEqual({p["rate"] for p in shinhan["data"]}, {1388.50})
+
+    def test_carry_in_only_and_empty(self):
+        """윈도우 안 행 없음 → 이전 값 carry / 데이터 0 → 빈 series (기존 동작 유지)."""
+        now_kst = datetime(2026, 9, 20, 19, 25, tzinfo=KST)
+        self.assertEqual(build_graph_series("shinhan", "usd-krw", now_kst), ([], 0))
+        self._add_shinhan([((2026, 9, 19, 18, 50, 0), {"usd-krw": 1392.50})])
+        series, _ = build_graph_series("shinhan", "usd-krw", now_kst)
+        self.assertEqual({p[3] for p in series}, {1392.50})
+
+    def test_source_and_market_index_readers_keep_last_row_across_gap(self):
+        """같은 경계 패턴의 거래소/KRX(source_rates)·DXY 선물 reader도 틈 행을 유지."""
+        self._add(
+            models.SourceRate(source="upbit", asset="usdt-krw", rate=1480.0, timestamp=_utc(2026, 9, 19, 18, 50, 0)),
+            models.SourceRate(source="upbit", asset="usdt-krw", rate=1479.0, timestamp=_utc(2026, 9, 19, 19, 22, 32)),
+            models.MarketIndexRate(instrument="dxy_futures", source="investing", rate=99.5,
+                                   timestamp=_utc(2026, 9, 19, 18, 50, 0), granularity="realtime"),
+            models.MarketIndexRate(instrument="dxy_futures", source="investing", rate=99.4,
+                                   timestamp=_utc(2026, 9, 19, 19, 22, 32), granularity="realtime"),
+        )
+        now_kst = datetime(2026, 9, 20, 19, 25, tzinfo=KST)
+        self.assertEqual({p[3] for p in _build_source_series_1d("upbit", "usdt-krw", 2, now_kst)}, {1479.0})
+        self.assertEqual({p[3] for p in _build_market_index_series_1d("dxy_futures", 3, now_kst)}, {99.4})
+
+    def test_dxy_reader_has_no_gap(self):
+        """DXY 현물 reader는 본문/carry-in 모두 now-24h 기준이라 틈이 없음 — 수정 대상 아님을 고정."""
+        self._add(
+            models.MarketIndexRate(instrument="dxy", source="investing", rate=99.5,
+                                   timestamp=_utc(2026, 9, 19, 18, 50, 0), granularity="realtime"),
+            models.MarketIndexRate(instrument="dxy", source="investing", rate=99.4,
+                                   timestamp=_utc(2026, 9, 19, 19, 22, 32), granularity="realtime"),
+        )
+        series, _ = build_dxy_graph_series(datetime(2026, 9, 20, 19, 25, tzinfo=KST))
+        self.assertEqual({p[3] for p in series}, {99.4})
 
 
 if __name__ == "__main__":

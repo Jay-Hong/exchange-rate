@@ -242,6 +242,8 @@ def _build_source_series_1d(source: str, asset: str, decimals: int, now_kst: dat
     """source_rates 24h → 10분 버킷 [ts, max, min, close] (carry-forward). now까지 포함(trim은 호출부)."""
     window_start_kst = now_kst - timedelta(hours=WINDOW_HOURS)
     bucket_start_ts = _bucket_align(int(window_start_kst.timestamp()))
+    # 본문 시작 = carry-in 경계(bucket_start_ts) — now-24h에서 시작하면 사이 구간 행이 양쪽에서 빠진다.
+    start = datetime.fromtimestamp(bucket_start_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     with get_db_context() as db:
         rows = db.execute(
@@ -254,7 +256,7 @@ def _build_source_series_1d(source: str, asset: str, decimals: int, now_kst: dat
                 """
             ),
             {
-                "start": window_start_kst.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "start": start,
                 "end": now_kst.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "source": source,
                 "asset": asset,
@@ -297,7 +299,8 @@ def _build_market_index_series_1d(instrument: str, decimals: int, now_kst: datet
             ),
             {
                 "instrument": instrument,
-                "start": window_start_kst.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                # 본문 시작 = carry-in 경계(cutoff) — now-24h에서 시작하면 사이 구간 행이 양쪽에서 빠진다.
+                "start": cutoff,
                 "end": now_kst.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
             },
         ).fetchall()
